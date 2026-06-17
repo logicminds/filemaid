@@ -1,0 +1,72 @@
+{
+  "ollama_url": "http://localhost:11434",
+  "model": "gemma4:26b-a4b-it-qat",
+  "watch_dirs": [
+    "~/Desktop",
+    "~/Downloads"
+  ],
+  "allowed_dirs": [
+    "~/Desktop",
+    "~/Downloads",
+    "~/Documents/Archive",
+    "~/.filemaid/review"
+  ],
+  "allowed_cleaners": [
+    "docker",
+    "npm",
+    "cargo",
+    "pip",
+    "brew",
+    "xcode"
+  ],
+  "review_dir": "~/.filemaid/review",
+  "log_path": "~/.local/share/filemaid/filemaid.log",
+  "db_path": "~/.local/share/filemaid/filemaid.db",
+  "tags": true,
+  "min_age_hours": 0,
+  "categories": {
+    "Screenshots": "~/Documents/Archive/Screenshots",
+    "Documents": "~/Documents/Archive/Documents",
+    "Receipts": "~/Documents/Archive/Receipts",
+    "Images": "~/Documents/Archive/Images",
+    "Installers": "~/Documents/Archive/Installers",
+    "Code": "~/Documents/Archive/Code",
+    "Archives": "~/Documents/Archive/Archives",
+    "Media": "~/Documents/Archive/Media",
+    "Unknown": "~/.filemaid/review"
+  },
+  "safe_delete_patterns": [],
+  "age_rules": [
+    {
+      "pattern": "~/Downloads/*.dmg",
+      "days": 30,
+      "action": "review"
+    }
+  ],
+  "dev_cleanup": {
+    "docker": {
+      "enabled": true,
+      "mode": "safe"
+    },
+    "npm": {
+      "enabled": true,
+      "mode": "safe"
+    },
+    "cargo": {
+      "enabled": true,
+      "mode": "safe"
+    },
+    "pip": {
+      "enabled": true,
+      "mode": "safe"
+    },
+    "brew": {
+      "enabled": true,
+      "mode": "safe"
+    },
+    "xcode": {
+      "enabled": true,
+      "mode": "safe"
+    }
+  }
+}
