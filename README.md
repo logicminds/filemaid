@@ -19,7 +19,7 @@ A local, AI-powered file organizer for macOS. It watches your `Desktop` and `Dow
 ## Requirements
 
 - macOS 13+ (uses `launchctl`, `xattr`, `mdimport`, `osascript`)
-- Python 3.10+
+- Python 3.13+
   - [Ollama](https://ollama.com/) running locally with a vision-capable model (default: `filemaid-gemma4-26b`)
 
 ## Quick Start
