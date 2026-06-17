@@ -20,7 +20,7 @@ A local, AI-powered file organizer for macOS. It watches your `Desktop` and `Dow
 
 - macOS 13+ (uses `launchctl`, `xattr`, `mdimport`, `osascript`)
 - Python 3.9+
-- [Ollama](https://ollama.com/) running locally with a vision-capable model (default: `gemma4:26b-a4b-it-qat`)
+  - [Ollama](https://ollama.com/) running locally with a vision-capable model (default: `filemaid-gemma4-26b`)
 
 ## Quick Start
 
@@ -30,13 +30,12 @@ cd ~/Projects/filemaid
 ./install.sh
 ```
 
-This creates:
-
 - `~/.local/bin/filemaid` — command-line wrapper
 - `~/.config/filemaid/config.json` — user configuration
 - `~/.local/share/filemaid/` — logs and SQLite database
 - `~/.filemaid/review/` — quarantine folder
 - `~/Library/LaunchAgents/biz.logicminds.filemaid.*.plist` — background agents
+- Custom Ollama models (`filemaid-gemma4-26b`, `filemaid-gemma4-12b`, `filemaid-metadata`) — created automatically if Ollama is installed
 
 ## Usage
 
@@ -91,8 +90,7 @@ Edit `~/.config/filemaid/config.json`:
 ```json
 {
   "ollama_url": "http://localhost:11434",
-  "model": "gemma4:26b-a4b-it-qat",
-  "watch_dirs": ["~/Desktop", "~/Downloads"],
+  "model": "filemaid-gemma4-26b",
   "allowed_dirs": ["~/Desktop", "~/Downloads", "~/Documents/Archive", "~/.filemaid/review"],
   "allowed_cleaners": ["docker", "npm", "cargo", "pip", "brew", "xcode"],
   "categories": {
@@ -121,6 +119,35 @@ Edit `~/.config/filemaid/config.json`:
 | `categories` | Destination folders for each classification. |
 | `safe_delete_patterns` | `fnmatch` patterns for files allowed to be deleted. |
 | `age_rules` | Patterns + age that force review, e.g. old `.dmg` installers. |
+
+## Custom Ollama Models
+
+filemaid ships with three Ollama Modelfiles in the `modelfiles/` directory. They bundle a system prompt, low temperature, and output constraints so the model returns the JSON shape filemaid expects.
+
+| Model | Base | Use case |
+|-------|------|----------|
+| `filemaid-gemma4-26b` | `gemma4:26b-a4b-it-qat` | Default high-quality vision model for images + text |
+| `filemaid-gemma4-12b` | `gemma4:12b-it-qat` | Faster fallback with vision |
+| `filemaid-metadata` | `qwen2.5:7b` | Non-vision/text-only model; classifies from filename and metadata only |
+
+`./install.sh` creates all three models automatically if Ollama is installed. To create or recreate them manually:
+
+```zsh
+cd ~/Projects/filemaid
+ollama create -f modelfiles/Modelfile.filemaid-gemma4-26b filemaid-gemma4-26b
+ollama create -f modelfiles/Modelfile.filemaid-gemma4-12b filemaid-gemma4-12b
+ollama create -f modelfiles/Modelfile.filemaid-metadata filemaid-metadata
+```
+
+Switch models by editing `~/.config/filemaid/config.json`:
+
+```json
+{
+  "model": "filemaid-gemma4-12b"
+}
+```
+
+Use `filemaid-metadata` when running on a machine without a vision-capable model or when you only want filename/text classification.
 
 ## Architecture
 
@@ -176,7 +203,14 @@ Ensure Ollama is running:
 ollama list
 ```
 
-If a model is missing, pull it:
+If a custom model is missing, recreate it from the Modelfile:
+
+```zsh
+cd ~/Projects/filemaid
+ollama create -f modelfiles/Modelfile.filemaid-gemma4-26b filemaid-gemma4-26b
+```
+
+To use the base model directly instead, pull it and update `model` in `~/.config/filemaid/config.json`:
 
 ```zsh
 ollama pull gemma4:26b-a4b-it-qat

@@ -1,5 +1,6 @@
-from __future__ import annotations
 """filemaid CLI entry point."""
+from __future__ import annotations
+
 import argparse
 import fnmatch
 import json
@@ -14,7 +15,7 @@ from filemaid.actions import apply, _compute_hash, _matches_patterns, _within_al
 from filemaid.cleaners import CLEANERS
 from filemaid.config import load_config
 from filemaid.llm import classify_file, Decision
-from filemaid.state import find_by_hash, init_db, record
+from filemaid.state import find_by_hash, init_db
 
 
 def _setup_logging(log_path: str):
@@ -49,10 +50,16 @@ def _check_age_rule(path: Path, config: dict) -> Decision | None:
     return None
 
 
-def process_paths(paths: list[str], config: dict, db):
+def process_paths(
+    paths: list[str],
+    config: dict,
+    db,
+    *,
+    classifier=classify_file,
+    applier=apply,
+):
     logger = logging.getLogger("filemaid")
     allowed_dirs = config.get("allowed_dirs", [])
-    review_dir = Path(config["review_dir"])
 
     for raw in paths:
         src = Path(raw).resolve()
@@ -75,25 +82,31 @@ def process_paths(paths: list[str], config: dict, db):
 
         decision = _check_age_rule(src, config)
         if decision is None:
-            decision = classify_file(src, config)
+            decision = classifier(src, config)
 
-        if is_duplicate and decision.action == "delete" and not _matches_patterns(src, config.get("safe_delete_patterns", [])):
-            decision.action = "review"
-            decision.reason += "; duplicate detected"
+        if is_duplicate:
+            if _matches_patterns(src, config.get("safe_delete_patterns", [])):
+                decision.action = "delete"
+                decision.reason += "; duplicate matches safe delete pattern"
+            elif decision.action != "review":
+                decision.action = "review"
+                decision.reason += "; duplicate detected"
 
-        result = apply(decision, src, config, db, is_duplicate=is_duplicate)
+        result = applier(decision, src, config, db, is_duplicate=is_duplicate)
         logger.info("processed %s -> %s (category=%s action=%s reason=%s)", src, result, decision.category, decision.action, decision.reason)
 
 
-def scan_dir(directory: str, config: dict, db):
+def scan_dir(directory: str, config: dict, db, *, iterdir=None):
     logger = logging.getLogger("filemaid")
     allowed_dirs = config.get("allowed_dirs", [])
     root = Path(directory).expanduser().resolve()
     if allowed_dirs and not _within_allowed(root, allowed_dirs):
         logger.error("scan directory not allowed: %s", root)
         return
+
+    iterdir_fn = iterdir if iterdir is not None else root.iterdir
     try:
-        items = list(root.iterdir())
+        items = list(iterdir_fn())
     except PermissionError as exc:
         logger.error("permission denied scanning %s: %s", root, exc)
         return
@@ -193,22 +206,25 @@ def main():
     _setup_logging(config["log_path"])
     db = init_db(config["db_path"])
 
-    if args.command == "process":
-        process_paths(args.paths, config, db)
-    elif args.command == "scan":
-        if args.dir:
-            scan_dir(args.dir, config, db)
-        else:
-            for d in config.get("watch_dirs", []):
-                scan_dir(d, config, db)
-    elif args.command == "cleanup":
-        run_cleanup(args.dry_run, config)
-    elif args.command == "review":
-        review_queue(config["review_dir"], args.open)
-    elif args.command == "logs":
-        tail_logs(config["log_path"], args.tail)
-    elif args.command == "config":
-        print(json.dumps(config, indent=2, default=str))
+    try:
+        if args.command == "process":
+            process_paths(args.paths, config, db)
+        elif args.command == "scan":
+            if args.dir:
+                scan_dir(args.dir, config, db)
+            else:
+                for d in config.get("watch_dirs", []):
+                    scan_dir(d, config, db)
+        elif args.command == "cleanup":
+            run_cleanup(args.dry_run, config)
+        elif args.command == "review":
+            review_queue(config["review_dir"], args.open)
+        elif args.command == "logs":
+            tail_logs(config["log_path"], args.tail)
+        elif args.command == "config":
+            print(json.dumps(config, indent=2, default=str))
+    finally:
+        db.close()
 
 
 if __name__ == "__main__":

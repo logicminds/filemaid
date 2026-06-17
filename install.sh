@@ -26,6 +26,19 @@ chmod +x "$BIN_DIR/filemaid"
 cp "$PROJECT/biz.logicminds.filemaid.scan.plist" "$LAUNCHD_DIR/"
 cp "$PROJECT/biz.logicminds.filemaid.cleanup.plist" "$LAUNCHD_DIR/"
 
+# Create custom Ollama models if Ollama is installed
+if command -v ollama >/dev/null 2>&1; then
+    echo "Creating filemaid Ollama models..."
+    ollama create -f "$PROJECT/modelfiles/Modelfile.filemaid-gemma4-26b" filemaid-gemma4-26b || true
+    ollama create -f "$PROJECT/modelfiles/Modelfile.filemaid-gemma4-12b" filemaid-gemma4-12b || true
+    ollama create -f "$PROJECT/modelfiles/Modelfile.filemaid-metadata" filemaid-metadata || true
+else
+    echo "Ollama not found; skipping model creation. Install Ollama, then run:"
+    echo "  ollama create -f $PROJECT/modelfiles/Modelfile.filemaid-gemma4-26b filemaid-gemma4-26b"
+    echo "  ollama create -f $PROJECT/modelfiles/Modelfile.filemaid-gemma4-12b filemaid-gemma4-12b"
+    echo "  ollama create -f $PROJECT/modelfiles/Modelfile.filemaid-metadata filemaid-metadata"
+fi
+
 # Boot out any existing agents first to make install idempotent
 for label in "$SCAN" "$CLEANUP"; do
     launchctl print "gui/$(id -u)/$label" >/dev/null 2>&1 && launchctl bootout "gui/$(id -u)/$label" || true

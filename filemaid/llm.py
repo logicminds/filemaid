@@ -1,4 +1,4 @@
-"""Ollama-based file classifier using tool calls for structured output."""
+"""Ollama-based file classifier with injectable transport for tests."""
 import base64
 import json
 import urllib.request
@@ -49,6 +49,25 @@ class Decision:
     reason: str = ""
 
 
+PROMPT_TEMPLATE = """You are a macOS file classifier. Pick exactly one category from: {categories}. Suggest 1-3 concise Finder tags. Decide the action.
+
+Actions:
+- move: the file clearly belongs to a category.
+- delete: only obvious trash, installers, or duplicates.
+- review: ambiguous, sensitive, or cannot classify.
+
+File:
+- path: {path}
+- name: {name}
+- extension: {ext}
+- size: {size} bytes
+- modified: {mtime}
+{extra}
+
+Return a single compact JSON object and nothing else. Leave destination empty.
+{{"category": "...", "tags": ["..."], "action": "...", "destination": "", "reason": "..."}}"""
+
+
 def _read_text_snippet(path: Path, limit: int = 2048) -> str:
     try:
         with open(path, "r", encoding="utf-8", errors="ignore") as f:
@@ -57,9 +76,9 @@ def _read_text_snippet(path: Path, limit: int = 2048) -> str:
         return ""
 
 
-def _build_message(path: Path, config: dict):
+def _build_prompt(path: Path, config: dict) -> tuple[str, list[str]]:
     stat = path.stat()
-    categories = list(config["categories"].keys())
+    categories = ", ".join(config["categories"].keys())
     mtime = datetime.fromtimestamp(stat.st_mtime).isoformat()
     ext = path.suffix.lower()
 
@@ -73,15 +92,32 @@ def _build_message(path: Path, config: dict):
         snippet = _read_text_snippet(path)
         extras.append(f"First 2048 bytes:\n{snippet}")
 
-    content = (
-        f"Classify this file.\n"
-        f"- path: {path}\n"
-        f"- name: {path.name}\n"
-        f"- extension: {ext}\n"
-        f"- size: {stat.st_size} bytes\n"
-        f"- modified: {mtime}\n" + "\n".join(extras)
+    prompt = PROMPT_TEMPLATE.format(
+        categories=categories,
+        path=str(path),
+        name=path.name,
+        ext=ext,
+        size=stat.st_size,
+        mtime=mtime,
+        extra="\n".join(extras),
     )
-    return content, images, categories
+    return prompt, images
+
+
+def _extract_json(raw: str):
+    text = raw.strip()
+    if text.startswith("```"):
+        text = text.split("\n", 1)[1]
+        if text.rstrip().endswith("```"):
+            text = text.rstrip()[:-3].strip()
+    start = text.find("{")
+    end = text.rfind("}")
+    if start == -1 or end == -1 or end <= start:
+        return None
+    try:
+        return json.loads(text[start : end + 1])
+    except Exception:
+        return None
 
 
 def _tool_schema(categories: list[str]) -> dict:
@@ -113,16 +149,44 @@ def _tool_schema(categories: list[str]) -> dict:
     }
 
 
-def classify_file(path: Path, config: dict) -> Decision:
-    content, images, categories = _build_message(path, config)
+def _http_post(url: str, body: dict, timeout: float) -> dict:
+    """Default HTTP transport. Swappable in tests via config['_http_post']."""
+    req = urllib.request.Request(
+        url,
+        data=json.dumps(body).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        return json.loads(resp.read().decode("utf-8"))
+
+
+def _request_generate(config: dict, prompt: str, images: list[str]) -> dict:
+    body = {
+        "model": config["model"],
+        "system": (
+            "You classify files for a macOS file manager. "
+            "Output valid JSON only with keys category, tags, action, destination, reason. "
+            "No markdown, no code fences, no extra text."
+        ),
+        "prompt": prompt,
+        "images": images,
+        "stream": False,
+        "format": "json",
+        "options": {"temperature": 0.2, "num_predict": 512},
+    }
+    transport = config.get("_http_post", _http_post)
+    return transport(f"{config['ollama_url']}/api/generate", body, timeout=120)
+
+
+def _request_chat_tool(config: dict, prompt: str, images: list[str], categories: list[str]) -> dict:
     body = {
         "model": config["model"],
         "messages": [
             {
                 "role": "system",
                 "content": (
-                    "You classify files for a macOS file manager. "
-                    "Use the classify_file tool. "
+                    "You classify files for a macOS file manager. Use the classify_file tool. "
                     "If the category is clear, action should be move. "
                     "Use delete only for obvious trash, installers, or duplicates. "
                     "Use review only when ambiguous, sensitive, or unclassifiable."
@@ -130,7 +194,7 @@ def classify_file(path: Path, config: dict) -> Decision:
             },
             {
                 "role": "user",
-                "content": content,
+                "content": prompt,
                 "images": images,
             },
         ],
@@ -138,74 +202,94 @@ def classify_file(path: Path, config: dict) -> Decision:
         "stream": False,
         "options": {"temperature": 0.2, "num_predict": 512},
     }
+    transport = config.get("_http_post", _http_post)
+    return transport(f"{config['ollama_url']}/api/chat", body, timeout=120)
 
-    data = None
-    for attempt in range(2):
-        try:
-            req = urllib.request.Request(
-                f"{config['ollama_url']}/api/chat",
-                data=json.dumps(body).encode("utf-8"),
-                headers={"Content-Type": "application/json"},
-                method="POST",
-            )
-            with urllib.request.urlopen(req, timeout=120) as resp:
-                data = json.loads(resp.read().decode("utf-8"))
-        except Exception as exc:
-            if attempt == 0:
-                import time
-                time.sleep(0.5)
-                continue
-            return Decision(
-                category="Unknown",
-                action="review",
-                reason=f"ollama error: {exc}",
-            )
-        tool_calls = data.get("message", {}).get("tool_calls", [])
-        if tool_calls:
-            break
-        if attempt == 0:
-            import time
-            time.sleep(0.5)
 
-    if not data:
-        return Decision(
-            category="Unknown",
-            action="review",
-            reason="ollama returned no response after retry",
-        )
-
+def _parse_response(data: dict, categories: set[str]) -> Decision | None:
+    # Try tool-calling output first
     tool_calls = data.get("message", {}).get("tool_calls", [])
-    if not tool_calls:
-        raw = data.get("message", {}).get("content", "")
+    if tool_calls:
+        args = tool_calls[0].get("function", {}).get("arguments", {})
+        if isinstance(args, str):
+            try:
+                args = json.loads(args)
+            except Exception:
+                return None
+        category = args.get("category", "Unknown")
+        if category not in categories:
+            category = "Unknown"
+        action = args.get("action", "review")
+        if action not in ("move", "delete", "review"):
+            action = "review"
         return Decision(
-            category="Unknown",
-            action="review",
-            reason=f"no tool call; raw={raw[:200]}",
+            category=category,
+            tags=args.get("tags", []) or [],
+            action=action,
+            destination="",
+            reason=args.get("reason", ""),
         )
 
-    args = tool_calls[0].get("function", {}).get("arguments", {})
-    if isinstance(args, str):
-        try:
-            args = json.loads(args)
-        except Exception as exc:
-            return Decision(
-                category="Unknown",
-                action="review",
-                reason=f"tool arguments parse error: {exc}",
-            )
+    # Fall back to generate-style JSON
+    raw = data.get("response", "")
+    parsed = _extract_json(raw)
+    if parsed is None:
+        return None
 
-    category = args.get("category", "Unknown")
+    category = parsed.get("category", "Unknown")
     if category not in categories:
         category = "Unknown"
 
-    action = args.get("action", "review")
+    action = parsed.get("action", "review")
     if action not in ("move", "delete", "review"):
         action = "review"
 
     return Decision(
         category=category,
-        tags=args.get("tags", []) or [],
+        tags=parsed.get("tags", []) or [],
         action=action,
-        destination="",
-        reason=args.get("reason", ""),
+        destination=parsed.get("destination", "") or "",
+        reason=parsed.get("reason", ""),
+    )
+
+
+def classify_file(path: Path, config: dict) -> Decision:
+    prompt, images = _build_prompt(path, config)
+    categories = set(config["categories"].keys())
+    endpoint = config.get("ollama_endpoint", "auto")
+
+    last_error = ""
+
+    def _try_generate(use_images: bool):
+        local_prompt, local_images = _build_prompt(path, config)
+        return _request_generate(config, local_prompt, local_images if use_images else [])
+
+    def _try_chat(use_images: bool):
+        local_prompt, local_images = _build_prompt(path, config)
+        return _request_chat_tool(config, local_prompt, local_images if use_images else [], list(categories))
+
+    strategies = []
+    if endpoint in ("auto", "chat"):
+        strategies.append(_try_chat)
+    if endpoint in ("auto", "generate"):
+        strategies.append(_try_generate)
+
+    for strategy in strategies:
+        for use_images in (True, False):
+            if use_images and not images:
+                continue
+            try:
+                data = strategy(use_images)
+            except Exception as exc:
+                last_error = str(exc)
+                continue
+
+            decision = _parse_response(data, categories)
+            if decision is not None:
+                return decision
+
+    return Decision(
+        category="Unknown",
+        action="review",
+        reason=f"ollama error: {last_error}" if last_error else "could not parse model response",
     )

@@ -9,13 +9,13 @@ def can_run() -> bool:
 
 def run(dry_run: bool, config: dict) -> str:
     mode = config.get("dev_cleanup", {}).get("docker", {}).get("mode", "safe")
-    if dry_run:
-        return f"docker: would prune images ({mode} mode)"
-
     if mode == "aggressive":
         cmd = ["docker", "system", "prune", "-af", "--volumes"]
     else:
         cmd = ["docker", "image", "prune", "-f"]
+
+    if dry_run:
+        return f"docker: would run {' '.join(cmd)}"
 
     try:
         result = subprocess.run(

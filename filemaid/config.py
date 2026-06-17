@@ -4,7 +4,7 @@ import os
 
 DEFAULTS = {
     "ollama_url": "http://localhost:11434",
-    "model": "gemma4:26b-a4b-it-qat",
+    "model": "filemaid-gemma4-26b",
     "watch_dirs": ["~/Desktop", "~/Downloads"],
     "allowed_dirs": [
         "~/Desktop",
