@@ -2,6 +2,10 @@
 
 A local, AI-powered file organizer for macOS. It watches your `Desktop` and `Downloads`, classifies files with a local Ollama LLM, moves them into categorized archives, applies Finder tags, and quarantines uncertain items for review. It also cleans up stale development artifacts like Docker images, npm/cargo/pip caches, Homebrew packages, and Xcode DerivedData.
 
+> **⚠️ Experimental:** This project is under active development and may not work reliably in all environments. File movements, classifications, and cleanups can have side effects. Please review the code before running it on important data. Bug reports, issues, and pull requests are welcome to improve behavior.
+
+> **Feedback:** If something breaks or behaves unexpectedly, [file an issue](https://github.com/logicminds/filemaid/issues) or [open a pull request](https://github.com/logicminds/filemaid/pulls).
+
 ## Features
 
 - **Automatic classification** — files are classified by a local LLM using filename, extension, content snippets, and image analysis.
