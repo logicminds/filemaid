@@ -21,7 +21,7 @@ A local, AI-powered file organizer for macOS. It watches your `Desktop` and `Dow
 ## Quick Start
 
 ```zsh
-git clone <repo-url> ~/Projects/filemaid
+git clone https://github.com/logicminds/filemaid.git ~/Projects/filemaid
 cd ~/Projects/filemaid
 ./install.sh
 ```
