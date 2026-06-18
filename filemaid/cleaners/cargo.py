@@ -4,6 +4,7 @@ import shutil
 import subprocess
 from pathlib import Path
 
+from filemaid.cleaners._result import CleanupResult
 from filemaid.cleaners._size import dir_size, humanize
 
 
@@ -15,11 +16,17 @@ def can_run() -> bool:
     return shutil.which("cargo") is not None and shutil.which("cargo-cache") is not None
 
 
-def run(dry_run: bool, config: dict) -> str:
+def run(dry_run: bool, config: dict) -> CleanupResult:
     cache_dir = _cargo_cache_dir()
     before = dir_size(cache_dir) if cache_dir.exists() else 0
     if dry_run:
-        return f"cargo: would autoclean cache (~{humanize(before)} to remove)"
+        return CleanupResult(
+            name="cargo",
+            status="dry-run",
+            saved=before,
+            saved_human=humanize(before),
+            detail="would autoclean cache",
+        )
     try:
         result = subprocess.run(
             ["cargo", "cache", "--autoclean"],
@@ -31,6 +38,16 @@ def run(dry_run: bool, config: dict) -> str:
         after = dir_size(cache_dir) if cache_dir.exists() else 0
         saved = max(0, before - after)
         output = result.stdout.strip()
-        return f"cargo: cache autocleaned, saved {humanize(saved)}\n{output}"
+        return CleanupResult(
+            name="cargo",
+            status="ok",
+            saved=saved,
+            saved_human=humanize(saved),
+            detail=f"cache autocleaned\n{output}" if output else "cache autocleaned",
+        )
     except Exception as exc:
-        return f"cargo: failed - {exc}"
+        return CleanupResult(
+            name="cargo",
+            status="failed",
+            detail=str(exc),
+        )

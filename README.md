@@ -53,8 +53,14 @@ filemaid scan
 # Run cleaners in dry-run mode
 filemaid cleanup --dry-run
 
-# Run cleaners for real
+# Run cleaners for real (table output is default)
 filemaid cleanup
+
+# Get cleaner results as JSON
+filemaid cleanup --format json
+
+# Run cleaners and see estimated space that would be freed
+filemaid cleanup --dry-run --format table
 
 # View the review queue
 filemaid review

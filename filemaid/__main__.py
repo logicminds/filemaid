@@ -13,6 +13,8 @@ from pathlib import Path
 
 from filemaid.actions import apply, _compute_hash, _matches_patterns, _within_allowed
 from filemaid.cleaners import CLEANERS
+from filemaid.cleaners._result import CleanupResult
+from filemaid.cleaners._size import humanize
 from filemaid.config import load_config
 from filemaid.llm import classify_file, Decision
 from filemaid.state import find_by_hash, init_db
@@ -132,26 +134,61 @@ def scan_dir(directory: str, config: dict, db, *, iterdir=None):
         logger.info("no files to scan in %s", root)
 
 
-def run_cleanup(dry_run: bool, config: dict):
+def _format_cleanup_table(results: list[CleanupResult]) -> str:
+    headers = ["Cleaner", "Status", "Space saved", "Details"]
+    rows = []
+    for r in results:
+        saved = r.saved_human or (humanize(r.saved) if r.saved is not None else "-")
+        detail = (r.detail or "").splitlines()[0]
+        rows.append([r.name, r.status, saved, detail])
+    widths = [max(len(str(row[i])) for row in [headers] + rows) for i in range(len(headers))]
+    sep = "+" + "+".join("-" * (w + 2) for w in widths) + "+"
+    lines = [
+        sep,
+        "| " + " | ".join(headers[i].ljust(widths[i]) for i in range(len(headers))) + " |",
+        sep,
+    ]
+    for row in rows:
+        lines.append("| " + " | ".join(str(row[i]).ljust(widths[i]) for i in range(len(headers))) + " |")
+    lines.append(sep)
+    return "\n".join(lines)
+
+
+def _format_cleanup_results(results: list[CleanupResult], fmt: str) -> str:
+    if fmt == "json":
+        return json.dumps([r.to_dict() for r in results], indent=2)
+    return _format_cleanup_table(results)
+
+
+def run_cleanup(dry_run: bool, config: dict, fmt: str = "table"):
     logger = logging.getLogger("filemaid")
     allowed = set(config.get("allowed_cleaners", []))
     dev_cfg = config.get("dev_cleanup", {})
+    results: list[CleanupResult] = []
 
     for cleaner in CLEANERS:
         name = cleaner.__name__.split(".")[-1]
         if name not in allowed:
             logger.info("%s: not in allowed_cleaners whitelist", name)
+            results.append(CleanupResult(name=name, status="not_allowed", detail="not in allowed_cleaners whitelist"))
             continue
         if not cleaner.can_run():
             logger.info("%s: skipped (not installed)", name)
+            results.append(CleanupResult(name=name, status="not_installed", detail="not installed"))
             continue
         enabled = dev_cfg.get(name, {}).get("enabled", True)
         if not enabled:
             logger.info("%s: disabled in config", name)
+            results.append(CleanupResult(name=name, status="disabled", detail="disabled in config"))
             continue
         result = cleaner.run(dry_run, config)
-        logger.info(result)
-        print(result)
+        if not result.name:
+            result.name = name
+        detail_head = result.detail.splitlines()[0] if result.detail else result.status
+        logger.info("%s: %s", result.name, detail_head)
+        results.append(result)
+
+    print(_format_cleanup_results(results, fmt))
 
 
 def review_queue(review_dir: str, open_finder: bool):
@@ -191,6 +228,7 @@ def main():
 
     p_cleanup = sub.add_parser("cleanup", help="run dev artifact cleaners")
     p_cleanup.add_argument("--dry-run", action="store_true", help="do not actually clean")
+    p_cleanup.add_argument("--format", choices=["table", "json"], default="table", help="output format")
 
     p_review = sub.add_parser("review", help="list or open review queue")
     p_review.add_argument("--open", action="store_true", help="open review queue in Finder")
@@ -216,7 +254,7 @@ def main():
                 for d in config.get("watch_dirs", []):
                     scan_dir(d, config, db)
         elif args.command == "cleanup":
-            run_cleanup(args.dry_run, config)
+            run_cleanup(args.dry_run, config, args.format)
         elif args.command == "review":
             review_queue(config["review_dir"], args.open)
         elif args.command == "logs":

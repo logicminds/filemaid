@@ -30,7 +30,7 @@ def test_docker_real_run_success(base_config, monkeypatch):
 
     monkeypatch.setattr(subprocess, "run", lambda cmd, **kw: FakeResult())
     result = docker.run(dry_run=False, config=base_config)
-    assert "docker image prune" in result
+    assert "docker image prune" in result.command
 
 
 def test_docker_real_run_failure(base_config, monkeypatch):
@@ -41,7 +41,7 @@ def test_docker_real_run_failure(base_config, monkeypatch):
 
     monkeypatch.setattr(subprocess, "run", fake_run)
     result = docker.run(dry_run=False, config=base_config)
-    assert "failed" in result
+    assert result.status == "failed"
 
 
 def test_npm_real_run_success(base_config, monkeypatch):
@@ -52,7 +52,7 @@ def test_npm_real_run_success(base_config, monkeypatch):
 
     monkeypatch.setattr(subprocess, "run", lambda cmd, **kw: FakeResult())
     result = npm.run(dry_run=False, config=base_config)
-    assert "cache cleaned" in result
+    assert "cache cleaned" in result.detail
 
 
 def test_npm_real_run_failure(base_config, monkeypatch):
@@ -63,7 +63,7 @@ def test_npm_real_run_failure(base_config, monkeypatch):
 
     monkeypatch.setattr(subprocess, "run", fake_run)
     result = npm.run(dry_run=False, config=base_config)
-    assert "failed" in result
+    assert result.status == "failed"
 
 
 def test_brew_real_run_success(base_config, monkeypatch):
@@ -74,7 +74,7 @@ def test_brew_real_run_success(base_config, monkeypatch):
 
     monkeypatch.setattr(subprocess, "run", lambda cmd, **kw: FakeResult())
     result = brew.run(dry_run=False, config=base_config)
-    assert "cleanup --prune=7" in result
+    assert "cleanup --prune=7" in result.detail
 
 
 def test_pip_real_run_success(base_config, monkeypatch):
@@ -83,7 +83,7 @@ def test_pip_real_run_success(base_config, monkeypatch):
 
     monkeypatch.setattr(subprocess, "run", lambda cmd, **kw: FakeResult())
     result = pip.run(dry_run=False, config=base_config)
-    assert "cache purged" in result
+    assert "cache purged" in result.detail
 
 
 def test_cargo_real_run_success(base_config, monkeypatch):
@@ -97,7 +97,7 @@ def test_cargo_real_run_success(base_config, monkeypatch):
 
     monkeypatch.setattr(subprocess, "run", lambda cmd, **kw: FakeResult())
     result = cargo.run(dry_run=False, config=base_config)
-    assert "autocleaned" in result
+    assert "autocleaned" in result.detail
 
 
 def test_xcode_real_run_safe(base_config, tmp_path, monkeypatch):
@@ -115,4 +115,4 @@ def test_xcode_real_run_safe(base_config, tmp_path, monkeypatch):
     from filemaid.cleaners import xcode as xcode_module
     monkeypatch.setattr(xcode_module, "DERIVED_DATA", derived)
     result = xcode.run(dry_run=False, config=base_config)
-    assert "Removed" in result or "removed" in result
+    assert "Removed" in result.detail or "removed" in result.detail

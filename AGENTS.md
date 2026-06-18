@@ -80,8 +80,9 @@ There is no test/lint runner today (see Testing & QA).
 - **Cleaner plugin contract.** Each cleaner module exposes:
   ```python
   def can_run() -> bool
-  def run(dry_run: bool, config: dict) -> str
+  def run(dry_run: bool, config: dict) -> CleanupResult
   ```
+  where `CleanupResult` lives in `filemaid/cleaners/_result.py` and carries `name`, `status`, `saved` (bytes), `saved_human`, `detail`, and `command`.
 - **Subprocess calls are fire-and-forget.** `subprocess.run(..., check=False)` is used for Finder scripts and external tools; failures are logged but do not abort moves.
 - **macOS-specific integration.** Finder tags are written via `xattr` + `mdimport`; trash uses `osascript` "Finder delete".
 

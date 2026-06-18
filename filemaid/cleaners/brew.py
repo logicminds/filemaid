@@ -3,6 +3,7 @@ import shutil
 import subprocess
 from pathlib import Path
 
+from filemaid.cleaners._result import CleanupResult
 from filemaid.cleaners._size import dir_size, humanize
 
 
@@ -27,14 +28,22 @@ def can_run() -> bool:
     return shutil.which("brew") is not None
 
 
-def run(dry_run: bool, config: dict) -> str:
+def run(dry_run: bool, config: dict) -> CleanupResult:
     mode = config.get("dev_cleanup", {}).get("brew", {}).get("mode", "safe")
     prune = "all" if mode == "aggressive" else "7"
+    command = f"brew cleanup --prune={prune}"
     cache_dir = _brew_cache_dir()
     before = dir_size(cache_dir) if cache_dir.exists() else 0
 
     if dry_run:
-        return f"brew: would cleanup --prune={prune} (~{humanize(before)} cache to consider)"
+        return CleanupResult(
+            name="brew",
+            status="dry-run",
+            saved=before,
+            saved_human=humanize(before),
+            detail=f"would {command}",
+            command=command,
+        )
 
     try:
         result = subprocess.run(
@@ -47,6 +56,18 @@ def run(dry_run: bool, config: dict) -> str:
         after = dir_size(cache_dir) if cache_dir.exists() else 0
         saved = max(0, before - after)
         output = result.stdout.strip()
-        return f"brew: cleanup --prune={prune}, saved {humanize(saved)}\n{output}"
+        return CleanupResult(
+            name="brew",
+            status="ok",
+            saved=saved,
+            saved_human=humanize(saved),
+            detail=f"{command}\n{output}" if output else command,
+            command=command,
+        )
     except Exception as exc:
-        return f"brew: failed - {exc}"
+        return CleanupResult(
+            name="brew",
+            status="failed",
+            detail=str(exc),
+            command=command,
+        )

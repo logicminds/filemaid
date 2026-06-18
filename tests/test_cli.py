@@ -137,8 +137,12 @@ def test_run_cleanup_prints_result(tmp_path, capsys, monkeypatch):
         "dev_cleanup": {"pip": {"enabled": True, "mode": "safe"}},
         "allowed_cleaners": ["pip"],
     }
+    from filemaid.cleaners._result import CleanupResult
     monkeypatch.setattr("filemaid.cleaners.pip.can_run", lambda: True)
-    monkeypatch.setattr("filemaid.cleaners.pip.run", lambda dry_run, cfg: "pip: cleaned")
+    monkeypatch.setattr(
+        "filemaid.cleaners.pip.run",
+        lambda dry_run, cfg: CleanupResult(name="pip", status="ok", detail="pip: cleaned"),
+    )
     run_cleanup(dry_run=False, config=config)
     captured = capsys.readouterr()
     assert "pip: cleaned" in captured.out

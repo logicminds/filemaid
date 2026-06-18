@@ -35,14 +35,14 @@ def test_docker_can_run_when_missing(monkeypatch):
 def test_docker_safe_command(base_config, monkeypatch):
     monkeypatch.setattr(shutil, "which", lambda cmd: "/docker")
     result = docker.run(dry_run=True, config=base_config)
-    assert "docker image prune" in result
+    assert "docker image prune" in result.detail
 
 
 def test_docker_aggressive_command(base_config, monkeypatch):
     monkeypatch.setattr(shutil, "which", lambda cmd: "/docker")
     base_config["dev_cleanup"]["docker"]["mode"] = "aggressive"
     result = docker.run(dry_run=True, config=base_config)
-    assert "docker system prune" in result
+    assert "docker system prune" in result.detail
 
 
 def test_npm_can_run(monkeypatch):
@@ -53,7 +53,7 @@ def test_npm_can_run(monkeypatch):
 def test_npm_run_dry(base_config, monkeypatch):
     monkeypatch.setattr(shutil, "which", lambda cmd: "/npm" if cmd == "npm" else None)
     result = npm.run(dry_run=True, config=base_config)
-    assert "would clean cache" in result
+    assert "would clean cache" in result.detail
 
 
 def test_cargo_can_run_requires_cargo_cache(monkeypatch):
@@ -74,7 +74,7 @@ def test_pip_can_run():
 
 def test_pip_run_dry(base_config, monkeypatch):
     result = pip.run(dry_run=True, config=base_config)
-    assert "would purge cache" in result
+    assert "would purge cache" in result.detail
 
 
 def test_brew_can_run(monkeypatch):
@@ -85,14 +85,14 @@ def test_brew_can_run(monkeypatch):
 def test_brew_safe_prune(base_config, monkeypatch):
     monkeypatch.setattr(shutil, "which", lambda cmd: "/brew" if cmd == "brew" else None)
     result = brew.run(dry_run=True, config=base_config)
-    assert "--prune=7" in result
+    assert "--prune=7" in result.detail
 
 
 def test_brew_aggressive_prune(base_config, monkeypatch):
     monkeypatch.setattr(shutil, "which", lambda cmd: "/brew" if cmd == "brew" else None)
     base_config["dev_cleanup"]["brew"]["mode"] = "aggressive"
     result = brew.run(dry_run=True, config=base_config)
-    assert "--prune=all" in result
+    assert "--prune=all" in result.detail
 
 
 def test_xcode_can_run_when_xcodebuild_present(monkeypatch):
@@ -114,11 +114,11 @@ def test_xcode_run_when_deriveddata_empty(base_config, tmp_path, monkeypatch):
     derived.mkdir(parents=True)
     monkeypatch.setattr(xcode_module, "DERIVED_DATA", derived)
     result = xcode.run(dry_run=True, config=base_config)
-    assert "DerivedData" in result
+    assert "DerivedData" in result.detail
 
 
 def test_xcode_run_when_deriveddata_missing(base_config, tmp_path, monkeypatch):
     derived = tmp_path / "Library" / "Developer" / "Xcode" / "DerivedData"
     monkeypatch.setattr(xcode_module, "DERIVED_DATA", derived)
     result = xcode.run(dry_run=True, config=base_config)
-    assert "does not exist" in result
+    assert "does not exist" in result.detail

@@ -3,6 +3,7 @@ import shutil
 import subprocess
 from pathlib import Path
 
+from filemaid.cleaners._result import CleanupResult
 from filemaid.cleaners._size import dir_size, humanize
 
 
@@ -27,12 +28,18 @@ def can_run() -> bool:
     return shutil.which("npm") is not None
 
 
-def run(dry_run: bool, config: dict) -> str:
+def run(dry_run: bool, config: dict) -> CleanupResult:
     cache_dir = _npm_cache_dir()
     content_dir = cache_dir / "_cacache"
     before = dir_size(content_dir) if content_dir.exists() else 0
     if dry_run:
-        return f"npm: would clean cache (~{humanize(before)} to remove)"
+        return CleanupResult(
+            name="npm",
+            status="dry-run",
+            saved=before,
+            saved_human=humanize(before),
+            detail="would clean cache",
+        )
     try:
         result = subprocess.run(
             ["npm", "cache", "clean", "--force"],
@@ -44,6 +51,16 @@ def run(dry_run: bool, config: dict) -> str:
         after = dir_size(content_dir) if content_dir.exists() else 0
         saved = max(0, before - after)
         output = result.stdout.strip()
-        return f"npm: cache cleaned, saved {humanize(saved)}\n{output}"
+        return CleanupResult(
+            name="npm",
+            status="ok",
+            saved=saved,
+            saved_human=humanize(saved),
+            detail=f"cache cleaned\n{output}" if output else "cache cleaned",
+        )
     except Exception as exc:
-        return f"npm: failed - {exc}"
+        return CleanupResult(
+            name="npm",
+            status="failed",
+            detail=str(exc),
+        )

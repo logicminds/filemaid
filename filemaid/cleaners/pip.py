@@ -2,6 +2,7 @@
 import subprocess
 from pathlib import Path
 
+from filemaid.cleaners._result import CleanupResult
 from filemaid.cleaners._size import dir_size, humanize
 
 
@@ -26,11 +27,17 @@ def can_run() -> bool:
     return True
 
 
-def run(dry_run: bool, config: dict) -> str:
+def run(dry_run: bool, config: dict) -> CleanupResult:
     cache_dir = _pip_cache_dir()
     before = dir_size(cache_dir) if cache_dir.exists() else 0
     if dry_run:
-        return f"pip: would purge cache (~{humanize(before)} to remove)"
+        return CleanupResult(
+            name="pip",
+            status="dry-run",
+            saved=before,
+            saved_human=humanize(before),
+            detail="would purge cache",
+        )
     try:
         result = subprocess.run(
             ["python3", "-m", "pip", "cache", "purge"],
@@ -42,6 +49,16 @@ def run(dry_run: bool, config: dict) -> str:
         after = dir_size(cache_dir) if cache_dir.exists() else 0
         saved = max(0, before - after)
         output = result.stdout.strip()
-        return f"pip: cache purged, saved {humanize(saved)}\n{output}"
+        return CleanupResult(
+            name="pip",
+            status="ok",
+            saved=saved,
+            saved_human=humanize(saved),
+            detail=f"cache purged\n{output}" if output else "cache purged",
+        )
     except Exception as exc:
-        return f"pip: failed - {exc}"
+        return CleanupResult(
+            name="pip",
+            status="failed",
+            detail=str(exc),
+        )
