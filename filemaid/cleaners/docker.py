@@ -25,6 +25,12 @@ def run(dry_run: bool, config: dict) -> str:
             text=True,
             timeout=300,
         )
-        return f"docker: {' '.join(cmd)}\n{result.stdout.strip()}"
+        output = result.stdout.strip()
+        reclaimed = "0 B"
+        for line in output.splitlines():
+            if "Total reclaimed space:" in line:
+                reclaimed = line.split(":", 1)[-1].strip()
+                break
+        return f"docker: {' '.join(cmd)}\nReclaimed: {reclaimed}\n{output}"
     except Exception as exc:
         return f"docker: failed - {exc}"
