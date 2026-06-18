@@ -21,8 +21,10 @@ A local, AI-powered file organizer for macOS. It watches your `Desktop` and `Dow
 ## Requirements
 
 - macOS 13+ (uses `launchctl`, `xattr`, `mdimport`, `osascript`)
-- Python 3.13+
-  - [Ollama](https://ollama.com/) running locally with a vision-capable model (default: `filemaid-gemma4-26b`)
+- Python 3.12+ (recommended: install the latest with `brew install python@3.14`, or use `python@3.13` / `python@3.12`)
+- [Ollama](https://ollama.com/) running locally with a vision-capable model (default: `filemaid-gemma4-26b`)
+
+`install.sh` will detect your Python version and refuse to install if it is older than 3.12.
 
 ## Quick Start
 
@@ -190,10 +192,10 @@ This removes the LaunchAgents and the `~/.local/bin/filemaid` wrapper. It does n
 
 ### Scan agent cannot read Desktop/Downloads
 
-The background scan agent may need Full Disk Access for `/usr/bin/python3`:
+The background scan agent may need Full Disk Access for the Python interpreter selected by `install.sh` (for example, `/opt/homebrew/bin/python3.13`):
 
 1. **System Settings → Privacy & Security → Full Disk Access**
-2. Click **+**, press `Cmd+Shift+G`, enter `/usr/bin/python3`, and add it.
+2. Click **+**, press `Cmd+Shift+G`, and enter the path shown when you ran `./install.sh` (e.g. `/opt/homebrew/bin/python3.14`).
 
 Or skip this entirely by using the Shortcuts folder automations above.
 

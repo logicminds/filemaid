@@ -1,4 +1,5 @@
 """Ollama-based file classifier with injectable transport for tests."""
+from __future__ import annotations
 import base64
 import json
 import urllib.request
@@ -172,8 +173,7 @@ def _request_generate(config: dict, prompt: str, images: list[str]) -> dict:
         "prompt": prompt,
         "images": images,
         "stream": False,
-        "format": "json",
-        "options": {"temperature": 0.2, "num_predict": 512},
+        "options": {"temperature": 0.2, "num_predict": 512, "num_ctx": 8192},
     }
     transport = config.get("_http_post", _http_post)
     return transport(f"{config['ollama_url']}/api/generate", body, timeout=120)
@@ -200,7 +200,7 @@ def _request_chat_tool(config: dict, prompt: str, images: list[str], categories:
         ],
         "tools": [_tool_schema(categories)],
         "stream": False,
-        "options": {"temperature": 0.2, "num_predict": 512},
+        "options": {"temperature": 0.2, "num_predict": 512, "num_ctx": 8192},
     }
     transport = config.get("_http_post", _http_post)
     return transport(f"{config['ollama_url']}/api/chat", body, timeout=120)

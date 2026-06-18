@@ -71,7 +71,7 @@ There is no test/lint runner today (see Testing & QA).
 ## Code Conventions & Common Patterns
 
 - **Python standard library only.** `pyproject.toml` declares `dependencies = []`.
-- **Python 3.9+ syntax.** Use `from __future__ import annotations` where union types like `X | None` appear.
+- **Python 3.12+ syntax.** `pyproject.toml` requires `requires-python = ">=3.12"`; `install.sh` checks for Python 3.12+ before installing.
 - **Config-driven behavior.** Most rules live in `~/.config/filemaid/config.json` and are merged with `DEFAULTS` in `filemaid/config.py`. All paths containing `~` are expanded.
 - **Whitelist safety.** `allowed_dirs` gates both source and destination paths; `allowed_cleaners` gates which cleaners may run.
 - **Fail-safe classification.** Any LLM error, parse failure, timeout, or ambiguous result becomes `category="Unknown"`, `action="review"`.
@@ -105,13 +105,13 @@ There is no test/lint runner today (see Testing & QA).
 
 ## Runtime/Tooling Preferences
 
-- **Runtime:** Python ≥ 3.9, no third-party Python packages required.
+- **Runtime:** Python ≥ 3.12; Python 3.14 is recommended. Install via Homebrew (`brew install python@3.14`, or `python@3.13` / `python@3.12`). No third-party Python packages are required.
 - **Platform:** macOS only (uses `launchctl`, `osascript`, `xattr`, `mdimport`, Finder tags).
 - **External dependency:** A running Ollama server at `http://localhost:11434` with the model configured in `~/.config/filemaid/config.json` (default `gemma4:26b-a4b-it-qat`).
 - **Shell scripts:** `install.sh` and `uninstall.sh` are `zsh` scripts.
 - **LaunchAgent management:** Uses `launchctl bootstrap gui/$(id -u)` / `launchctl bootout gui/$(id -u)`.
 - **Path assumptions:** The wrapper is installed to `~/.local/bin/filemaid`; runtime data goes to `~/.local/share/filemaid/`; config to `~/.config/filemaid/`; review queue to `~/.filemaid/review/`.
-- **TCC note:** The scan LaunchAgent may be denied read access to `~/Desktop`/`~/Downloads` until `/usr/bin/python3` is granted Full Disk Access. The Shortcuts folder-automation path does not need this.
+- **TCC note:** The scan LaunchAgent may be denied read access to `~/Desktop`/`~/Downloads` until the Python interpreter selected by `install.sh` (e.g. `/opt/homebrew/bin/python3.14`) is granted Full Disk Access in System Settings → Privacy & Security → Full Disk Access. The Shortcuts folder-automation path does not need this.
 
 ## Testing & QA
 
