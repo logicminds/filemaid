@@ -59,6 +59,10 @@ func NewClient(transport HTTPTransport) *Client {
 
 // Classify classifies a single file using Ollama.
 func (c *Client) Classify(path string, cfg *config.Config) (Decision, error) {
+	if err := c.checkModel(cfg.OllamaURL, cfg.Model); err != nil {
+		return Decision{}, err
+	}
+
 	prompt, images, err := buildPrompt(path, cfg)
 	if err != nil {
 		d := NewDecision()
@@ -122,6 +126,57 @@ func (c *Client) Classify(path string, cfg *config.Config) (Decision, error) {
 		d.Reason = "could not parse model response"
 	}
 	return d, nil
+}
+
+// checkModel asks Ollama whether the configured model exists locally. It
+// returns a clear error so callers can warn the user and exit instead of
+// retrying unknown models and crashing.
+func (c *Client) checkModel(ollamaURL, model string) error {
+	url := strings.TrimRight(ollamaURL, "/") + "/api/tags"
+	transport := c.transport
+	if transport == nil {
+		transport = http.DefaultTransport
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return err
+	}
+
+	resp, err := transport.RoundTrip(req)
+	if err != nil {
+		return fmt.Errorf("could not reach Ollama at %s: %w", ollamaURL, err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("ollama returned %d listing models: %s", resp.StatusCode, string(body))
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return fmt.Errorf("reading ollama model list: %w", err)
+	}
+
+	var list struct {
+		Models []struct {
+			Name string `json:"name"`
+		} `json:"models"`
+	}
+	if err := json.Unmarshal(body, &list); err != nil {
+		return fmt.Errorf("parsing ollama model list: %w", err)
+	}
+
+	for _, m := range list.Models {
+		if m.Name == model {
+			return nil
+		}
+	}
+	return fmt.Errorf("model %q not found in Ollama; run `filemaid setup` or `ollama pull %s`", model, model)
 }
 
 var imageExts = map[string]bool{

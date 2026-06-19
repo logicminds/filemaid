@@ -422,7 +422,7 @@ func (i *Installer) Install(opts InstallOptions) error {
 		}
 	}
 
-	if err := i.createOllamaModels(configDir); err != nil {
+	if err := i.createOllamaModels(configDir, modelName); err != nil {
 		slog.Debug("create ollama models", "error", err)
 	}
 
@@ -501,25 +501,16 @@ func (i *Installer) copyDefaultConfig(dst string, overrides map[string]any) erro
 	return i.FS.WriteFile(dst, updated, 0o644)
 }
 
-func (i *Installer) createOllamaModels(configDir string) error {
+// createOllamaModels creates only the selected Ollama model. Modelfiles for
+// all variants are still copied to disk so users can switch models by editing
+// config.json and running `ollama create` manually.
+func (i *Installer) createOllamaModels(configDir, selectedModel string) error {
 	if _, err := i.Runner.LookPath("ollama"); err != nil {
 		return err
 	}
-	modelfilesDir := filepath.Join(configDir, "modelfiles")
-	entries, err := i.FS.ReadDir(modelfilesDir)
-	if err != nil {
-		return err
-	}
-	for _, entry := range entries {
-		name := entry.Name()
-		if entry.IsDir() || !strings.HasPrefix(name, "Modelfile.") {
-			continue
-		}
-		modelName := strings.TrimPrefix(name, "Modelfile.")
-		path := filepath.Join(modelfilesDir, name)
-		if err := i.Runner.Run("ollama", "create", modelName, "-f", path); err != nil {
-			slog.Debug("ollama create failed", "model", modelName, "error", err)
-		}
+	path := filepath.Join(configDir, "modelfiles", "Modelfile."+selectedModel)
+	if err := i.Runner.Run("ollama", "create", selectedModel, "-f", path); err != nil {
+		return fmt.Errorf("create model %s: %w", selectedModel, err)
 	}
 	return nil
 }

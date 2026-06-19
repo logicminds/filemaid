@@ -221,9 +221,14 @@ func TestInstallFull(t *testing.T) {
 
 	assertCall(t, runner.calls, "launchctl bootstrap gui/501 "+cleanupPlist)
 	assertCall(t, runner.calls, "launchctl bootstrap gui/501 "+scanPlist)
-	assertCall(t, runner.calls, "ollama create filemaid-gemma4-26b -f "+filepath.Join(dstModelfiles, "Modelfile.filemaid-gemma4-26b"))
 	assertCall(t, runner.calls, "ollama create filemaid-gemma4-12b -f "+filepath.Join(dstModelfiles, "Modelfile.filemaid-gemma4-12b"))
-	assertCall(t, runner.calls, "ollama create filemaid-metadata -f "+filepath.Join(dstModelfiles, "Modelfile.filemaid-metadata"))
+	for _, unwanted := range []string{"filemaid-gemma4-26b", "filemaid-metadata"} {
+		for _, call := range runner.calls {
+			if strings.Contains(call, "ollama create "+unwanted) {
+				t.Errorf("unexpected model creation: %s", call)
+			}
+		}
+	}
 
 	statePath := filepath.Join(home, ".local", "share", "filemaid", "setup.json")
 	data, err := os.ReadFile(statePath)
