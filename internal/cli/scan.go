@@ -29,6 +29,9 @@ var scanCmd = &cobra.Command{
 	Short: "Scan watch directories for stale files",
 	Long:  "Scan the configured watch directories (or a single directory with --dir) for files matching age rules and queue them for processing.",
 	RunE: func(cmd *cobra.Command, args []string) error {
+		if err := classifier.Validate(cfg); err != nil {
+			return fmt.Errorf("model validation failed: %w", err)
+		}
 		if scanDir != "" {
 			return runScanDir(scanDir)
 		}

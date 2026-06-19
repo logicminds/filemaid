@@ -3,6 +3,7 @@ package llm
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"os"
@@ -610,5 +611,106 @@ func TestCheckModelMissingModel(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "not found in Ollama") {
 		t.Errorf("unexpected error message: %v", err)
+	}
+}
+
+func TestValidateSucceedsWhenModelExistsAndGenerates(t *testing.T) {
+	transport := &fakeTransport{
+		handler: func(req *http.Request) (*http.Response, error) {
+			if strings.HasSuffix(req.URL.String(), "/api/tags") {
+				return modelListResponse("filemaid-test"), nil
+			}
+			if strings.HasSuffix(req.URL.String(), "/api/generate") {
+				body := readRequestBody(req)
+				if body["model"] != "filemaid-test" {
+					t.Errorf("expected model filemaid-test, got %v", body["model"])
+				}
+				return jsonResponse(map[string]any{"response": "OK"}), nil
+			}
+			return jsonResponse(map[string]any{}), nil
+		},
+	}
+
+	client := NewClient(transport)
+	cfg := baseConfig(t, t.TempDir())
+	cfg.Model = "filemaid-test"
+	if err := client.Validate(cfg); err != nil {
+		t.Fatalf("Validate failed: %v", err)
+	}
+}
+
+func TestValidateFailsWhenModelMissing(t *testing.T) {
+	transport := &fakeTransport{
+		handler: func(req *http.Request) (*http.Response, error) {
+			if strings.HasSuffix(req.URL.String(), "/api/tags") {
+				return jsonResponse(map[string]any{
+					"models": []any{
+						map[string]any{"name": "other-model"},
+					},
+				}), nil
+			}
+			return jsonResponse(map[string]any{}), nil
+		},
+	}
+
+	client := NewClient(transport)
+	cfg := baseConfig(t, t.TempDir())
+	cfg.Model = "filemaid-test"
+	if err := client.Validate(cfg); err == nil {
+		t.Fatal("expected error when model is missing")
+	}
+}
+
+func TestValidateFailsWhenGenerateErrors(t *testing.T) {
+	transport := &fakeTransport{
+		handler: func(req *http.Request) (*http.Response, error) {
+			if strings.HasSuffix(req.URL.String(), "/api/tags") {
+				return modelListResponse("filemaid-test"), nil
+			}
+			if strings.HasSuffix(req.URL.String(), "/api/generate") {
+				return nil, errors.New("ollama generate failed")
+			}
+			return jsonResponse(map[string]any{}), nil
+		},
+	}
+
+	client := NewClient(transport)
+	cfg := baseConfig(t, t.TempDir())
+	cfg.Model = "filemaid-test"
+	err := client.Validate(cfg)
+	if err == nil {
+		t.Fatal("expected error when generate fails")
+	}
+	if !strings.Contains(err.Error(), "validation failed") {
+		t.Errorf("expected validation failed error, got %v", err)
+	}
+}
+
+func TestValidateUsesConfiguredOllamaURL(t *testing.T) {
+	hosts := []string{}
+	transport := &fakeTransport{
+		handler: func(req *http.Request) (*http.Response, error) {
+			hosts = append(hosts, req.URL.Host)
+			if strings.HasSuffix(req.URL.String(), "/api/tags") {
+				return modelListResponse("filemaid-test"), nil
+			}
+			if strings.HasSuffix(req.URL.String(), "/api/generate") {
+				return jsonResponse(map[string]any{"response": "OK"}), nil
+			}
+			return jsonResponse(map[string]any{}), nil
+		},
+	}
+
+	client := NewClient(transport)
+	cfg := baseConfig(t, t.TempDir())
+	cfg.Model = "filemaid-test"
+	cfg.OllamaURL = "http://custom-ollama:11434"
+	if err := client.Validate(cfg); err != nil {
+		t.Fatalf("Validate failed: %v", err)
+	}
+	for _, host := range hosts {
+		if host != "custom-ollama:11434" {
+			t.Errorf("expected requests to custom-ollama:11434, got %s", host)
+		}
 	}
 }

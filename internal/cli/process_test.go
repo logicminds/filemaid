@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -203,12 +204,21 @@ func TestProcessPathsDuplicateForcesReview(t *testing.T) {
 }
 
 type fakeClassifier struct {
-	decision llm.Decision
-	err      error
+	decision  llm.Decision
+	err       error
+	validate  error
+	calls     []string
+	validated bool
 }
 
 func (f *fakeClassifier) Classify(path string, cfg *config.Config) (llm.Decision, error) {
+	f.calls = append(f.calls, path)
 	return f.decision, f.err
+}
+
+func (f *fakeClassifier) Validate(cfg *config.Config) error {
+	f.validated = true
+	return f.validate
 }
 
 func testConfig(tmpDir string) *config.Config {
@@ -289,5 +299,72 @@ func TestProcessPathsLogsApplyError(t *testing.T) {
 
 	if !bytes.Contains(buf.Bytes(), []byte("apply failed")) {
 		t.Errorf("expected 'apply failed' log, got %q", buf.String())
+	}
+}
+
+func TestProcessCommandFailsValidationBeforeTouchingFiles(t *testing.T) {
+	tmp := t.TempDir()
+	cfg = testConfig(tmp)
+	db = state.NewFake()
+	processFS = actions.NewRecordingFS()
+
+	fake := &fakeClassifier{validate: errors.New("model not ready")}
+	classifier = fake
+
+	src := filepath.Join(tmp, "Desktop", "note.txt")
+	os.MkdirAll(filepath.Dir(src), 0755)
+	os.WriteFile(src, []byte("hello"), 0644)
+
+	err := processCmd.RunE(nil, []string{src})
+	if err == nil {
+		t.Fatal("expected validation error")
+	}
+	if !strings.Contains(err.Error(), "model validation failed") {
+		t.Errorf("expected model validation failed error, got %v", err)
+	}
+	if !fake.validated {
+		t.Error("expected Validate to be called")
+	}
+
+	records := db.(*state.FakeRepo).Records()
+	if len(records) != 0 {
+		t.Errorf("expected no history records, got %d", len(records))
+	}
+
+	// Ensure the file was not moved.
+	dest := filepath.Join(tmp, "Documents", "note.txt")
+	if _, err := os.Stat(dest); !os.IsNotExist(err) {
+		t.Errorf("expected no file at %s", dest)
+	}
+}
+
+func TestProcessCommandSucceedsWhenValidationPasses(t *testing.T) {
+	tmp := t.TempDir()
+	cfg = testConfig(tmp)
+	db = state.NewFake()
+	processFS = actions.NewRecordingFS()
+
+	fake := &fakeClassifier{decision: llm.Decision{
+		Category: "Documents",
+		Tags:     []string{"txt"},
+		Action:   "move",
+		Reason:   "text",
+	}}
+	classifier = fake
+
+	src := filepath.Join(tmp, "Desktop", "note.txt")
+	os.MkdirAll(filepath.Dir(src), 0755)
+	os.WriteFile(src, []byte("hello"), 0644)
+
+	if err := processCmd.RunE(nil, []string{src}); err != nil {
+		t.Fatalf("process failed: %v", err)
+	}
+	if !fake.validated {
+		t.Error("expected Validate to be called")
+	}
+
+	records := db.(*state.FakeRepo).Records()
+	if len(records) != 1 {
+		t.Fatalf("expected 1 history record, got %d", len(records))
 	}
 }

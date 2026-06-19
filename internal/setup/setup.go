@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/logicminds/filemaid/internal/setup/assets"
+	"golang.org/x/sys/unix"
 )
 
 // InstallOptions controls the setup command.
@@ -94,6 +95,49 @@ func totalMemoryGB() (int, error) {
 		return 0, err
 	}
 	return int(b / (1024 * 1024 * 1024)), nil
+}
+
+// modelSpaceRequirements is the approximate disk space needed to download and
+// create a model from its Modelfile. The check only runs when the model is not
+// already present in Ollama.
+var modelSpaceRequirements = map[string]uint64{
+	"filemaid-gemma4-26b": 16 * 1024 * 1024 * 1024,
+	"filemaid-gemma4-12b": 7 * 1024 * 1024 * 1024,
+	"filemaid-metadata":   1 * 1024 * 1024 * 1024,
+}
+
+// defaultFreeSpace returns the bytes available to the caller on the filesystem
+// that contains path. It uses unix.Statfs and is macOS-specific.
+func defaultFreeSpace(path string) (uint64, error) {
+	var st unix.Statfs_t
+	if err := unix.Statfs(path, &st); err != nil {
+		return 0, err
+	}
+	return st.Bavail * uint64(st.Bsize), nil
+}
+
+// ollamaModelsDir returns the directory where Ollama stores downloaded models.
+// It respects the OLLAMA_MODELS environment variable and otherwise defaults to
+// ~/.ollama.
+func ollamaModelsDir(home string) string {
+	if d := os.Getenv("OLLAMA_MODELS"); d != "" {
+		return d
+	}
+	return filepath.Join(home, ".ollama")
+}
+
+// formatBytes renders a byte count in GB or MB with one decimal place.
+func formatBytes(b uint64) string {
+	const gb = 1024 * 1024 * 1024
+	const mb = 1024 * 1024
+	switch {
+	case b >= gb:
+		return fmt.Sprintf("%.1f GB", float64(b)/gb)
+	case b >= mb:
+		return fmt.Sprintf("%.1f MB", float64(b)/mb)
+	default:
+		return fmt.Sprintf("%.0f KB", float64(b)/1024)
+	}
 }
 
 // selectModel picks the model to install.
@@ -296,8 +340,13 @@ type Installer struct {
 	Now            time.Time
 	ExecutablePath string
 	DataDir        string
+	// Sleep is called between polling attempts. Defaults to time.Sleep.
+	Sleep func(time.Duration)
 	// Reader supplies interactive input. Defaults to os.Stdin.
 	Reader *bufio.Reader
+	// FreeSpace returns the bytes available on the filesystem containing path.
+	// Defaults to defaultFreeSpace. Tests may override it.
+	FreeSpace func(path string) (uint64, error)
 }
 
 const (
@@ -313,7 +362,6 @@ func Install(opts InstallOptions) error {
 	}
 	return inst.Install(opts)
 }
-
 func newDefaultInstaller() (*Installer, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -332,7 +380,9 @@ func newDefaultInstaller() (*Installer, error) {
 		Now:            time.Now(),
 		ExecutablePath: exe,
 		DataDir:        filepath.Join(home, ".local", "share", "filemaid"),
+		Sleep:          time.Sleep,
 		Reader:         bufio.NewReader(os.Stdin),
+		FreeSpace:      defaultFreeSpace,
 	}, nil
 }
 
@@ -343,6 +393,44 @@ func (i *Installer) Install(opts InstallOptions) error {
 		return fmt.Errorf("check requirements: %w", err)
 	}
 
+	candidate := opts.ModelName
+	if candidate == "" {
+		candidate = info.Recommended
+	} else {
+		valid := false
+		for _, c := range info.Choices {
+			if c == candidate {
+				valid = true
+				break
+			}
+		}
+		if !valid {
+			candidate = info.Recommended
+		}
+	}
+
+	var exists bool
+	var free, required uint64
+	var diskErr error
+	if info.OllamaRunning {
+		exists, err = i.modelExists(candidate)
+		if err != nil {
+			return fmt.Errorf("list ollama models: %w", err)
+		}
+		if !exists {
+			free, required, diskErr = i.ollamaFreeSpace(candidate)
+			if diskErr != nil {
+				return diskErr
+			}
+		}
+	} else {
+		required = modelSpaceRequirements[candidate]
+		if required == 0 {
+			required = modelSpaceRequirements["filemaid-gemma4-26b"]
+		}
+	}
+
+	ok := printRequirementsCheck(info, candidate, exists, free, required)
 	if !info.OllamaInstalled {
 		printOllamaInstructions()
 		return fmt.Errorf("ollama not found")
@@ -354,6 +442,9 @@ func (i *Installer) Install(opts InstallOptions) error {
 		fmt.Fprintln(os.Stderr, "  ollama serve")
 		fmt.Fprintln(os.Stderr, "Then run filemaid setup again.")
 		return fmt.Errorf("ollama not running")
+	}
+	if !ok {
+		return fmt.Errorf("not enough disk space to download model %s", candidate)
 	}
 
 	binDir := opts.BinDir
@@ -465,7 +556,7 @@ func (i *Installer) Install(opts InstallOptions) error {
 	}
 
 	if err := i.createOllamaModels(configDir, modelName); err != nil {
-		slog.Debug("create ollama models", "error", err)
+		return fmt.Errorf("create ollama models: %w", err)
 	}
 
 	// Build model hash state after modelfiles have been written.
@@ -547,10 +638,94 @@ func (i *Installer) copyDefaultConfig(dst string, overrides map[string]any) erro
 	return i.FS.WriteFile(dst, updated, 0o644)
 }
 
+// ollamaFreeSpace returns the free bytes available for Ollama models and the
+// approximate bytes required to download and create the named model.
+func (i *Installer) ollamaFreeSpace(model string) (uint64, uint64, error) {
+	required, ok := modelSpaceRequirements[model]
+	if !ok {
+		required = modelSpaceRequirements["filemaid-gemma4-26b"]
+	}
+
+	dir := ollamaModelsDir(i.Home)
+	checkPath := dir
+	if _, err := os.Stat(checkPath); err != nil {
+		checkPath = filepath.Dir(checkPath)
+		if _, err := os.Stat(checkPath); err != nil {
+			checkPath = "/"
+		}
+	}
+
+	freeSpace := i.FreeSpace
+	if freeSpace == nil {
+		freeSpace = defaultFreeSpace
+	}
+	free, err := freeSpace(checkPath)
+	if err != nil {
+		return 0, required, fmt.Errorf("check disk space: %w", err)
+	}
+	return free, required, nil
+}
+
+// checkDiskSpace returns an error if there is not enough free disk space to
+// download and create the selected model. It should only be called when the
+// model is missing from Ollama; existing models do not need extra space.
+func (i *Installer) checkDiskSpace(model string) error {
+	free, required, err := i.ollamaFreeSpace(model)
+	if err != nil {
+		return err
+	}
+	if free < required {
+		return fmt.Errorf("not enough disk space to download model %s: %s available, %s required", model, formatBytes(free), formatBytes(required))
+	}
+	return nil
+}
+
+// printRequirementsCheck prints a checklist of host requirements with emoji
+// checkmarks or crosses. It returns true when every hard requirement passes.
+func printRequirementsCheck(info *systemInfo, model string, modelExists bool, free, required uint64) bool {
+	ok := true
+	fmt.Fprintln(os.Stderr)
+	fmt.Fprintln(os.Stderr, "Requirements check:")
+
+	mark := func(pass bool) string {
+		if pass {
+			return "✅"
+		}
+		return "❌"
+	}
+
+	fmt.Fprintf(os.Stderr, "  %s Ollama installed\n", mark(info.OllamaInstalled))
+	fmt.Fprintf(os.Stderr, "  %s Ollama running\n", mark(info.OllamaRunning))
+	fmt.Fprintf(os.Stderr, "  %s Memory: %d GB\n", mark(info.TotalMemoryGB > 0), info.TotalMemoryGB)
+	fmt.Fprintf(os.Stderr, "  %s Selected model: %s", mark(true), model)
+	if modelExists {
+		fmt.Fprintln(os.Stderr, " (already downloaded)")
+	} else {
+		fmt.Fprintln(os.Stderr)
+	}
+
+	if modelExists {
+		fmt.Fprintf(os.Stderr, "  %s Disk space for new model: not needed (model already present)\n", mark(true))
+	} else {
+		hasSpace := free >= required
+		if !hasSpace {
+			ok = false
+		}
+		fmt.Fprintf(os.Stderr, "  %s Disk space for %s: %s available, %s required\n", mark(hasSpace), model, formatBytes(free), formatBytes(required))
+	}
+
+	fmt.Fprintln(os.Stderr)
+	return ok
+}
+
 // createOllamaModels creates or recreates the selected Ollama model only when
 // the embedded Modelfile has changed since the last setup. Modelfiles for all
 // variants are copied to disk so users can switch models by editing config.json
 // and running `ollama create` manually.
+// createOllamaModels creates or recreates the selected Ollama model when it is
+// missing from `ollama list` or when the embedded Modelfile has changed since
+// the last setup. Modelfiles for all variants are copied to disk so users can
+// switch models by editing config.json and running `ollama create` manually.
 func (i *Installer) createOllamaModels(configDir, selectedModel string) error {
 	if _, err := i.Runner.LookPath("ollama"); err != nil {
 		return err
@@ -560,8 +735,18 @@ func (i *Installer) createOllamaModels(configDir, selectedModel string) error {
 		return fmt.Errorf("read embedded modelfile %s: %w", selectedModel, err)
 	}
 	hash := hashBytes(data)
+	exists, err := i.modelExists(selectedModel)
+	if err != nil {
+		return fmt.Errorf("list ollama models: %w", err)
+	}
 
-	if previous, ok := i.readStoredModelHash(selectedModel); ok && previous == hash {
+	if !exists {
+		if err := i.checkDiskSpace(selectedModel); err != nil {
+			return err
+		}
+	}
+
+	if previous, ok := i.readStoredModelHash(selectedModel); ok && previous == hash && exists {
 		slog.Debug("ollama model up to date", "model", selectedModel, "hash", hash)
 		return nil
 	}
@@ -569,7 +754,11 @@ func (i *Installer) createOllamaModels(configDir, selectedModel string) error {
 	path := filepath.Join(configDir, "modelfiles", "Modelfile."+selectedModel)
 
 	fmt.Fprintln(os.Stderr)
-	fmt.Fprintf(os.Stderr, "Creating Ollama model %q. This may download several gigabytes and take a few minutes.\n", selectedModel)
+	if exists {
+		fmt.Fprintf(os.Stderr, "Modelfile for %q changed; recreating the Ollama model.\n", selectedModel)
+	} else {
+		fmt.Fprintf(os.Stderr, "Creating Ollama model %q. This may download several gigabytes and take a few minutes.\n", selectedModel)
+	}
 	fmt.Fprintln(os.Stderr, "Do not interrupt the download.")
 	fmt.Fprintln(os.Stderr)
 
@@ -592,17 +781,46 @@ func (i *Installer) waitForModel(model string) error {
 	const delay = 5 * time.Second
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
 		output, err := i.runOutput("ollama", "list")
-		if err == nil && strings.Contains(output, model) {
+		if err == nil && modelExistsInOutput(output, model) {
 			return nil
 		}
-		time.Sleep(delay)
+		if i.Sleep != nil {
+			i.Sleep(delay)
+		} else {
+			time.Sleep(delay)
+		}
 	}
 	return fmt.Errorf("timed out waiting for %q", model)
 }
+func (i *Installer) modelExists(model string) (bool, error) {
+	output, err := i.runOutput("ollama", "list")
+	if err != nil {
+		return false, err
+	}
+	return modelExistsInOutput(output, model), nil
+}
 
-// runOutput runs a command and returns its stdout as a string.
+func modelExistsInOutput(output, model string) bool {
+	for _, line := range strings.Split(output, "\n") {
+		if lineHasModel(line, model) {
+			return true
+		}
+	}
+	return false
+}
+
+func lineHasModel(line, model string) bool {
+	fields := strings.Fields(line)
+	if len(fields) == 0 {
+		return false
+	}
+	name := fields[0]
+	return name == model || strings.HasPrefix(name, model+":")
+}
+
+// runOutput runs a command quietly and returns its stdout as a string.
 func (i *Installer) runOutput(name string, arg ...string) (string, error) {
-	if r, ok := i.Runner.(outputRunner); ok {
+	if r, ok := i.QuietRunner.(outputRunner); ok {
 		return r.RunOutput(name, arg...)
 	}
 	cmd := exec.Command(name, arg...)
