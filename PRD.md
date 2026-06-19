@@ -270,7 +270,8 @@ Both agents redirect stdout/stderr to `~/.local/share/filemaid/{scan,cleanup}.lo
 - Detect a suitable Python interpreter for the existing version (≥ 3.12). For the Go rewrite, the install script should instead place the compiled Go binary at `~/.local/bin/filemaid`.
 - Create directories: `~/.config/filemaid`, `~/.local/share/filemaid`, `~/.filemaid/review`, `~/.local/bin`, `~/Library/LaunchAgents`.
 - Recommend an Ollama model by installed RAM: ≥ 24 GB → `filemaid-gemma4-26b`, ≥ 16 GB → `filemaid-gemma4-12b`, else `filemaid-metadata`.
-- Copy `config.json` to `~/.config/filemaid/config.json` if it does not exist, updating the `model` field to the selected model.
+- Run an interactive configuration interview to confirm or override watch directories, archive location, Finder tags, dev cleaners, review-queue retention, and safe-delete patterns. The `--no-interactive` flag skips this interview.
+- Copy `config.json` to `~/.config/filemaid/config.json` if it does not exist, updating it with the selected model and any interview answers.
 - Generate `biz.logicminds.filemaid.cleanup.plist` and optionally `biz.logicminds.filemaid.scan.plist` dynamically and write them to `~/Library/LaunchAgents`.
 - Create custom Ollama models from `modelfiles/` if Ollama is installed.
 - Bootstrap agents with `launchctl bootstrap gui/$(id -u)`.
@@ -284,7 +285,21 @@ Both agents redirect stdout/stderr to `~/.local/share/filemaid/{scan,cleanup}.lo
 
 ## 5. Configuration
 
-### 5.1 Resolution
+### 5.1 Setup Interview
+
+`filemaid setup` runs an interactive interview that asks the user to confirm or override:
+
+- Ollama model (RAM-based recommendation).
+- Watch directories (`watch_dirs`).
+- Archive base directory (drives `categories`).
+- Whether to apply Finder tags (`tags`).
+- Which development cache cleaners to enable (`dev_cleanup`).
+- Review-queue retention in days (`review_cleanup.max_age_days`).
+- Safe-delete glob patterns (`safe_delete_patterns`).
+
+Pressing `Enter` at any prompt accepts the default. The `--no-interactive` flag skips the interview and writes the shipped defaults, substituting only the selected model.
+
+### 5.2 Resolution
 
 1. Start with built-in defaults.
 2. Load `~/.config/filemaid/config.json` if it exists.
@@ -292,7 +307,7 @@ Both agents redirect stdout/stderr to `~/.local/share/filemaid/{scan,cleanup}.lo
 4. For top-level keys whose default is a dict, merge the user's dict on top of defaults (shallow merge per key).
 5. Ensure `categories["Unknown"]` exists and points to `review_dir`.
 
-### 5.2 Schema
+### 5.3 Schema
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
@@ -312,7 +327,7 @@ Both agents redirect stdout/stderr to `~/.local/share/filemaid/{scan,cleanup}.lo
 | `dev_cleanup` | map<string,object> | Per-cleaner `{enabled:true, mode:"safe"}` | Cleaner settings. |
 | `review_cleanup` | object | `{enabled:true, mode:"safe", max_age_days:30}` | Review-queue cleanup settings. |
 
-### 5.3 Custom Ollama Models
+### 5.4 Custom Ollama Models
 
 Three Modelfiles are shipped:
 

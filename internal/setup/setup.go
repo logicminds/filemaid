@@ -30,6 +30,9 @@ type InstallOptions struct {
 	// ModelName, if non-empty, selects the model to write into config.json.
 	// If empty, setup detects RAM and prompts the user for confirmation.
 	ModelName string
+	// Interactive enables the configuration interview. When false, the
+	// embedded default config is used with only ModelName substituted.
+	Interactive bool
 }
 
 // systemInfo collects host facts needed for installation and prompts.
@@ -94,6 +97,8 @@ func totalMemoryGB() (int, error) {
 
 // selectModel picks the model to install.
 // If opts.ModelName is set, it is validated and used.
+// If opts.Interactive is false and no model is set, the RAM-based
+// recommendation is used without prompting.
 // Otherwise the user is prompted with the RAM-based recommendation.
 func selectModel(opts InstallOptions, info *systemInfo, reader *bufio.Reader) (string, error) {
 	if opts.ModelName != "" {
@@ -103,6 +108,9 @@ func selectModel(opts InstallOptions, info *systemInfo, reader *bufio.Reader) (s
 			}
 		}
 		return "", fmt.Errorf("unknown model %q; choose one of: %s", opts.ModelName, strings.Join(info.Choices, ", "))
+	}
+	if !opts.Interactive {
+		return info.Recommended, nil
 	}
 
 	fmt.Fprintf(os.Stderr, "\nDetected %d GB of memory.\n", info.TotalMemoryGB)
@@ -248,6 +256,8 @@ type Installer struct {
 	UID            int
 	Now            time.Time
 	ExecutablePath string
+	// Reader supplies interactive input. Defaults to os.Stdin.
+	Reader *bufio.Reader
 }
 
 const (
@@ -280,6 +290,7 @@ func newDefaultInstaller() (*Installer, error) {
 		UID:            os.Getuid(),
 		Now:            time.Now(),
 		ExecutablePath: exe,
+		Reader:         bufio.NewReader(os.Stdin),
 	}, nil
 }
 
@@ -324,7 +335,11 @@ func (i *Installer) Install(opts InstallOptions) error {
 		}
 	}
 
-	modelName, err := selectModel(opts, info, bufio.NewReader(os.Stdin))
+	reader := i.Reader
+	if reader == nil {
+		reader = bufio.NewReader(os.Stdin)
+	}
+	modelName, err := selectModel(opts, info, reader)
 	if err != nil {
 		return err
 	}
@@ -346,7 +361,14 @@ func (i *Installer) Install(opts InstallOptions) error {
 	}
 
 	dstConfig := filepath.Join(configDir, "config.json")
-	if err := i.copyDefaultConfig(dstConfig, modelName); err != nil {
+	overrides := map[string]any{"model": modelName}
+	if opts.Interactive {
+		overrides, err = interviewConfig(reader, overrides)
+		if err != nil {
+			return fmt.Errorf("config interview: %w", err)
+		}
+	}
+	if err := i.copyDefaultConfig(dstConfig, overrides); err != nil {
 		return fmt.Errorf("copy config: %w", err)
 	}
 
@@ -456,7 +478,7 @@ func (i *Installer) copyModelfiles(dstDir string) error {
 	return nil
 }
 
-func (i *Installer) copyDefaultConfig(dst, modelName string) error {
+func (i *Installer) copyDefaultConfig(dst string, overrides map[string]any) error {
 	if i.FS.Exists(dst) {
 		return nil
 	}
@@ -468,7 +490,9 @@ func (i *Installer) copyDefaultConfig(dst, modelName string) error {
 	if err := json.Unmarshal(data, &cfg); err != nil {
 		return fmt.Errorf("parse embedded config: %w", err)
 	}
-	cfg["model"] = modelName
+	for k, v := range overrides {
+		cfg[k] = v
+	}
 	updated, err := json.MarshalIndent(cfg, "", "  ")
 	if err != nil {
 		return fmt.Errorf("marshal config: %w", err)
@@ -576,4 +600,220 @@ func RenderCleanupPlist(binDir, dataDir string) (string, error) {
 		return "", err
 	}
 	return buf.String(), nil
+}
+
+func interviewConfig(reader *bufio.Reader, base map[string]any) (map[string]any, error) {
+	fmt.Fprintln(os.Stderr, "Let's configure filemaid. Press Enter to accept the defaults.")
+	fmt.Fprintln(os.Stderr)
+
+	useDefaults, err := promptYesNo(reader, "Use recommended defaults for everything", true)
+	if err != nil {
+		return nil, err
+	}
+	if useDefaults {
+		fmt.Fprintln(os.Stderr)
+		return base, nil
+	}
+
+	out := make(map[string]any, len(base))
+	for k, v := range base {
+		out[k] = v
+	}
+
+	watchDefault := []string{"~/Desktop", "~/Downloads"}
+	watchDirs, err := promptList(reader, "Watch directories (comma-separated)", watchDefault)
+	if err != nil {
+		return nil, err
+	}
+	out["watch_dirs"] = watchDirs
+
+	archiveBase, err := promptString(reader, "Archive base directory", "~/Documents/Archive")
+	if err != nil {
+		return nil, err
+	}
+	out["categories"] = buildCategories(archiveBase)
+
+	allowed := append([]string{}, watchDirs...)
+	allowed = append(allowed, archiveBase, "~/.filemaid/review")
+	out["allowed_dirs"] = dedupeStrings(allowed)
+
+	tags, err := promptYesNo(reader, "Apply Finder tags to organized files", true)
+	if err != nil {
+		return nil, err
+	}
+	out["tags"] = tags
+
+	enableCleaners, err := promptYesNo(reader, "Enable development cache cleanup", true)
+	if err != nil {
+		return nil, err
+	}
+	out["dev_cleanup"] = promptDevCleanup(reader, enableCleaners)
+
+	reviewDays, err := promptInt(reader, "Clean up review queue items older than (days, 0 to disable)", 30)
+	if err != nil {
+		return nil, err
+	}
+	out["review_cleanup"] = map[string]any{
+		"enabled":      reviewDays > 0,
+		"mode":         "safe",
+		"max_age_days": reviewDays,
+	}
+
+	if reviewDays <= 0 {
+		allowedCleaners := []string{}
+		if ac, ok := out["allowed_cleaners"].([]string); ok {
+			for _, c := range ac {
+				if c != "review" {
+					allowedCleaners = append(allowedCleaners, c)
+				}
+			}
+			out["allowed_cleaners"] = allowedCleaners
+		}
+	}
+
+	patterns, err := promptString(reader, "Safe delete patterns (comma-separated globs, e.g. ~/Downloads/*.dmg)", "")
+	if err != nil {
+		return nil, err
+	}
+	if patterns != "" {
+		out["safe_delete_patterns"] = splitTrim(patterns)
+	}
+
+	fmt.Fprintln(os.Stderr)
+	return out, nil
+}
+
+func buildCategories(archiveBase string) map[string]string {
+	return map[string]string{
+		"Screenshots": archiveBase + "/Screenshots",
+		"Documents":   archiveBase + "/Documents",
+		"Receipts":    archiveBase + "/Receipts",
+		"Images":      archiveBase + "/Images",
+		"Installers":  archiveBase + "/Installers",
+		"Code":        archiveBase + "/Code",
+		"Archives":    archiveBase + "/Archives",
+		"Media":       archiveBase + "/Media",
+		"Unknown":     "~/.filemaid/review",
+	}
+}
+
+func promptDevCleanup(reader *bufio.Reader, enableAll bool) map[string]any {
+	cleaners := []string{"docker", "npm", "cargo", "pip", "brew", "xcode"}
+	out := make(map[string]any, len(cleaners))
+	for _, name := range cleaners {
+		enabled := enableAll
+		if enableAll {
+			var err error
+			enabled, err = promptYesNo(reader, fmt.Sprintf("  Enable %s cleaner", name), true)
+			if err != nil {
+				enabled = true
+			}
+		}
+		out[name] = map[string]any{"enabled": enabled, "mode": "safe"}
+	}
+	return out
+}
+
+func promptString(reader *bufio.Reader, question, def string) (string, error) {
+	if def == "" {
+		fmt.Fprintf(os.Stderr, "%s: ", question)
+	} else {
+		fmt.Fprintf(os.Stderr, "%s [%s]: ", question, def)
+	}
+	line, err := reader.ReadString('\n')
+	if err != nil {
+		return "", err
+	}
+	line = strings.TrimSpace(line)
+	if line == "" {
+		return def, nil
+	}
+	return line, nil
+}
+
+func promptInt(reader *bufio.Reader, question string, def int) (int, error) {
+	fmt.Fprintf(os.Stderr, "%s [%d]: ", question, def)
+	line, err := reader.ReadString('\n')
+	if err != nil {
+		return 0, err
+	}
+	line = strings.TrimSpace(line)
+	if line == "" {
+		return def, nil
+	}
+	n, err := strconv.Atoi(line)
+	if err != nil {
+		return 0, fmt.Errorf("expected a number, got %q", line)
+	}
+	return n, nil
+}
+
+func promptYesNo(reader *bufio.Reader, question string, def bool) (bool, error) {
+	marker := "y/N"
+	if def {
+		marker = "Y/n"
+	}
+	fmt.Fprintf(os.Stderr, "%s [%s]: ", question, marker)
+	line, err := reader.ReadString('\n')
+	if err != nil {
+		return false, err
+	}
+	line = strings.ToLower(strings.TrimSpace(line))
+	if line == "" {
+		return def, nil
+	}
+	switch line {
+	case "y", "yes":
+		return true, nil
+	case "n", "no":
+		return false, nil
+	default:
+		return false, fmt.Errorf("expected y/n, got %q", line)
+	}
+}
+
+func promptList(reader *bufio.Reader, question string, def []string) ([]string, error) {
+	s := promptStringWithDefault(question, strings.Join(def, ","))
+	fmt.Fprint(os.Stderr, s)
+	line, err := reader.ReadString('\n')
+	if err != nil {
+		return nil, err
+	}
+	line = strings.TrimSpace(line)
+	if line == "" {
+		return def, nil
+	}
+	return splitTrim(line), nil
+}
+
+func promptStringWithDefault(question, def string) string {
+	if def == "" {
+		return fmt.Sprintf("%s: ", question)
+	}
+	return fmt.Sprintf("%s [%s]: ", question, def)
+}
+
+func splitTrim(s string) []string {
+	parts := strings.Split(s, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+func dedupeStrings(ss []string) []string {
+	seen := make(map[string]struct{}, len(ss))
+	out := make([]string, 0, len(ss))
+	for _, s := range ss {
+		if _, ok := seen[s]; ok {
+			continue
+		}
+		seen[s] = struct{}{}
+		out = append(out, s)
+	}
+	return out
 }

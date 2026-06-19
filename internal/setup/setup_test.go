@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -107,7 +108,7 @@ func TestSelectModel(t *testing.T) {
 
 	// Empty input accepts the recommended model.
 	reader := bufio.NewReader(strings.NewReader("\n"))
-	got, err := selectModel(InstallOptions{}, info, reader)
+	got, err := selectModel(InstallOptions{Interactive: true}, info, reader)
 	if err != nil {
 		t.Fatalf("selectModel: %v", err)
 	}
@@ -117,12 +118,21 @@ func TestSelectModel(t *testing.T) {
 
 	// Explicit choice.
 	reader = bufio.NewReader(strings.NewReader("2\n"))
-	got, err = selectModel(InstallOptions{}, info, reader)
+	got, err = selectModel(InstallOptions{Interactive: true}, info, reader)
 	if err != nil {
 		t.Fatalf("selectModel: %v", err)
 	}
 	if got != "filemaid-gemma4-12b" {
 		t.Errorf("got %q, want 12b", got)
+	}
+
+	// Non-interactive auto-select.
+	got, err = selectModel(InstallOptions{}, info, nil)
+	if err != nil {
+		t.Fatalf("selectModel: %v", err)
+	}
+	if got != "filemaid-gemma4-26b" {
+		t.Errorf("got %q, want 26b", got)
 	}
 
 	// --model flag.
@@ -292,6 +302,68 @@ func TestInstallPreservesExistingConfig(t *testing.T) {
 		t.Errorf("existing config was overwritten: %s", data)
 	}
 }
+func TestInstallInteractiveDefaults(t *testing.T) {
+	dir := t.TempDir()
+	exe := prepareExecutable(t, dir)
+	inst, runner, home := newTestInstaller(t, exe)
+	runner.lookPath["ollama"] = "/usr/local/bin/ollama"
+	inst.Reader = bufio.NewReader(strings.NewReader("\n"))
+
+	if err := inst.Install(InstallOptions{ModelName: "filemaid-gemma4-12b", Interactive: true}); err != nil {
+		t.Fatalf("install failed: %v", err)
+	}
+
+	configData, err := os.ReadFile(filepath.Join(home, ".config", "filemaid", "config.json"))
+	if err != nil {
+		t.Fatalf("read config: %v", err)
+	}
+	if !strings.Contains(string(configData), `"model": "filemaid-gemma4-12b"`) {
+		t.Errorf("config missing model: %s", configData)
+	}
+	if !strings.Contains(string(configData), `"~/Desktop"`) {
+		t.Errorf("config missing default watch dir: %s", configData)
+	}
+}
+
+func TestInstallInteractiveCustom(t *testing.T) {
+	dir := t.TempDir()
+	exe := prepareExecutable(t, dir)
+	inst, runner, home := newTestInstaller(t, exe)
+	runner.lookPath["ollama"] = "/usr/local/bin/ollama"
+
+	input := strings.Join([]string{
+		"n",                     // do not use defaults
+		"~/Desktop,~/Downloads", // watch dirs
+		"~/Archive",             // archive base
+		"n",                     // no finder tags
+		"n",                     // no dev cleanup
+		"7",                     // review max age days
+		"~/Downloads/*.dmg",     // safe delete patterns
+		"",
+	}, "\n")
+	inst.Reader = bufio.NewReader(strings.NewReader(input))
+
+	if err := inst.Install(InstallOptions{ModelName: "filemaid-gemma4-12b", Interactive: true}); err != nil {
+		t.Fatalf("install failed: %v", err)
+	}
+
+	configData, err := os.ReadFile(filepath.Join(home, ".config", "filemaid", "config.json"))
+	if err != nil {
+		t.Fatalf("read config: %v", err)
+	}
+	cfg := string(configData)
+	for _, want := range []string{
+		`"model": "filemaid-gemma4-12b"`,
+		`"tags": false`,
+		`"~/Archive/Screenshots"`,
+		`"~/Downloads/*.dmg"`,
+		`"max_age_days": 7`,
+	} {
+		if !strings.Contains(cfg, want) {
+			t.Errorf("config missing %q: %s", want, cfg)
+		}
+	}
+}
 
 func TestInstallCustomDirs(t *testing.T) {
 	dir := t.TempDir()
@@ -341,7 +413,7 @@ func TestInstallOllamaNotRunning(t *testing.T) {
 	fr := inst.Runner.(*fakeRunner)
 	fr.lookPath["ollama"] = "/usr/local/bin/ollama"
 
-	if err := inst.Install(InstallOptions{}); err == nil {
+	if err := inst.Install(InstallOptions{Interactive: true}); err == nil {
 		t.Fatal("expected error when ollama is not running")
 	}
 }
@@ -467,5 +539,105 @@ func TestInstallBootstrapFailure(t *testing.T) {
 
 	if err := inst.Install(InstallOptions{ModelName: "filemaid-gemma4-12b"}); err == nil {
 		t.Fatal("expected error when bootstrap fails")
+	}
+}
+func TestPromptYesNo(t *testing.T) {
+	tests := []struct {
+		name string
+		in   string
+		def  bool
+		want bool
+	}{
+		{"default true empty", "\n", true, true},
+		{"default false empty", "\n", false, false},
+		{"yes lower", "y\n", false, true},
+		{"yes full", "yes\n", false, true},
+		{"no upper", "N\n", true, false},
+		{"no full", "no\n", true, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := promptYesNo(bufio.NewReader(strings.NewReader(tt.in)), "test", tt.def)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if got != tt.want {
+				t.Errorf("got %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestPromptYesNoInvalid(t *testing.T) {
+	_, err := promptYesNo(bufio.NewReader(strings.NewReader("maybe\n")), "test", true)
+	if err == nil {
+		t.Error("expected error for invalid input")
+	}
+}
+
+func TestPromptInt(t *testing.T) {
+	got, err := promptInt(bufio.NewReader(strings.NewReader("42\n")), "test", 7)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got != 42 {
+		t.Errorf("got %d, want 42", got)
+	}
+}
+
+func TestPromptIntDefault(t *testing.T) {
+	got, err := promptInt(bufio.NewReader(strings.NewReader("\n")), "test", 7)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got != 7 {
+		t.Errorf("got %d, want 7", got)
+	}
+}
+
+func TestPromptIntInvalid(t *testing.T) {
+	_, err := promptInt(bufio.NewReader(strings.NewReader("abc\n")), "test", 7)
+	if err == nil {
+		t.Error("expected error for invalid input")
+	}
+}
+
+func TestPromptList(t *testing.T) {
+	got, err := promptList(bufio.NewReader(strings.NewReader("a, b, c\n")), "test", []string{"x", "y"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	want := []string{"a", "b", "c"}
+	if !slices.Equal(got, want) {
+		t.Errorf("got %v, want %v", got, want)
+	}
+}
+
+func TestPromptListDefault(t *testing.T) {
+	got, err := promptList(bufio.NewReader(strings.NewReader("\n")), "test", []string{"x", "y"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	want := []string{"x", "y"}
+	if !slices.Equal(got, want) {
+		t.Errorf("got %v, want %v", got, want)
+	}
+}
+
+func TestBuildCategories(t *testing.T) {
+	got := buildCategories("~/Archive")
+	if got["Documents"] != "~/Archive/Documents" {
+		t.Errorf("unexpected Documents path: %s", got["Documents"])
+	}
+	if got["Unknown"] != "~/.filemaid/review" {
+		t.Errorf("unexpected Unknown path: %s", got["Unknown"])
+	}
+}
+
+func TestDedupeStrings(t *testing.T) {
+	got := dedupeStrings([]string{"a", "b", "a", "c", "b"})
+	want := []string{"a", "b", "c"}
+	if !slices.Equal(got, want) {
+		t.Errorf("got %v, want %v", got, want)
 	}
 }

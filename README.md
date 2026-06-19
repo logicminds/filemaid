@@ -41,18 +41,24 @@ go build -o bin/filemaid ./cmd/filemaid
 ./bin/filemaid setup
 ```
 
-`setup` checks for Ollama, detects your Mac's RAM, and recommends a model:
+`setup` checks for Ollama, detects your Mac's RAM, recommends a model, and runs a short configuration interview:
 
 - 24 GB+ RAM → `filemaid-gemma4-26b`
 - 16 GB+ RAM → `filemaid-gemma4-12b`
 - less RAM → `filemaid-metadata`
 
-Press `Enter` to accept the recommendation, or choose another model from the prompt.
+Press `Enter` to accept each recommendation or default, or type a custom value when prompted.
 
-To skip the interactive prompt, pass `--model`:
+To skip the model prompt, pass `--model`:
 
 ```zsh
 ./bin/filemaid setup --model filemaid-gemma4-12b
+```
+
+To skip the configuration interview and use the shipped defaults, pass `--no-interactive`:
+
+```zsh
+./bin/filemaid setup --no-interactive
 ```
 
 To skip installing the scheduled scan agent and run `filemaid scan` manually:
@@ -158,14 +164,28 @@ The next time filemaid runs, the model may classify matching files into `~/Docum
 
 ## Configuration
 
-Edit `~/.config/filemaid/config.json`:
+`filemaid setup` runs an interactive interview that asks for watch directories, archive location, Finder tags, dev cleaners, review-queue retention, and safe-delete patterns. Press `Enter` at each prompt to accept the default. To skip the interview and use the shipped defaults, run:
+
+```zsh
+filemaid setup --no-interactive
+```
+
+The generated configuration is written to `~/.config/filemaid/config.json` and can be edited at any time.
+
+### Full config example
 
 ```json
 {
   "ollama_url": "http://localhost:11434",
   "model": "filemaid-gemma4-26b",
+  "watch_dirs": ["~/Desktop", "~/Downloads"],
   "allowed_dirs": ["~/Desktop", "~/Downloads", "~/Documents/Archive", "~/.filemaid/review"],
-  "allowed_cleaners": ["docker", "npm", "cargo", "pip", "brew", "xcode"],
+  "allowed_cleaners": ["docker", "npm", "cargo", "pip", "brew", "xcode", "review"],
+  "review_dir": "~/.filemaid/review",
+  "log_path": "~/.local/share/filemaid/filemaid.log",
+  "db_path": "~/.local/share/filemaid/filemaid.db",
+  "tags": true,
+  "min_age_hours": 0,
   "categories": {
     "Screenshots": "~/Documents/Archive/Screenshots",
     "Documents": "~/Documents/Archive/Documents",
@@ -180,18 +200,44 @@ Edit `~/.config/filemaid/config.json`:
   "safe_delete_patterns": [],
   "age_rules": [
     {"pattern": "~/Downloads/*.dmg", "days": 30, "action": "review"}
-  ]
+  ],
+  "dev_cleanup": {
+    "docker": {"enabled": true, "mode": "safe"},
+    "npm":    {"enabled": true, "mode": "safe"},
+    "cargo":  {"enabled": true, "mode": "safe"},
+    "pip":    {"enabled": true, "mode": "safe"},
+    "brew":   {"enabled": true, "mode": "safe"},
+    "xcode":  {"enabled": true, "mode": "safe"}
+  },
+  "review_cleanup": {
+    "enabled": true,
+    "mode": "safe",
+    "max_age_days": 30
+  }
 }
 ```
 
+### Config keys
+
 | Key | Purpose |
 |-----|---------|
+| `ollama_url` | URL of the local Ollama server. |
 | `model` | Ollama model tag. Non-vision models fall back to metadata-only image classification. |
-| `allowed_dirs` | Files outside these directories are ignored. |
-| `allowed_cleaners` | Which dev cleaners may run. |
-| `categories` | Destination folders for each classification. |
-| `safe_delete_patterns` | Glob patterns for files allowed to be deleted. |
-| `age_rules` | Patterns + age that force review, e.g. old `.dmg` installers. |
+| `watch_dirs` | Directories scanned by `filemaid scan`. |
+| `allowed_dirs` | Files outside these directories are ignored; also gates destination paths. |
+| `allowed_cleaners` | Which dev cleaners may run. Must include `"review"` to enable review-queue cleanup. |
+| `review_dir` | Quarantine folder for uncertain files. |
+| `log_path` | Path to the main application log. |
+| `db_path` | Path to the SQLite history database. |
+| `tags` | Whether to apply Finder tags to organized files. |
+| `min_age_hours` | Minimum file age before processing (0 = process immediately). |
+| `categories` | Destination folders for each classification. The model may only return categories defined here. |
+| `safe_delete_patterns` | Glob patterns for files allowed to be deleted without review. |
+| `age_rules` | Patterns + age that force a specific action, e.g. old `.dmg` installers become `review`. |
+| `dev_cleanup` | Per-cleaner enable/disable and mode (`safe` is the only mode currently). |
+| `review_cleanup` | Enable and set retention for the review-queue cleaner. Set `max_age_days` to `0` to disable. |
+
+Changes take effect the next time `filemaid process`, `filemaid scan`, or `filemaid cleanup` runs.
 
 ## Custom Ollama Models
 
