@@ -1,4 +1,6 @@
 # filemaid
+[![Test](https://github.com/logicminds/filemaid/actions/workflows/test.yml/badge.svg)](https://github.com/logicminds/filemaid/actions/workflows/test.yml)
+
 
 A local, AI-powered file organizer for macOS. It watches your `Desktop` and `Downloads`, classifies files with a local Ollama LLM, moves them into categorized archives, applies Finder tags, and quarantines uncertain items for review. It also cleans up stale development artifacts like Docker images, npm/cargo/pip caches, Homebrew packages, and Xcode DerivedData.
 
@@ -16,31 +18,60 @@ A local, AI-powered file organizer for macOS. It watches your `Desktop` and `Dow
 - **Dev cache cleanup** — scheduled cleanup for Docker, npm, cargo, pip, Homebrew, and Xcode.
 - **Two triggers** — instant Shortcuts folder automations or periodic launchd agents.
 - **Private & offline** — no cloud services; everything runs locally via Ollama.
-- **Standard library only** — no third-party Python dependencies.
+- **Single Go binary** — one self-contained binary; only Cobra is used for the CLI.
 
 ## Requirements
 
 - macOS 13+ (uses `launchctl`, `xattr`, `mdimport`, `osascript`)
-- Python 3.12+ (recommended: install the latest with `brew install python@3.14`, or use `python@3.13` / `python@3.12`)
-- [Ollama](https://ollama.com/) running locally with a vision-capable model (default: `filemaid-gemma4-26b`)
-
-`install.sh` will detect your Python version and refuse to install if it is older than 3.12.
+- [Homebrew](https://brew.sh) — package manager for macOS. Install it with:
+  ```zsh
+  /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+  ```
+- Go 1.23+ (recommended: install the latest with `brew install go`)
+- [Ollama](https://ollama.com/) running locally with a vision-capable model (install with `brew install ollama`)
 
 ## Quick Start
+
+Build locally and run setup:
 
 ```zsh
 git clone https://github.com/logicminds/filemaid.git ~/Projects/filemaid
 cd ~/Projects/filemaid
-./install.sh
+go build -o bin/filemaid ./cmd/filemaid
+./bin/filemaid setup
 ```
 
-By default the installer asks whether to enable the scheduled scan agent. To skip it and run `filemaid scan` manually, use:
+`setup` checks for Ollama, detects your Mac's RAM, and recommends a model:
+
+- 24 GB+ RAM → `filemaid-gemma4-26b`
+- 16 GB+ RAM → `filemaid-gemma4-12b`
+- less RAM → `filemaid-metadata`
+
+Press `Enter` to accept the recommendation, or choose another model from the prompt.
+
+To skip the interactive prompt, pass `--model`:
 
 ```zsh
-./install.sh --no-scan
+./bin/filemaid setup --model filemaid-gemma4-12b
 ```
 
-- `~/.local/bin/filemaid` — command-line wrapper
+To skip installing the scheduled scan agent and run `filemaid scan` manually:
+
+```zsh
+./bin/filemaid setup --no-scan
+```
+
+Or install the latest release directly with `go install`:
+
+```zsh
+go install github.com/logicminds/filemaid/cmd/filemaid@latest
+```
+
+Make sure `$(go env GOPATH)/bin` is on your `PATH` to run the installed binary as `filemaid`.
+
+After setup you will have:
+
+- `~/.local/bin/filemaid` — installed command-line binary
 - `~/.config/filemaid/config.json` — user configuration
 - `~/.local/share/filemaid/` — logs and SQLite database
 - `~/.filemaid/review/` — quarantine folder
@@ -51,35 +82,37 @@ By default the installer asks whether to enable the scheduled scan agent. To ski
 
 ```zsh
 # Process files manually
-filemaid process ~/Desktop/Screenshot*.png ~/Downloads/receipt.pdf
+./bin/filemaid process ~/Desktop/Screenshot*.png ~/Downloads/receipt.pdf
 
 # Scan watch directories
-filemaid scan
+./bin/filemaid scan
 
 # Run cleaners in dry-run mode
-filemaid cleanup --dry-run
+./bin/filemaid cleanup --dry-run
 
 # Run cleaners for real (table output is default)
-filemaid cleanup
+./bin/filemaid cleanup
 
 # Get cleaner results as JSON
-filemaid cleanup --format json
+./bin/filemaid cleanup --format json
 
 # Run cleaners and see estimated space that would be freed
-filemaid cleanup --dry-run --format table
+./bin/filemaid cleanup --dry-run --format table
 
 # View the review queue
-filemaid review
+./bin/filemaid review
 
 # Open the review queue in Finder
-filemaid review --open
+./bin/filemaid review --open
 
 # Tail logs
-filemaid logs --tail 50
+./bin/filemaid logs --tail 50
 
 # Show resolved configuration
-filemaid config
+./bin/filemaid config
 ```
+
+If you installed via `go install`, use `filemaid` instead of `./bin/filemaid`.
 
 ## Shortcuts Setup
 
@@ -92,13 +125,16 @@ For instant per-file processing, add a Shortcuts folder automation:
    - Pass input: **As arguments**
    - Command:
      ```zsh
-     export PATH="/usr/local/bin:/opt/homebrew/bin:$PATH"
-     "$HOME/.local/bin/filemaid" process "$@"
+     export PATH="$(go env GOPATH)/bin:/usr/local/bin:/opt/homebrew/bin:$PATH"
+     filemaid process "$@"
+     ```
+     If you are running from a local clone, use the binary path instead:
+     ```zsh
+     "$HOME/Projects/filemaid/bin/filemaid" process "$@"
      ```
 4. Repeat for `Downloads`.
 
 Shortcuts runs in your user session and does not require Full Disk Access.
-
 
 ## How Classification Works
 
@@ -154,12 +190,12 @@ Edit `~/.config/filemaid/config.json`:
 | `allowed_dirs` | Files outside these directories are ignored. |
 | `allowed_cleaners` | Which dev cleaners may run. |
 | `categories` | Destination folders for each classification. |
-| `safe_delete_patterns` | `fnmatch` patterns for files allowed to be deleted. |
+| `safe_delete_patterns` | Glob patterns for files allowed to be deleted. |
 | `age_rules` | Patterns + age that force review, e.g. old `.dmg` installers. |
 
 ## Custom Ollama Models
 
-filemaid ships with three Ollama Modelfiles in the `modelfiles/` directory. They bundle a system prompt, low temperature, and output constraints so the model returns the JSON shape filemaid expects.
+filemaid ships with three Ollama Modelfiles embedded in the binary. They bundle a system prompt, low temperature, and output constraints so the model returns the JSON shape filemaid expects.
 
 | Model | Base | Use case |
 |-------|------|----------|
@@ -167,16 +203,7 @@ filemaid ships with three Ollama Modelfiles in the `modelfiles/` directory. They
 | `filemaid-gemma4-12b` | `gemma4:12b-it-qat` | Faster fallback with vision |
 | `filemaid-metadata` | `qwen2.5:7b` | Non-vision/text-only model; classifies from filename and metadata only |
 
-`./install.sh` creates all three models automatically if Ollama is installed. To create or recreate them manually:
-
-```zsh
-cd ~/Projects/filemaid
-ollama create -f modelfiles/Modelfile.filemaid-gemma4-26b filemaid-gemma4-26b
-ollama create -f modelfiles/Modelfile.filemaid-gemma4-12b filemaid-gemma4-12b
-ollama create -f modelfiles/Modelfile.filemaid-metadata filemaid-metadata
-```
-
-Switch models by editing `~/.config/filemaid/config.json`:
+`filemaid setup` creates all three models automatically if Ollama is installed. Switch models by editing `~/.config/filemaid/config.json`:
 
 ```json
 {
@@ -190,20 +217,22 @@ Use `filemaid-metadata` when running on a machine without a vision-capable model
 
 ```
 filemaid process <paths>
-  -> load_config()          filemaid/config.py
-  -> init_db()              filemaid/state.py
-  -> process_paths()
-       -> classify_file()   filemaid/llm.py  → Decision
-       -> apply()           filemaid/actions.py
-       -> record()          filemaid/state.py
+  -> internal/config.Load()    load config + defaults
+  -> internal/state.Open()     open SQLite history
+  -> internal/cli process
+       -> internal/llm.Classify()  → Decision
+       -> internal/actions.Apply()
+       -> internal/state.Record()
 ```
 
-- `filemaid/llm.py` — Ollama classifier and `Decision` value object.
-- `filemaid/actions.py` — Applies decisions: whitelist, moves, tags, trash, review.
-- `filemaid/state.py` — SQLite history and duplicate detection.
-- `filemaid/config.py` — Config loading with defaults.
-- `filemaid/cleaners/` — Plugin registry for dev-artifact cleanup.
-- `filemaid/__main__.py` — CLI entry point.
+- `internal/cli/` — Cobra root command and subcommands (`process`, `scan`, `cleanup`, `review`, `logs`, `config`, `setup`, `uninstall`).
+- `internal/llm/` — Ollama classifier and `Decision` value object.
+- `internal/actions/` — Applies decisions: whitelist, moves, tags, trash, review.
+- `internal/state/` — SQLite history and duplicate detection.
+- `internal/config/` — Config loading with defaults and `~` expansion.
+- `internal/cleaners/` — Plugin registry for dev-artifact cleanup.
+- `internal/setup/` — Installation and uninstallation of binary, config, and launchd agents.
+- `cmd/filemaid/main.go` — CLI entry point.
 
 ## Scheduling
 
@@ -212,25 +241,51 @@ filemaid process <paths>
 | `biz.logicminds.filemaid.scan` | Every 15 minutes (optional) | `~/.local/share/filemaid/scan.log` |
 | `biz.logicminds.filemaid.cleanup` | 06:00, 12:00, 18:00, 23:00 | `~/.local/share/filemaid/cleanup.log` |
 
-The scan agent is optional. If you choose not to install it, run `filemaid scan` manually or use the Shortcuts folder automations below.
+The scan agent is optional. If you choose not to install it, run `filemaid scan` manually or use the Shortcuts folder automations above.
 
 ## Uninstall
 
 ```zsh
-cd ~/Projects/filemaid
-./uninstall.sh
+filemaid uninstall
 ```
 
-This removes the LaunchAgents and the `~/.local/bin/filemaid` wrapper. It does not remove your config, logs, database, or review queue.
+This removes the LaunchAgents and the `~/.local/bin/filemaid` binary. It does not remove your config, logs, database, or review queue.
 
 ## Troubleshooting
 
+### Missing requirements
+
+`filemaid setup` checks for Ollama before installing. If Ollama is missing, it prints:
+
+```
+Ollama is not installed or not on PATH.
+Install Ollama with Homebrew:
+  brew install ollama
+Or download it from https://ollama.com/
+```
+
+If Ollama is installed but not running, start it with `ollama serve` and run setup again.
+
+### Install Homebrew
+
+If you do not have Homebrew yet:
+
+```zsh
+/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+```
+
+Then install the required tools:
+
+```zsh
+brew install go ollama
+```
+
 ### Scan agent cannot read Desktop/Downloads
 
-The background scan agent may need Full Disk Access for the Python interpreter selected by `install.sh` (for example, `/opt/homebrew/bin/python3.13`):
+The background scan agent may need Full Disk Access for the `filemaid` binary:
 
 1. **System Settings → Privacy & Security → Full Disk Access**
-2. Click **+**, press `Cmd+Shift+G`, and enter the path shown when you ran `./install.sh` (e.g. `/opt/homebrew/bin/python3.14`).
+2. Click **+**, press `Cmd+Shift+G`, and enter the path to the binary (e.g. `~/.local/bin/filemaid`).
 
 Or skip this entirely by using the Shortcuts folder automations above.
 
@@ -256,6 +311,27 @@ ollama pull gemma4:26b-a4b-it-qat
 ```
 
 If Ollama is unreachable, files are sent to review instead of erroring.
+
+## Development
+
+Run the same checks the CI runs:
+
+```zsh
+make build   # go build -o bin/filemaid ./cmd/filemaid
+make test    # go test ./...
+make fmt     # go fmt ./...
+make lint    # go vet ./...
+make coverage # go test -coverprofile=coverage.out ./...
+```
+
+CI enforces:
+
+- `go test ./...` passes on Go 1.23 and 1.24.
+- Overall test coverage stays above 80%.
+- `go vet ./...` and `gofmt -l .` are clean.
+- JSON configs and generated launchd plists are valid.
+
+The default `config.json` and all Ollama Modelfiles are embedded into the binary with `//go:embed`, so `go install github.com/logicminds/filemaid/cmd/filemaid@latest` produces a fully portable installer: `filemaid setup` writes the config and models at runtime.
 
 ## License
 

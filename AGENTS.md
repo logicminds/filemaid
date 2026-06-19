@@ -7,57 +7,68 @@
 Two triggers are supported:
 
 - **macOS Shortcuts folder automations** — instant per-file processing, no Full Disk Access required.
-- **`biz.logicminds.filemaid.scan` LaunchAgent** — optional periodic scan every 15 minutes. The installer asks whether to enable it; disable with `./install.sh --no-scan`.
+- **`biz.logicminds.filemaid.scan` LaunchAgent** — optional periodic scan every 15 minutes. Disable during setup with `filemaid setup --no-scan`.
 - **`biz.logicminds.filemaid.cleanup` LaunchAgent** — cleanup at 06:00, 12:00, 18:00, and 23:00.
 
 ## Architecture & Data Flow
 
-The codebase is a small, synchronous, procedural Python CLI. There is no async framework and no dependency injection; state flows through a `config` dict and a `sqlite3.Connection`.
+The codebase is a small, synchronous, procedural Go CLI. There is no async framework; state flows through typed `config.Config` and a `state.Repo` backed by SQLite.
 
 ```
 filemaid process <paths>
-  -> load_config()               (filemaid/config.py)
-  -> init_db()                   (filemaid/state.py)
-  -> process_paths()
-       -> _compute_hash()        (filemaid/actions.py)
-       -> _check_age_rule()      (filemaid/__main__.py)
-       -> classify_file()        (filemaid/llm.py)  → Decision
-       -> apply()                (filemaid/actions.py)
+  -> internal/config.Load()      load config + defaults
+  -> internal/state.Open()       open SQLite history
+  -> internal/cli.process
+       -> internal/actions.ComputeHash()
+       -> internal/cli._checkAgeRule()
+       -> internal/llm.Classify()  → Decision
+       -> internal/actions.Apply()
             -> move / tag / trash / review
-       -> record()               (filemaid/state.py)
+       -> internal/state.Record()
 
 filemaid cleanup
-  -> CLEANERS registry           (filemaid/cleaners/__init__.py)
-       -> can_run() / run()      (per-cleaner modules)
+  -> internal/cleaners.Registry()
+       -> CanRun() / Run()        (per-cleaner modules)
 ```
 
-The shared value object is `Decision` (`filemaid/llm.py`):
+The shared value object is `llm.Decision` (`internal/llm/llm.go`):
 
-```python
-@dataclass
-class Decision:
-    category: str
-    tags: list[str]
-    action: str        # "move" | "delete" | "review"
-    destination: str
-    reason: str
+```go
+type Decision struct {
+    Category    string   `json:"category"`
+    Tags        []string `json:"tags"`
+    Action      string   `json:"action"`      // "move" | "delete" | "review"
+    Destination string   `json:"destination"`
+    Reason      string   `json:"reason"`
+}
 ```
 
 ## Key Directories
 
 | Directory | Purpose |
 |-----------|---------|
-| `filemaid/` | Core Python package: CLI, classifier, actions, state, config. |
-| `filemaid/cleaners/` | Plugin modules for dev-artifact and review-queue cleanup; registered in `__init__.py`. |
-| Project root | Packaging (`pyproject.toml`), default config (`config.json`), LaunchAgent plists, install/uninstall scripts, and the implementation plan. |
+| `cmd/filemaid/` | CLI entry point (`main.go`). |
+| `internal/cli/` | Cobra root command and subcommands. |
+| `internal/llm/` | Ollama classifier and `Decision` value object. |
+| `internal/actions/` | Applies decisions: whitelist, duplicates, moves, tags, trash, review. |
+| `internal/state/` | SQLite history and duplicate detection. |
+| `internal/config/` | Config loading with defaults and `~` expansion. |
+| `internal/cleaners/` | Plugin registry for dev-artifact and review-queue cleanup. |
+| `internal/setup/` | Installation and uninstallation of binary, config, and launchd agents. |
+| `internal/log/` | `log/slog` setup. |
+| Project root | `go.mod`, `Makefile`, default config (`config.json`), Ollama Modelfiles (`modelfiles/`), and the implementation plan. |
 
 ## Development Commands
 
 | Task | Command |
 |------|---------|
-| Syntax-check all Python files | `cd /Users/opselite/Projects/filemaid && for f in filemaid/*.py filemaid/cleaners/*.py; do python3 -m py_compile "$f"; done` |
-| Install/reinstall agents and wrapper | `./install.sh` |
-| Uninstall agents and wrapper | `./uninstall.sh` |
+| Build binary | `go build -o bin/filemaid ./cmd/filemaid` or `make build` |
+| Run tests | `go test ./...` or `make test` |
+| Run tests with coverage | `make coverage` |
+| Format code | `go fmt ./...` or `make fmt` |
+| Run linter | `go vet ./...` or `make lint` |
+| Install/reinstall agents and wrapper | `filemaid setup` |
+| Uninstall agents and wrapper | `filemaid uninstall` |
 | Process files manually | `~/.local/bin/filemaid process ~/Desktop/foo.png ~/Downloads/bar.pdf` |
 | Scan watch dirs | `~/.local/bin/filemaid scan` or `~/.local/bin/filemaid scan --dir ~/Downloads` |
 | Dry-run cleaners | `~/.local/bin/filemaid cleanup --dry-run` |
@@ -66,63 +77,66 @@ class Decision:
 | Tail logs | `~/.local/bin/filemaid logs --tail 50` |
 | Show resolved config | `~/.local/bin/filemaid config` |
 
-There is no test/lint runner today (see Testing & QA).
-
 ## Code Conventions & Common Patterns
 
-- **Python standard library only.** `pyproject.toml` declares `dependencies = []`.
-- **Python 3.12+ syntax.** `pyproject.toml` requires `requires-python = ">=3.12"`; `install.sh` checks for Python 3.12+ before installing.
-- **Config-driven behavior.** Most rules live in `~/.config/filemaid/config.json` and are merged with `DEFAULTS` in `filemaid/config.py`. All paths containing `~` are expanded.
+- **Go standard library plus Cobra only.** `go.mod` declares only `github.com/spf13/cobra` as a direct dependency.
+- **Go 1.23+.** `go.mod` requires `go 1.23`.
+- **Config-driven behavior.** Most rules live in `~/.config/filemaid/config.json` and are merged with defaults in `internal/config`. All paths containing `~` are expanded.
 - **Whitelist safety.** `allowed_dirs` gates both source and destination paths; `allowed_cleaners` gates which cleaners may run.
 - **Fail-safe classification.** Any LLM error, parse failure, timeout, or ambiguous result becomes `category="Unknown"`, `action="review"`.
 - **Delete safety.** `action="delete"` is only honored if the file matches `safe_delete_patterns` or is a duplicate; otherwise it is coerced to `"review"`.
-- **Pattern matching.** `safe_delete_patterns` and `age_rules` use `fnmatch.fnmatchcase` against the path relative to `~`.
+- **Pattern matching.** `safe_delete_patterns` and `age_rules` use `filepath.Match` against the path relative to `~`.
 - **Cleaner plugin contract.** Each cleaner module exposes:
-  ```python
-  def can_run() -> bool
-  def run(dry_run: bool, config: dict) -> CleanupResult
+  ```go
+  func CanRun() bool
+  func Run(dryRun bool, cfg *config.Config) CleanupResult
   ```
-  where `CleanupResult` lives in `filemaid/cleaners/_result.py` and carries `name`, `status`, `saved` (bytes), `saved_human`, `detail`, and `command`.
-- **Subprocess calls are fire-and-forget.** `subprocess.run(..., check=False)` is used for Finder scripts and external tools; failures are logged but do not abort moves.
+  where `CleanupResult` lives in `internal/cleaners/result.go` and carries `Name`, `Status`, `Saved` (bytes), `SavedHuman`, `Detail`, and `Command`.
+- **Embedded assets.** The default `config.json` and `modelfiles/` are embedded into the binary under `internal/setup/assets`, so `filemaid setup` is self-contained and works from a single portable binary.
+- **Subprocess calls are fire-and-forget.** External-tool failures are logged but do not abort moves.
 - **macOS-specific integration.** Finder tags are written via `xattr` + `mdimport`; trash uses `osascript` "Finder delete".
 
 ## Important Files
 
 | File | Role |
 |------|------|
-| `filemaid/__main__.py` | CLI entry point and orchestration (`process`, `scan`, `cleanup`, `review`, `logs`, `config`). |
-| `filemaid/llm.py` | Ollama classifier, `Decision` dataclass, image/text prompt building. |
-| `filemaid/actions.py` | Applies decisions: whitelist, duplicates, moves, tags, trash, review quarantine. |
-| `filemaid/state.py` | SQLite schema and helpers (`init_db`, `record`, `find_by_hash`). |
-| `filemaid/config.py` | Default config, merge logic, `~` expansion. |
-| `filemaid/cleaners/__init__.py` | `CLEANERS` registry. |
-| `filemaid/cleaners/{docker,npm,cargo,pip,brew,xcode,review}.py` | Individual dev-artifact cleaners (plus `review.py` for review-queue cleanup). |
+| `cmd/filemaid/main.go` | CLI entry point. |
+| `internal/cli/root.go` | Cobra root command and persistent pre-run (config, logging, DB). |
+| `internal/cli/process.go` | `process` subcommand orchestration. |
+| `internal/llm/llm.go` | Ollama classifier, `Decision` struct, image/text prompt building. |
+| `internal/actions/actions.go` | Applies decisions: whitelist, duplicates, moves, tags, trash, review. |
+| `internal/actions/fs.go` | `FS` interface, macOS `OSFS`, and test `RecordingFS`. |
+| `internal/state/state.go` | SQLite repository and schema. |
+| `internal/config/config.go` | Typed config, defaults, merge logic, `~` expansion. |
+| `internal/cleaners/registry.go` | `CLEANERS` registry. |
+| `internal/cleaners/{docker,npm,cargo,pip,brew,xcode,review}.go` | Individual dev-artifact cleaners (plus `review.go` for review-queue cleanup). |
+| `internal/setup/setup.go` | Self-install logic; generates launchd plists dynamically from embedded templates. |
+| `internal/setup/uninstall.go` | Removes agents and binary; preserves config/logs/db/review queue. |
+| `internal/setup/assets/` | Embedded default `config.json` and Ollama Modelfiles. |
 | `config.json` | Default user-facing configuration (copied to `~/.config/filemaid/config.json` on install). |
-| `pyproject.toml` | Setuptools packaging metadata; console script `filemaid = filemaid.__main__:main`. |
-| `install.sh` / `uninstall.sh` | Agent install/remove scripts. |
-| `biz.logicminds.filemaid.scan.plist` | LaunchAgent for periodic scan. |
-| `biz.logicminds.filemaid.cleanup.plist` | LaunchAgent for scheduled cleanups. |
-| `local://mac-file-automation-plan.md` | Full implementation plan. **Note:** the plan text still references `com.opselite.*`; the actual plists/scripts use `biz.logicminds.*`. |
+| `Makefile` | Build, test, fmt, lint, and coverage targets. |
+| `local://mac-file-automation-plan.md` | Full implementation plan. **Note:** the plan text still references `com.opselite.*`; the actual code uses `biz.logicminds.*`. |
 
 ## Runtime/Tooling Preferences
 
-- **Runtime:** Python ≥ 3.12; Python 3.14 is recommended. Install via Homebrew (`brew install python@3.14`, or `python@3.13` / `python@3.12`). No third-party Python packages are required.
+- **Runtime:** Go 1.23+ (recommended: install the latest with `brew install go`).
 - **Platform:** macOS only (uses `launchctl`, `osascript`, `xattr`, `mdimport`, Finder tags).
-- **External dependency:** A running Ollama server at `http://localhost:11434` with the model configured in `~/.config/filemaid/config.json` (default `gemma4:26b-a4b-it-qat`).
-- **Shell scripts:** `install.sh` and `uninstall.sh` are `zsh` scripts.
-- **LaunchAgent management:** Uses `launchctl bootstrap gui/$(id -u)` / `launchctl bootout gui/$(id -u)`.
-- **Path assumptions:** The wrapper is installed to `~/.local/bin/filemaid`; runtime data goes to `~/.local/share/filemaid/`; config to `~/.config/filemaid/`; review queue to `~/.filemaid/review/`.
-- **TCC note:** The scan LaunchAgent may be denied read access to `~/Desktop`/`~/Downloads` until the Python interpreter selected by `install.sh` (e.g. `/opt/homebrew/bin/python3.14`) is granted Full Disk Access in System Settings → Privacy & Security → Full Disk Access. The Shortcuts folder-automation path does not need this.
+- **External dependency:** A running Ollama server at `http://localhost:11434` with the model configured in `~/.config/filemaid/config.json` (default `filemaid-gemma4-26b`).
+- **LaunchAgent management:** Uses `launchctl bootstrap gui/$(id -u)` / `launchctl bootout gui/$(id -u)`. Plists are generated at setup time and written to `~/Library/LaunchAgents/`.
+- **Path assumptions:** The binary is installed to `~/.local/bin/filemaid`; runtime data goes to `~/.local/share/filemaid/`; config to `~/.config/filemaid/`; review queue to `~/.filemaid/review/`.
+- **TCC note:** The background scan agent may be denied read access to `~/Desktop`/`~/Downloads` until the `filemaid` binary is granted Full Disk Access in System Settings → Privacy & Security → Full Disk Access. The Shortcuts folder-automation path does not need this.
 
 ## Testing & QA
 
-- **No test infrastructure currently exists.** There are no `pytest`, `unittest`, `mypy`, `ruff`, `black`, CI, or coverage configs in `pyproject.toml` or elsewhere.
+- **Test runner:** `go test ./...`.
+- **Coverage gate:** `make coverage` enforces an 80% overall coverage floor.
+- **Lint/format:** `go vet ./...` and `gofmt -l .` must be clean.
 - **Manual QA workflow:**
-  1. `./install.sh`
+  1. `go build -o bin/filemaid ./cmd/filemaid && ./bin/filemaid setup`
   2. Drop a test file on `~/Desktop` or run `filemaid process <path>`.
   3. Verify expected archive folder and Finder tags with `ls -R ~/Documents/Archive` and `mdls -name kMDItemUserTags <path>`.
   4. Run `filemaid cleanup --dry-run` and inspect output/log.
-- **Adding tests:** A contributor would need to add a test framework (e.g., `pytest`) and likely mock Ollama and external tools like `xattr`/`osascript`.
+- **Adding tests:** Add table-driven tests in the relevant `internal/<pkg>/*_test.go` file. Use the fake implementations in `internal/state/fake.go` and `internal/actions/fs.go` to avoid touching the real filesystem or Ollama.
 
 <!-- BEGIN BEADS INTEGRATION v:1 profile:minimal hash:970c3bf2 -->
 ## Beads Issue Tracker
@@ -142,7 +156,7 @@ bd close <id>         # Complete work
 
 - Use `bd` for ALL task tracking — do NOT use TodoWrite, TaskCreate, or markdown TODO lists
 - Run `bd prime` for detailed command reference and session close protocol
-- Use `bd remember` for persistent knowledge — do NOT use MEMORY.md files
+- Use `bd remember` for persistent knowledge — do NOT create MEMORY.md files
 
 **Architecture in one line:** issues live in a local Dolt DB; sync uses `refs/dolt/data` on your git remote; `.beads/issues.jsonl` is a passive export. See https://github.com/gastownhall/beads/blob/main/docs/SYNC_CONCEPTS.md for details and anti-patterns.
 

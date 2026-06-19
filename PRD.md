@@ -271,14 +271,14 @@ Both agents redirect stdout/stderr to `~/.local/share/filemaid/{scan,cleanup}.lo
 - Create directories: `~/.config/filemaid`, `~/.local/share/filemaid`, `~/.filemaid/review`, `~/.local/bin`, `~/Library/LaunchAgents`.
 - Recommend an Ollama model by installed RAM: ≥ 24 GB → `filemaid-gemma4-26b`, ≥ 16 GB → `filemaid-gemma4-12b`, else `filemaid-metadata`.
 - Copy `config.json` to `~/.config/filemaid/config.json` if it does not exist, updating the `model` field to the selected model.
-- Copy `biz.logicminds.filemaid.cleanup.plist` and optionally `biz.logicminds.filemaid.scan.plist` to `~/Library/LaunchAgents`.
+- Generate `biz.logicminds.filemaid.cleanup.plist` and optionally `biz.logicminds.filemaid.scan.plist` dynamically and write them to `~/Library/LaunchAgents`.
 - Create custom Ollama models from `modelfiles/` if Ollama is installed.
 - Bootstrap agents with `launchctl bootstrap gui/$(id -u)`.
 
 #### 4.9.4 Uninstallation
 
 - `launchctl bootout` both agents.
-- Remove `~/Library/LaunchAgents/biz.logicminds.filemaid.*.plist`.
+- Remove `~/Library/LaunchAgents/biz.logicminds.filemaid.*.plist` (these are generated dynamically by `filemaid setup`).
 - Remove `~/.local/bin/filemaid` wrapper/binary.
 - **Do not** remove config, logs, database, or review queue.
 
