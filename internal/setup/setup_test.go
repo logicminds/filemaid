@@ -15,29 +15,50 @@ import (
 )
 
 type fakeRunner struct {
-	calls    []string
-	runErr   error
-	lookPath map[string]string
-	outputs  map[string]string
+	calls      []string
+	runErr     error
+	runErrFor  map[string]error
+	lookPath   map[string]string
+	outputs    map[string]string
+	outputsSeq map[string][]string
+	seqIndex   map[string]int
 }
 
 func newFakeRunner() *fakeRunner {
 	return &fakeRunner{
-		lookPath: map[string]string{},
-		outputs:  map[string]string{},
+		lookPath:   map[string]string{},
+		outputs:    map[string]string{},
+		runErrFor:  map[string]error{},
+		outputsSeq: map[string][]string{},
+		seqIndex:   map[string]int{},
 	}
 }
 
 func (r *fakeRunner) Run(name string, arg ...string) error {
-	r.calls = append(r.calls, name+" "+strings.Join(arg, " "))
+	key := name + " " + strings.Join(arg, " ")
+	r.calls = append(r.calls, key)
+	if e, ok := r.runErrFor[key]; ok {
+		return e
+	}
 	return r.runErr
 }
 
 func (r *fakeRunner) RunOutput(name string, arg ...string) (string, error) {
-	r.calls = append(r.calls, name+" "+strings.Join(arg, " "))
 	key := name + " " + strings.Join(arg, " ")
+	r.calls = append(r.calls, key)
+	if seq, ok := r.outputsSeq[key]; ok {
+		idx := r.seqIndex[key]
+		if idx < len(seq) {
+			out := seq[idx]
+			r.seqIndex[key] = idx + 1
+			return out, nil
+		}
+	}
 	if out, ok := r.outputs[key]; ok {
 		return out, nil
+	}
+	if e, ok := r.runErrFor[key]; ok {
+		return "", e
 	}
 	return "", r.runErr
 }
@@ -75,6 +96,8 @@ func newTestInstaller(t *testing.T, exe string) (*Installer, *fakeRunner, string
 		UID:            501,
 		Now:            time.Date(2026, 6, 19, 0, 0, 0, 0, time.UTC),
 		ExecutablePath: exe,
+		Sleep:          func(time.Duration) {},
+		FreeSpace:      func(string) (uint64, error) { return 100 * 1024 * 1024 * 1024, nil },
 	}
 	return inst, runner, home
 }
@@ -394,6 +417,84 @@ func TestInstallRerunsOllamaCreateWhenHashChanged(t *testing.T) {
 	}
 
 	assertCall(t, runner2.calls, "ollama create filemaid-gemma4-12b -f "+filepath.Join(home, ".config", "filemaid", "modelfiles", "Modelfile.filemaid-gemma4-12b"))
+}
+func TestInstallCreatesModelWhenMissingFromOllama(t *testing.T) {
+	dir := t.TempDir()
+	exe := prepareExecutable(t, dir)
+	inst, runner, home := newTestInstaller(t, exe)
+	runner.lookPath["ollama"] = "/usr/local/bin/ollama"
+	runner.outputs["ollama list"] = "filemaid-gemma4-12b\n"
+
+	if err := inst.Install(InstallOptions{ModelName: "filemaid-gemma4-12b"}); err != nil {
+		t.Fatalf("install failed: %v", err)
+	}
+
+	// Simulate a machine where setup.json was copied but the Ollama model was not created.
+	inst2, runner2, _ := newTestInstaller(t, exe)
+	inst2.Home = inst.Home
+	inst2.DataDir = inst.DataDir
+	runner2.lookPath["ollama"] = "/usr/local/bin/ollama"
+	runner2.outputsSeq["ollama list"] = []string{"\n", "\n", "filemaid-gemma4-12b\n"}
+
+	if err := inst2.Install(InstallOptions{ModelName: "filemaid-gemma4-12b"}); err != nil {
+		t.Fatalf("second install failed: %v", err)
+	}
+
+	assertCall(t, runner2.calls, "ollama create filemaid-gemma4-12b -f "+filepath.Join(home, ".config", "filemaid", "modelfiles", "Modelfile.filemaid-gemma4-12b"))
+}
+
+func TestInstallFailsWhenOllamaCreateFails(t *testing.T) {
+	dir := t.TempDir()
+	exe := prepareExecutable(t, dir)
+	inst, runner, home := newTestInstaller(t, exe)
+	runner.lookPath["ollama"] = "/usr/local/bin/ollama"
+	runner.outputs["ollama list"] = "\n"
+	runner.runErrFor["ollama create filemaid-gemma4-12b -f "+filepath.Join(home, ".config", "filemaid", "modelfiles", "Modelfile.filemaid-gemma4-12b")] = fmt.Errorf("pull failed")
+
+	if err := inst.Install(InstallOptions{ModelName: "filemaid-gemma4-12b"}); err == nil {
+		t.Fatal("expected error when ollama create fails")
+	}
+
+	assertCall(t, runner.calls, "ollama create filemaid-gemma4-12b -f "+filepath.Join(home, ".config", "filemaid", "modelfiles", "Modelfile.filemaid-gemma4-12b"))
+}
+
+func TestInstallFailsWhenModelMissingAndDiskSpaceInsufficient(t *testing.T) {
+	dir := t.TempDir()
+	exe := prepareExecutable(t, dir)
+	inst, runner, home := newTestInstaller(t, exe)
+	runner.lookPath["ollama"] = "/usr/local/bin/ollama"
+	runner.outputsSeq["ollama list"] = []string{"\n", "\n"}
+	inst.FreeSpace = func(string) (uint64, error) { return 1 * 1024 * 1024 * 1024, nil }
+
+	if err := inst.Install(InstallOptions{ModelName: "filemaid-gemma4-12b"}); err == nil {
+		t.Fatal("expected error when disk space is insufficient")
+	}
+
+	for _, call := range runner.calls {
+		if strings.Contains(call, "ollama create") {
+			t.Errorf("expected no ollama create when disk space is insufficient, got %s", call)
+		}
+	}
+
+	statePath := filepath.Join(home, ".local", "share", "filemaid", "setup.json")
+	if _, err := os.Stat(statePath); !os.IsNotExist(err) {
+		t.Error("setup state should not be written when disk check fails")
+	}
+}
+
+func TestInstallSkipsDiskCheckWhenModelExists(t *testing.T) {
+	dir := t.TempDir()
+	exe := prepareExecutable(t, dir)
+	inst, runner, _ := newTestInstaller(t, exe)
+	runner.lookPath["ollama"] = "/usr/local/bin/ollama"
+	runner.outputs["ollama list"] = "filemaid-gemma4-12b\n"
+	inst.FreeSpace = func(string) (uint64, error) { return 1 * 1024 * 1024 * 1024, nil }
+
+	if err := inst.Install(InstallOptions{ModelName: "filemaid-gemma4-12b"}); err != nil {
+		t.Fatalf("install failed: %v", err)
+	}
+
+	assertCall(t, runner.calls, "ollama create filemaid-gemma4-12b -f "+filepath.Join(inst.Home, ".config", "filemaid", "modelfiles", "Modelfile.filemaid-gemma4-12b"))
 }
 
 func TestInstallNoScan(t *testing.T) {
