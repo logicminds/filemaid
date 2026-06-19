@@ -11,11 +11,16 @@ import (
 )
 
 var (
-	cfg     *config.Config
-	db      state.Repo
+	cfg *config.Config
+	db  state.Repo
+	// Version is set at build time via -ldflags from the current git tag.
+	Version = "dev"
+	// Commit is set at build time via -ldflags from the current git SHA.
+	Commit  = "unknown"
 	rootCmd = &cobra.Command{
-		Use:   "filemaid",
-		Short: "AI-powered file organizer and cleanup assistant for macOS",
+		Use:     "filemaid",
+		Short:   "AI-powered file organizer and cleanup assistant for macOS",
+		Version: Version + " (commit " + Commit + ")",
 		PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
 			var err error
 			cfg, err = config.Load()
@@ -36,6 +41,11 @@ var (
 		},
 	}
 )
+
+func init() {
+	rootCmd.Version = Version + " (commit " + Commit + ")"
+	rootCmd.SetHelpTemplate("{{if .Version}}Version:\n  {{.Version}}\n\n{{end}}" + rootCmd.HelpTemplate())
+}
 
 // Execute runs the root command.
 func Execute() {

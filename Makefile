@@ -1,10 +1,11 @@
 .PHONY: build install test fmt lint coverage
 
 build:
-	go build -o bin/filemaid ./cmd/filemaid
+	go build -ldflags "-X github.com/logicminds/filemaid/internal/cli.Version=$(shell git describe --tags --always) -X github.com/logicminds/filemaid/internal/cli.Commit=$(shell git rev-parse --short HEAD)" -o bin/filemaid ./cmd/filemaid
 
 install:
-	go install ./cmd/filemaid
+	go install -ldflags "-X github.com/logicminds/filemaid/internal/cli.Version=$(shell git describe --tags --always) -X github.com/logicminds/filemaid/internal/cli.Commit=$(shell git rev-parse --short HEAD)" ./cmd/filemaid
+
 
 test:
 	go test ./...
