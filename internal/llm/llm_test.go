@@ -2,9 +2,12 @@ package llm
 
 import (
 	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"image"
+	"image/png"
 	"io"
 	"net/http"
 	"os"
@@ -668,6 +671,135 @@ func TestBuildPromptIncludesImageBase64(t *testing.T) {
 		t.Errorf("prompt missing image note: %q", prompt)
 	}
 }
+func TestBuildPromptResizesLargeImage(t *testing.T) {
+	tmp := t.TempDir()
+	cfg := baseConfig(t, tmp)
+
+	// Create a 2000x1000 PNG image.
+	src := image.NewRGBA(image.Rect(0, 0, 2000, 1000))
+	for i := range src.Pix {
+		src.Pix[i] = byte(i % 256)
+	}
+	img := filepath.Join(tmp, "large.png")
+	f, err := os.Create(img)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := png.Encode(f, src); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	prompt, images, err := buildPrompt(img, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(images) != 1 {
+		t.Fatalf("images = %v, want 1", images)
+	}
+	if !strings.Contains(prompt, "The image is attached") {
+		t.Errorf("prompt missing image note")
+	}
+
+	decoded, err := base64.StdEncoding.DecodeString(images[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	resized, _, err := image.Decode(bytes.NewReader(decoded))
+	if err != nil {
+		t.Fatal(err)
+	}
+	bounds := resized.Bounds()
+	if bounds.Dx() > maxImageDimension || bounds.Dy() > maxImageDimension {
+		t.Errorf("resized dimensions %dx%d exceed max %d", bounds.Dx(), bounds.Dy(), maxImageDimension)
+	}
+	// Aspect ratio should be preserved: width still greater than height.
+	if bounds.Dx() <= bounds.Dy() {
+		t.Errorf("aspect ratio not preserved: got %dx%d", bounds.Dx(), bounds.Dy())
+	}
+}
+
+func TestBuildPromptDoesNotModifySourceImage(t *testing.T) {
+	tmp := t.TempDir()
+	cfg := baseConfig(t, tmp)
+
+	src := image.NewRGBA(image.Rect(0, 0, 2000, 1000))
+	for i := range src.Pix {
+		src.Pix[i] = byte(i % 256)
+	}
+	img := filepath.Join(tmp, "large.png")
+
+	var before bytes.Buffer
+	if err := png.Encode(io.Writer(&before), src); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(img, before.Bytes(), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, _, err := buildPrompt(img, cfg); err != nil {
+		t.Fatal(err)
+	}
+
+	after, err := os.ReadFile(img)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(before.Bytes(), after) {
+		t.Errorf("source image bytes changed on disk")
+	}
+}
+
+func TestBuildPromptImageFallbackOnDecodeFailure(t *testing.T) {
+	tmp := t.TempDir()
+	cfg := baseConfig(t, tmp)
+
+	img := filepath.Join(tmp, "fake.jpg")
+	original := []byte("not-a-valid-jpeg")
+	if err := os.WriteFile(img, original, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, images, err := buildPrompt(img, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(images) != 1 {
+		t.Fatalf("images = %v, want 1", images)
+	}
+	got, err := base64.StdEncoding.DecodeString(images[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, original) {
+		t.Errorf("fallback payload mismatch: got %q, want %q", got, original)
+	}
+}
+
+func TestBuildPromptNonImageUnchanged(t *testing.T) {
+	tmp := t.TempDir()
+	cfg := baseConfig(t, tmp)
+
+	path := filepath.Join(tmp, "doc.txt")
+	content := []byte("hello world")
+	if err := os.WriteFile(path, content, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	prompt, images, err := buildPrompt(path, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(images) != 0 {
+		t.Errorf("images = %v, want empty", images)
+	}
+	if !strings.Contains(prompt, "First 2048 bytes") {
+		t.Errorf("prompt missing text snippet: %q", prompt)
+	}
+}
+
 
 func TestClassifierInterface(t *testing.T) {
 	tmp := t.TempDir()

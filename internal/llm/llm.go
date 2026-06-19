@@ -8,7 +8,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"image"
+	"image/color"
+	_ "image/gif"
+	_ "image/png"
+	"image/jpeg"
 	"io"
+	"math"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -338,6 +344,137 @@ Return a single compact JSON object and nothing else. Leave destination empty.
 
 const subcategoryInstructions = `
 For image files, also provide a concise subcategory describing the main subject or scene (e.g., cat, dog, baby, kid, woman, wedding, car, nature, food, selfie, document-photo). For screenshots, describe the app or context (e.g., Safari, Terminal, Slack, VS Code, browser, lock-screen, menu-bar). The subcategory will be added as a Finder tag.`
+const maxImageDimension = 1024
+
+// encodeImageToJPEG re-encodes img as a JPEG with the given quality.
+func encodeImageToJPEG(img image.Image, quality int) ([]byte, error) {
+	var buf bytes.Buffer
+	if err := jpeg.Encode(&buf, img, &jpeg.Options{Quality: quality}); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
+}
+
+// resizeImage scales img down so that its largest dimension is at most maxDim.
+// Images already within the limit are returned unchanged.
+func resizeImage(img image.Image, maxDim int) image.Image {
+	bounds := img.Bounds()
+	w, h := bounds.Dx(), bounds.Dy()
+	if w <= maxDim && h <= maxDim {
+		return img
+	}
+
+	var newW, newH int
+	if w > h {
+		newW = maxDim
+		newH = int(float64(h) * float64(maxDim) / float64(w))
+	} else {
+		newH = maxDim
+		newW = int(float64(w) * float64(maxDim) / float64(h))
+	}
+	if newW < 1 {
+		newW = 1
+	}
+	if newH < 1 {
+		newH = 1
+	}
+	return bilinearResize(img, newW, newH)
+}
+
+// resizeImageBytes decodes b, resizes it, and re-encodes the result as JPEG.
+func resizeImageBytes(b []byte, maxDim int) ([]byte, error) {
+	img, _, err := image.Decode(bytes.NewReader(b))
+	if err != nil {
+		return nil, err
+	}
+	resized := resizeImage(img, maxDim)
+	return encodeImageToJPEG(resized, 85)
+}
+
+// bilinearResize returns a new RGBA image scaled to dstW x dstH using bilinear
+// interpolation.
+func bilinearResize(src image.Image, dstW, dstH int) image.Image {
+	bounds := src.Bounds()
+	srcW, srcH := bounds.Dx(), bounds.Dy()
+	dst := image.NewRGBA(image.Rect(0, 0, dstW, dstH))
+	xRatio := float64(srcW) / float64(dstW)
+	yRatio := float64(srcH) / float64(dstH)
+
+	for y := 0; y < dstH; y++ {
+		for x := 0; x < dstW; x++ {
+			sx := (float64(x)+0.5)*xRatio - 0.5 + float64(bounds.Min.X)
+			sy := (float64(y)+0.5)*yRatio - 0.5 + float64(bounds.Min.Y)
+			dst.Set(x, y, bilinearSample(src, sx, sy))
+		}
+	}
+	return dst
+}
+
+// bilinearSample samples src at (x, y) using bilinear interpolation.
+func bilinearSample(src image.Image, x, y float64) color.Color {
+	bounds := src.Bounds()
+	x0 := int(math.Floor(x))
+	y0 := int(math.Floor(y))
+	x1 := x0 + 1
+	y1 := y0 + 1
+
+	if x0 < bounds.Min.X {
+		x0 = bounds.Min.X
+	}
+	if y0 < bounds.Min.Y {
+		y0 = bounds.Min.Y
+	}
+	if x1 >= bounds.Max.X {
+		x1 = bounds.Max.X - 1
+	}
+	if y1 >= bounds.Max.Y {
+		y1 = bounds.Max.Y - 1
+	}
+	if x1 < x0 {
+		x1 = x0
+	}
+	if y1 < y0 {
+		y1 = y0
+	}
+
+	fx := x - float64(x0)
+	fy := y - float64(y0)
+	if fx < 0 {
+		fx = 0
+	}
+	if fx > 1 {
+		fx = 1
+	}
+	if fy < 0 {
+		fy = 0
+	}
+	if fy > 1 {
+		fy = 1
+	}
+
+	c00 := src.At(x0, y0)
+	c10 := src.At(x1, y0)
+	c01 := src.At(x0, y1)
+	c11 := src.At(x1, y1)
+
+	r00, g00, b00, a00 := c00.RGBA()
+	r10, g10, b10, a10 := c10.RGBA()
+	r01, g01, b01, a01 := c01.RGBA()
+	r11, g11, b11, a11 := c11.RGBA()
+
+	r := lerp(lerp(r00, r10, fx), lerp(r01, r11, fx), fy)
+	g := lerp(lerp(g00, g10, fx), lerp(g01, g11, fx), fy)
+	b := lerp(lerp(b00, b10, fx), lerp(b01, b11, fx), fy)
+	a := lerp(lerp(a00, a10, fx), lerp(a01, a11, fx), fy)
+
+	return color.RGBA64{uint16(r), uint16(g), uint16(b), uint16(a)}
+}
+
+// lerp linearly interpolates between a and b by t (0..1).
+func lerp(a, b uint32, t float64) uint32 {
+	return uint32(float64(a)*(1.0-t) + float64(b)*t)
+}
+
 
 func buildPrompt(path string, cfg *config.Config) (string, []string, error) {
 	stat, err := os.Stat(path)
@@ -365,7 +502,12 @@ func buildPrompt(path string, cfg *config.Config) (string, []string, error) {
 		}
 		b, err := os.ReadFile(path)
 		if err == nil {
-			images = append(images, base64.StdEncoding.EncodeToString(b))
+			resized, resizeErr := resizeImageBytes(b, maxImageDimension)
+			if resizeErr == nil {
+				images = append(images, base64.StdEncoding.EncodeToString(resized))
+			} else {
+				images = append(images, base64.StdEncoding.EncodeToString(b))
+			}
 		}
 	} else if textExts[ext] {
 		snippet := readTextSnippet(path, 2048)
