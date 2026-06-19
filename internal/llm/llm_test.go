@@ -145,6 +145,62 @@ func TestParseResponseToolCallArgumentsAsString(t *testing.T) {
 		t.Errorf("Category = %q, want Documents", decision.Category)
 	}
 }
+func TestParseResponseMessageContentJSON(t *testing.T) {
+	cfg := baseConfig(t, t.TempDir())
+	data := map[string]any{
+		"message": map[string]any{
+			"content": `{"category": "Images", "subcategory": "cat", "tags": ["photo"], "action": "move", "destination": "", "reason": "photo"}`,
+		},
+	}
+	decision, ok := parseResponse(data, categorySet(cfg.Categories))
+	if !ok {
+		t.Fatal("expected ok")
+	}
+	if decision.Category != "Images" {
+		t.Errorf("Category = %q, want Images", decision.Category)
+	}
+	if decision.Subcategory != "cat" {
+		t.Errorf("Subcategory = %q, want cat", decision.Subcategory)
+	}
+	if len(decision.Tags) != 1 || decision.Tags[0] != "photo" {
+		t.Errorf("Tags = %v, want [photo]", decision.Tags)
+	}
+}
+
+func TestParseResponseMessageThinkingJSON(t *testing.T) {
+	cfg := baseConfig(t, t.TempDir())
+	data := map[string]any{
+		"message": map[string]any{
+			"thinking": `Some reasoning here... {"category": "Screenshots", "subcategory": "browser", "tags": ["web"], "action": "move", "destination": "", "reason": "webpage screenshot"}`,
+		},
+	}
+	decision, ok := parseResponse(data, categorySet(cfg.Categories))
+	if !ok {
+		t.Fatal("expected ok")
+	}
+	if decision.Category != "Screenshots" {
+		t.Errorf("Category = %q, want Screenshots", decision.Category)
+	}
+	if decision.Action != "move" {
+		t.Errorf("Action = %q, want move", decision.Action)
+	}
+}
+
+func TestParseResponseMessageContentFencedJSON(t *testing.T) {
+	cfg := baseConfig(t, t.TempDir())
+	data := map[string]any{
+		"message": map[string]any{
+			"content": "```json\n{\"category\": \"Documents\", \"tags\": [\" fenced\"], \"action\": \"move\", \"reason\": \"x\"}\n```",
+		},
+	}
+	decision, ok := parseResponse(data, categorySet(cfg.Categories))
+	if !ok {
+		t.Fatal("expected ok")
+	}
+	if decision.Category != "Documents" {
+		t.Errorf("Category = %q, want Documents", decision.Category)
+	}
+}
 
 func TestParseResponseUnknownCategoryCoerced(t *testing.T) {
 	cfg := baseConfig(t, t.TempDir())
