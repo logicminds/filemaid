@@ -1,10 +1,12 @@
 package cli
 
 import (
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/logicminds/filemaid/internal/actions"
@@ -31,11 +33,17 @@ var (
 	// nowFunc returns the current time. Tests may replace it with a fixed clock.
 	nowFunc = time.Now
 )
+var (
+	processFormat string
+	processJSON   bool
+)
 
 // applierFunc matches the signature of actions.Apply so it can be swapped in tests.
 type applierFunc func(decision llm.Decision, src string, fileHash string, cfg *config.Config, db state.Repo, isDuplicate bool, fs actions.FS) (string, error)
 
 func init() {
+	processCmd.Flags().StringVar(&processFormat, "format", "table", "output format (table|json)")
+	processCmd.Flags().BoolVar(&processJSON, "json", false, "output results as JSON (shorthand for --format json)")
 	rootCmd.AddCommand(processCmd)
 }
 
@@ -48,15 +56,72 @@ var processCmd = &cobra.Command{
 		if err := classifier.Validate(cfg); err != nil {
 			return fmt.Errorf("model validation failed: %w", err)
 		}
-		return processPaths(args)
+		results, err := processPaths(args)
+		if err != nil {
+			return err
+		}
+		if len(results) == 0 {
+			fmt.Println("No files processed.")
+			return nil
+		}
+		format := processFormat
+		if processJSON {
+			format = "json"
+		}
+		out, err := formatProcessResults(results, format)
+		if err != nil {
+			return err
+		}
+		fmt.Println(out)
+		return nil
 	},
+}
+
+// processResult captures the outcome of processing a single file for display.
+type processResult struct {
+	Path     string   `json:"path"`
+	Category string   `json:"category"`
+	Tags     []string `json:"tags"`
+	Action   string   `json:"action"`
+	Result   string   `json:"result"`
+	OK       bool     `json:"ok"`
+	Error    string   `json:"error,omitempty"`
+}
+
+// formatProcessResults renders process results as a table or JSON.
+func formatProcessResults(results []processResult, format string) (string, error) {
+	if format == "json" {
+		out, err := json.MarshalIndent(results, "", "  ")
+		return string(out), err
+	}
+	return formatProcessTable(results), nil
+}
+
+// formatProcessTable renders process results as an ASCII table.
+func formatProcessTable(results []processResult) string {
+	headers := []string{"File", "Category", "Tags", "Action", "Result", "Status"}
+	rows := make([][]string, 0, len(results))
+	for _, r := range results {
+		status := "❌"
+		if r.OK {
+			status = "✅"
+		}
+		tags := strings.Join(r.Tags, ", ")
+		rows = append(rows, []string{r.Path, r.Category, tags, r.Action, r.Result, status})
+	}
+	return renderTable(headers, rows)
 }
 
 // processPaths classifies and applies decisions to each path. It mirrors the
 // Python process_paths behaviour: skip non-existent, non-file, hidden, and
 // out-of-allowed files; honour age rules; detect duplicates; coerce unsafe
 // deletes to review; and log the result.
-func processPaths(paths []string) error {
+// processPaths classifies and applies decisions to each path. It mirrors the
+// Python process_paths behaviour: skip non-existent, non-file, hidden, and
+// out-of-allowed files; honour age rules; detect duplicates; coerce unsafe
+// deletes to review; log the result; and return a displayable result per file.
+func processPaths(paths []string) ([]processResult, error) {
+	var results []processResult
 	for _, raw := range paths {
 		src, err := filepath.Abs(raw)
 		if err != nil {
@@ -96,6 +161,7 @@ func processPaths(paths []string) error {
 
 		decision, matched := checkAgeRule(src, cfg)
 		if !matched {
+			fmt.Fprintf(os.Stderr, "Classifying %s...\n", src)
 			decision, err = classifier.Classify(src, cfg)
 			if err != nil {
 				slog.Warn("classification failed", "path", src, "error", err)
@@ -116,6 +182,15 @@ func processPaths(paths []string) error {
 		result, err := applyDecision(decision, src, fileHash, cfg, db, isDuplicate, processFS)
 		if err != nil {
 			slog.Error("apply failed", "path", src, "error", err)
+			results = append(results, processResult{
+				Path:     src,
+				Category: decision.Category,
+				Tags:     processTags(decision),
+				Action:   decision.Action,
+				Result:   "",
+				OK:       false,
+				Error:    err.Error(),
+			})
 			continue
 		}
 
@@ -126,8 +201,32 @@ func processPaths(paths []string) error {
 			"action", decision.Action,
 			"reason", decision.Reason,
 		)
+		results = append(results, processResult{
+			Path:     src,
+			Category: decision.Category,
+			Tags:     processTags(decision),
+			Action:   decision.Action,
+			Result:   result,
+			OK:       true,
+		})
 	}
-	return nil
+	return results, nil
+}
+
+// processTags returns the tags to display for a decision, including the
+// subcategory when present.
+func processTags(d llm.Decision) []string {
+	tags := make([]string, len(d.Tags))
+	copy(tags, d.Tags)
+	if d.Subcategory == "" {
+		return tags
+	}
+	for _, t := range tags {
+		if t == d.Subcategory {
+			return tags
+		}
+	}
+	return append([]string{d.Subcategory}, tags...)
 }
 
 // checkAgeRule returns a review Decision when a file matches a configured age
