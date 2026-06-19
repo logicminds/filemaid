@@ -248,6 +248,112 @@ func TestInstallFull(t *testing.T) {
 	if !state.InstalledAt.Equal(inst.Now) {
 		t.Errorf("installed at mismatch: got %v want %v", state.InstalledAt, inst.Now)
 	}
+	if state.ModelHashes == nil {
+		t.Error("expected model_hashes to be populated")
+	}
+	if _, ok := state.ModelHashes["Modelfile.filemaid-gemma4-12b"]; !ok {
+		t.Error("expected hash for selected model")
+	}
+}
+func TestInstallOverwritesExistingModelfiles(t *testing.T) {
+	dir := t.TempDir()
+	exe := prepareExecutable(t, dir)
+	inst, runner, home := newTestInstaller(t, exe)
+	runner.lookPath["ollama"] = "/usr/local/bin/ollama"
+
+	configDir := filepath.Join(home, ".config", "filemaid")
+	mkdir(t, configDir)
+	modelfilesDir := filepath.Join(configDir, "modelfiles")
+	mkdir(t, modelfilesDir)
+	stale := filepath.Join(modelfilesDir, "Modelfile.filemaid-gemma4-12b")
+	writeFile(t, stale, []byte("stale content"), 0o644)
+
+	if err := inst.Install(InstallOptions{ModelName: "filemaid-gemma4-12b"}); err != nil {
+		t.Fatalf("install failed: %v", err)
+	}
+
+	data, err := os.ReadFile(stale)
+	if err != nil {
+		t.Fatalf("read modelfile: %v", err)
+	}
+	if string(data) == "stale content" {
+		t.Error("existing modelfile was not overwritten")
+	}
+}
+
+func TestInstallSkipsOllamaCreateWhenHashUnchanged(t *testing.T) {
+	dir := t.TempDir()
+	exe := prepareExecutable(t, dir)
+	inst, runner, home := newTestInstaller(t, exe)
+	runner.lookPath["ollama"] = "/usr/local/bin/ollama"
+
+	if err := inst.Install(InstallOptions{ModelName: "filemaid-gemma4-12b"}); err != nil {
+		t.Fatalf("install failed: %v", err)
+	}
+
+	createCount := 0
+	for _, c := range runner.calls {
+		if c == "ollama create filemaid-gemma4-12b -f "+filepath.Join(home, ".config", "filemaid", "modelfiles", "Modelfile.filemaid-gemma4-12b") {
+			createCount++
+		}
+	}
+	if createCount != 1 {
+		t.Fatalf("expected 1 ollama create on first install, got %d", createCount)
+	}
+
+	// Simulate an upgrade: re-run setup with the same embedded modelfiles.
+	inst2, runner2, _ := newTestInstaller(t, exe)
+	runner2.lookPath["ollama"] = "/usr/local/bin/ollama"
+	inst2.Home = inst.Home
+	inst2.DataDir = inst.DataDir
+	if err := inst2.Install(InstallOptions{ModelName: "filemaid-gemma4-12b"}); err != nil {
+		t.Fatalf("second install failed: %v", err)
+	}
+
+	for _, c := range runner2.calls {
+		if strings.Contains(c, "ollama create") {
+			t.Errorf("expected no ollama create on unchanged hash, got %s", c)
+		}
+	}
+}
+
+func TestInstallRerunsOllamaCreateWhenHashChanged(t *testing.T) {
+	dir := t.TempDir()
+	exe := prepareExecutable(t, dir)
+	inst, runner, home := newTestInstaller(t, exe)
+	runner.lookPath["ollama"] = "/usr/local/bin/ollama"
+
+	if err := inst.Install(InstallOptions{ModelName: "filemaid-gemma4-12b"}); err != nil {
+		t.Fatalf("install failed: %v", err)
+	}
+	// Simulate a new binary with a different embedded modelfile hash by
+	// mutating the stored hash. The disk modelfile is still overwritten from
+	// the (unchanged) embedded asset, so the mismatch triggers recreation.
+	statePath := filepath.Join(home, ".local", "share", "filemaid", "setup.json")
+	data, err := os.ReadFile(statePath)
+	if err != nil {
+		t.Fatalf("read setup.json: %v", err)
+	}
+	var state SetupState
+	if err := json.Unmarshal(data, &state); err != nil {
+		t.Fatalf("unmarshal setup.json: %v", err)
+	}
+	state.ModelHashes["Modelfile.filemaid-gemma4-12b"] = "deadbeef"
+	updated, err := json.MarshalIndent(state, "", "  ")
+	if err != nil {
+		t.Fatalf("marshal setup.json: %v", err)
+	}
+	writeFile(t, statePath, updated, 0o644)
+
+	inst2, runner2, _ := newTestInstaller(t, exe)
+	runner2.lookPath["ollama"] = "/usr/local/bin/ollama"
+	inst2.Home = inst.Home
+	inst2.DataDir = inst.DataDir
+	if err := inst2.Install(InstallOptions{ModelName: "filemaid-gemma4-12b"}); err != nil {
+		t.Fatalf("second install failed: %v", err)
+	}
+
+	assertCall(t, runner2.calls, "ollama create filemaid-gemma4-12b -f "+filepath.Join(home, ".config", "filemaid", "modelfiles", "Modelfile.filemaid-gemma4-12b"))
 }
 
 func TestInstallNoScan(t *testing.T) {

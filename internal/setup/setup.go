@@ -5,6 +5,8 @@ package setup
 import (
 	"bufio"
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -159,13 +161,14 @@ func printOllamaInstructions() {
 // SetupState records the paths chosen during installation so uninstall can
 // remove only the files that were installed.
 type SetupState struct {
-	BinaryPath   string    `json:"binary_path"`
-	ConfigDir    string    `json:"config_dir"`
-	DataDir      string    `json:"data_dir"`
-	LaunchdDir   string    `json:"launchd_dir"`
-	ScanAgent    string    `json:"scan_agent"`
-	CleanupAgent string    `json:"cleanup_agent"`
-	InstalledAt  time.Time `json:"installed_at"`
+	BinaryPath   string            `json:"binary_path"`
+	ConfigDir    string            `json:"config_dir"`
+	DataDir      string            `json:"data_dir"`
+	LaunchdDir   string            `json:"launchd_dir"`
+	ScanAgent    string            `json:"scan_agent"`
+	CleanupAgent string            `json:"cleanup_agent"`
+	InstalledAt  time.Time         `json:"installed_at"`
+	ModelHashes  map[string]string `json:"model_hashes"`
 }
 
 // FS abstracts filesystem operations so tests can substitute a fake.
@@ -256,6 +259,7 @@ type Installer struct {
 	UID            int
 	Now            time.Time
 	ExecutablePath string
+	DataDir        string
 	// Reader supplies interactive input. Defaults to os.Stdin.
 	Reader *bufio.Reader
 }
@@ -290,6 +294,7 @@ func newDefaultInstaller() (*Installer, error) {
 		UID:            os.Getuid(),
 		Now:            time.Now(),
 		ExecutablePath: exe,
+		DataDir:        filepath.Join(home, ".local", "share", "filemaid"),
 		Reader:         bufio.NewReader(os.Stdin),
 	}, nil
 }
@@ -426,6 +431,12 @@ func (i *Installer) Install(opts InstallOptions) error {
 		slog.Debug("create ollama models", "error", err)
 	}
 
+	// Build model hash state after modelfiles have been written.
+	modelHashes, err := i.hashEmbeddedModelfiles()
+	if err != nil {
+		return fmt.Errorf("hash modelfiles: %w", err)
+	}
+
 	state := SetupState{
 		BinaryPath:   binaryPath,
 		ConfigDir:    configDir,
@@ -434,6 +445,7 @@ func (i *Installer) Install(opts InstallOptions) error {
 		ScanAgent:    scanLabel,
 		CleanupAgent: cleanupLabel,
 		InstalledAt:  i.Now,
+		ModelHashes:  modelHashes,
 	}
 	stateJSON, err := json.MarshalIndent(state, "", "  ")
 	if err != nil {
@@ -464,9 +476,6 @@ func (i *Installer) copyModelfiles(dstDir string) error {
 	}
 	for _, name := range names {
 		dst := filepath.Join(dstDir, name)
-		if i.FS.Exists(dst) {
-			continue
-		}
 		data, err := assets.ReadModelfile(name)
 		if err != nil {
 			return fmt.Errorf("read embedded modelfile %s: %w", name, err)
@@ -501,18 +510,68 @@ func (i *Installer) copyDefaultConfig(dst string, overrides map[string]any) erro
 	return i.FS.WriteFile(dst, updated, 0o644)
 }
 
-// createOllamaModels creates only the selected Ollama model. Modelfiles for
-// all variants are still copied to disk so users can switch models by editing
-// config.json and running `ollama create` manually.
+// createOllamaModels creates or recreates the selected Ollama model only when
+// the embedded Modelfile has changed since the last setup. Modelfiles for all
+// variants are copied to disk so users can switch models by editing config.json
+// and running `ollama create` manually.
 func (i *Installer) createOllamaModels(configDir, selectedModel string) error {
 	if _, err := i.Runner.LookPath("ollama"); err != nil {
 		return err
 	}
+	data, err := assets.ReadModelfile("Modelfile." + selectedModel)
+	if err != nil {
+		return fmt.Errorf("read embedded modelfile %s: %w", selectedModel, err)
+	}
+	hash := hashBytes(data)
+
+	if previous, ok := i.readStoredModelHash(selectedModel); ok && previous == hash {
+		slog.Debug("ollama model up to date", "model", selectedModel, "hash", hash)
+		return nil
+	}
+
 	path := filepath.Join(configDir, "modelfiles", "Modelfile."+selectedModel)
 	if err := i.Runner.Run("ollama", "create", selectedModel, "-f", path); err != nil {
 		return fmt.Errorf("create model %s: %w", selectedModel, err)
 	}
 	return nil
+}
+
+func (i *Installer) hashEmbeddedModelfiles() (map[string]string, error) {
+	names, err := assets.ListModelfiles()
+	if err != nil {
+		return nil, err
+	}
+	hashes := make(map[string]string, len(names))
+	for _, name := range names {
+		data, err := assets.ReadModelfile(name)
+		if err != nil {
+			return nil, fmt.Errorf("read embedded modelfile %s: %w", name, err)
+		}
+		hashes[name] = hashBytes(data)
+	}
+	return hashes, nil
+}
+
+func (i *Installer) readStoredModelHash(modelName string) (string, bool) {
+	dataDir := i.DataDir
+	if dataDir == "" {
+		dataDir = filepath.Join(i.Home, ".local", "share", "filemaid")
+	}
+	data, err := i.FS.ReadFile(filepath.Join(dataDir, "setup.json"))
+	if err != nil {
+		return "", false
+	}
+	var state SetupState
+	if err := json.Unmarshal(data, &state); err != nil {
+		return "", false
+	}
+	h, ok := state.ModelHashes["Modelfile."+modelName]
+	return h, ok
+}
+
+func hashBytes(b []byte) string {
+	sum := sha256.Sum256(b)
+	return hex.EncodeToString(sum[:])
 }
 
 var funcMap = template.FuncMap{

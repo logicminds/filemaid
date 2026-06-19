@@ -161,11 +161,15 @@ func Apply(decision llm.Decision, src string, cfg *config.Config, db state.Repo,
 		return "", fmt.Errorf("move failed: %s -> %s: %w", src, dest, err)
 	}
 
+	tags := decision.Tags
+	if decision.Subcategory != "" && !stringSliceContains(tags, decision.Subcategory) {
+		tags = append([]string{decision.Subcategory}, tags...)
+	}
 	if cfg.Tags {
-		fs.SetTags(dest, decision.Tags)
+		fs.SetTags(dest, tags)
 	}
 
-	if err := db.Record(src, dest, fileHash, decision.Category, decision.Tags, decision.Action, decision.Reason); err != nil {
+	if err := db.Record(src, dest, fileHash, decision.Category, tags, decision.Action, decision.Reason); err != nil {
 		return "", fmt.Errorf("record history: %w", err)
 	}
 	return dest, nil
@@ -190,4 +194,12 @@ func expandTilde(s string) string {
 		return filepath.Join(home, s[2:])
 	}
 	return s
+}
+func stringSliceContains(ss []string, s string) bool {
+	for _, item := range ss {
+		if item == s {
+			return true
+		}
+	}
+	return false
 }

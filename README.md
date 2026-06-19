@@ -144,7 +144,11 @@ Shortcuts runs in your user session and does not require Full Disk Access.
 
 ## How Classification Works
 
-When a file is processed, filemaid sends its name, extension, size, modification time, and (for supported images and text files) a content snippet to the local Ollama model. The model returns one of the categories listed in `config.json`, along with suggested Finder tags and an action (`move`, `delete`, or `review`).
+When a file is processed, filemaid sends its name, extension, size, modification time, and (for supported images and text files) a content snippet to the local Ollama model. The model returns one of the categories listed in `config.json`, along with a concise subcategory for images, suggested Finder tags, and an action (`move`, `delete`, or `review`).
+
+For photos, the subcategory describes the main subject or scene (for example `cat`, `dog`, `baby`, `wedding`, or `car`). For screenshots, it describes the app or context (for example `Safari`, `Terminal`, `Slack`, `browser`, or `lock-screen`). The subcategory is added as a Finder tag when `tags` is enabled.
+
+Set `subcategorize_images` to `false` to disable the extra image detail and only receive the top-level category.
 
 - If the model returns a known category, the file is moved to the matching folder under `categories`.
 - If the model is unsure, returns an unknown category, or the response cannot be parsed, the file is sent to `~/.filemaid/review/` instead.
@@ -185,6 +189,7 @@ The generated configuration is written to `~/.config/filemaid/config.json` and c
   "log_path": "~/.local/share/filemaid/filemaid.log",
   "db_path": "~/.local/share/filemaid/filemaid.db",
   "tags": true,
+  "subcategorize_images": true,
   "min_age_hours": 0,
   "categories": {
     "Screenshots": "~/Documents/Archive/Screenshots",
@@ -230,6 +235,7 @@ The generated configuration is written to `~/.config/filemaid/config.json` and c
 | `log_path` | Path to the main application log. |
 | `db_path` | Path to the SQLite history database. |
 | `tags` | Whether to apply Finder tags to organized files. |
+| `subcategorize_images` | When `true`, images and screenshots receive a subject/app subcategory that is also added as a Finder tag. |
 | `min_age_hours` | Minimum file age before processing (0 = process immediately). |
 | `categories` | Destination folders for each classification. The model may only return categories defined here. |
 | `safe_delete_patterns` | Glob patterns for files allowed to be deleted without review. |

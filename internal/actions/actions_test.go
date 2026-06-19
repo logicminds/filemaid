@@ -427,6 +427,62 @@ func TestApplySetsTags(t *testing.T) {
 	}
 }
 
+func TestApplyAddsSubcategoryAsTag(t *testing.T) {
+	tmp := t.TempDir()
+	cfg := testConfig(t, tmp)
+	cfg.Tags = true
+	db := state.NewFake()
+	fs := NewRecordingFS()
+
+	src := filepath.Join(tmp, "Desktop", "cat.png")
+	if err := os.MkdirAll(filepath.Dir(src), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(src, []byte("image"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	decision := llm.Decision{Category: "Images", Subcategory: "cat", Tags: []string{"photo"}, Action: "move", Reason: "png"}
+	if _, err := Apply(decision, src, cfg, db, false, fs); err != nil {
+		t.Fatal(err)
+	}
+	if len(fs.Tags) != 1 {
+		t.Fatalf("tagged %d times, want 1", len(fs.Tags))
+	}
+	want := []string{"cat", "photo"}
+	if !stringSliceEqual(fs.Tags[0].Tags, want) {
+		t.Errorf("tags = %v, want %v", fs.Tags[0].Tags, want)
+	}
+}
+
+func TestApplyDoesNotDuplicateSubcategoryTag(t *testing.T) {
+	tmp := t.TempDir()
+	cfg := testConfig(t, tmp)
+	cfg.Tags = true
+	db := state.NewFake()
+	fs := NewRecordingFS()
+
+	src := filepath.Join(tmp, "Desktop", "cat.png")
+	if err := os.MkdirAll(filepath.Dir(src), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(src, []byte("image"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	decision := llm.Decision{Category: "Images", Subcategory: "cat", Tags: []string{"cat", "photo"}, Action: "move", Reason: "png"}
+	if _, err := Apply(decision, src, cfg, db, false, fs); err != nil {
+		t.Fatal(err)
+	}
+	if len(fs.Tags) != 1 {
+		t.Fatalf("tagged %d times, want 1", len(fs.Tags))
+	}
+	want := []string{"cat", "photo"}
+	if !stringSliceEqual(fs.Tags[0].Tags, want) {
+		t.Errorf("tags = %v, want %v", fs.Tags[0].Tags, want)
+	}
+}
+
 func TestApplyTrashFailureForcesReview(t *testing.T) {
 	tmp := t.TempDir()
 	home := filepath.Join(tmp, "home")

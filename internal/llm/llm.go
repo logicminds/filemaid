@@ -21,6 +21,7 @@ import (
 // Decision holds the classifier's output for a single file.
 type Decision struct {
 	Category    string   `json:"category"`
+	Subcategory string   `json:"subcategory"`
 	Tags        []string `json:"tags"`
 	Action      string   `json:"action"` // move | delete | review
 	Destination string   `json:"destination"`
@@ -226,7 +227,7 @@ Actions:
 - move: the file clearly belongs to a category.
 - delete: only obvious trash, installers, or duplicates.
 - review: ambiguous, sensitive, or cannot classify.
-
+%s
 File:
 - path: %s
 - name: %s
@@ -236,7 +237,10 @@ File:
 %s
 
 Return a single compact JSON object and nothing else. Leave destination empty.
-{"category": "...", "tags": ["..."], "action": "...", "destination": "", "reason": "..."}`
+{"category": "...", "subcategory": "...", "tags": ["..."], "action": "...", "destination": "", "reason": "..."}`
+
+const subcategoryInstructions = `
+For image files, also provide a concise subcategory describing the main subject or scene (e.g., cat, dog, baby, kid, woman, wedding, car, nature, food, selfie, document-photo). For screenshots, describe the app or context (e.g., Safari, Terminal, Slack, VS Code, browser, lock-screen, menu-bar). The subcategory will be added as a Finder tag.`
 
 func buildPrompt(path string, cfg *config.Config) (string, []string, error) {
 	stat, err := os.Stat(path)
@@ -256,8 +260,12 @@ func buildPrompt(path string, cfg *config.Config) (string, []string, error) {
 
 	var images []string
 	var extras []string
+	var subcatExtra string
 	if imageExts[ext] {
 		extras = append(extras, "The image is attached; use its content to classify.")
+		if cfg.SubcategorizeImages {
+			subcatExtra = subcategoryInstructions
+		}
 		b, err := os.ReadFile(path)
 		if err == nil {
 			images = append(images, base64.StdEncoding.EncodeToString(b))
@@ -270,6 +278,7 @@ func buildPrompt(path string, cfg *config.Config) (string, []string, error) {
 	prompt := fmt.Sprintf(
 		promptTemplate,
 		categories,
+		subcatExtra,
 		path,
 		filepath.Base(path),
 		ext,
@@ -307,7 +316,7 @@ func (c *Client) requestGenerate(ollamaURL, model, prompt string, images []strin
 	body := map[string]any{
 		"model": model,
 		"system": ("You classify files for a macOS file manager. " +
-			"Output valid JSON only with keys category, tags, action, destination, reason. " +
+			"Output valid JSON only with keys category, subcategory, tags, action, destination, reason. " +
 			"No markdown, no code fences, no extra text."),
 		"prompt": prompt,
 		"images": images,
@@ -327,7 +336,6 @@ func (c *Client) requestChat(ollamaURL, model, prompt string, images []string, c
 		catList = append(catList, k)
 	}
 	sort.Strings(catList)
-
 	body := map[string]any{
 		"model": model,
 		"messages": []map[string]any{
@@ -367,6 +375,10 @@ func toolSchema(categories []string) map[string]any {
 					"category": map[string]any{
 						"type": "string",
 						"enum": categories,
+					},
+					"subcategory": map[string]any{
+						"type":        "string",
+						"description": "Concise subject or scene description for images and screenshots",
 					},
 					"tags": map[string]any{
 						"type":  "array",
@@ -504,6 +516,7 @@ func buildDecision(m map[string]any, categories map[string]bool, destination str
 		}
 	}
 
+	d.Subcategory, _ = stringField(m, "subcategory")
 	d.Tags = stringSliceField(m, "tags")
 
 	if action, ok := stringField(m, "action"); ok {

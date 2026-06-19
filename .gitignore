@@ -16,3 +16,8 @@
 /filemaid-go
 # Test coverage output
 coverage.out
+
+# Agent skill symlinks and lock files created by `npx skills`
+.claude/skills/
+.agents/skills/
+skills-lock.json

@@ -68,7 +68,8 @@ Every classification produces a `Decision` value:
 | Field | Type | Description |
 |-------|------|-------------|
 | `category` | string | One of the configured category names, or `Unknown`. |
-| `tags` | []string | 1–3 Finder tag suggestions. |
+| `subcategory` | string | Optional concise subject or scene description for images and screenshots (e.g. `cat`, `Safari`). Added as a Finder tag when present. |
+| `tags` | []string | 1–3 Finder tag suggestions. The subcategory is prepended if it is not already present. |
 | `action` | string | `move`, `delete`, or `review`. Default: `review`. |
 | `destination` | string | Optional explicit destination path; normally empty. |
 | `reason` | string | Human-readable explanation. |
@@ -79,10 +80,10 @@ For each file, the classifier builds a prompt containing:
 
 - Absolute path, basename, lowercase extension, size in bytes, ISO modification time.
 - The list of configured category names.
-- For images (`png`, `jpg`, `jpeg`, `gif`, `webp`, `heic`): a note that the image is attached, and the image is sent as base64 to the LLM.
+- For images (`png`, `jpg`, `jpeg`, `gif`, `webp`, `heic`): a note that the image is attached, the image is sent as base64 to the LLM, and (when `subcategorize_images` is `true`) instructions to return a subject or scene subcategory such as `cat`, `dog`, `wedding`, or `car` for photos, and an app or context such as `Safari`, `Terminal`, `Slack`, or `browser` for screenshots.
 - For text files (`txt`, `md`, `csv`, `json`, `xml`, `yaml`, `yml`, `py`, `js`, `ts`, `jsx`, `tsx`, `html`, `css`, `sh`, `zsh`, `bash`, `swift`, `c`, `cpp`, `h`, `rs`, `go`, `java`, `kt`, `rb`, `php`, `pl`, `sql`): the first 2048 bytes.
 
-The model must return a single JSON object with keys `category`, `tags`, `action`, `destination`, and `reason`. `destination` must be empty.
+The model must return a single JSON object with keys `category`, `subcategory`, `tags`, `action`, `destination`, and `reason`. `destination` must be empty. `subcategory` may be empty when `subcategorize_images` is disabled or not applicable.
 
 #### 4.3.3 LLM Transport & Fallback
 
@@ -320,6 +321,7 @@ Pressing `Enter` at any prompt accepts the default. The `--no-interactive` flag 
 | `log_path` | string | `~/.local/share/filemaid/filemaid.log` | Application log file. |
 | `db_path` | string | `~/.local/share/filemaid/filemaid.db` | SQLite database file. |
 | `tags` | bool | `true` | Whether to apply Finder tags. |
+| `subcategorize_images` | bool | `true` | Request a subject/app subcategory for images and screenshots and add it as a Finder tag. |
 | `min_age_hours` | number | `0` | Minimum file age for `scan` eligibility. |
 | `categories` | map<string,string> | See `config.json` | Category name → destination folder. |
 | `safe_delete_patterns` | []string | `[]` | `fnmatch` patterns that may be deleted. |

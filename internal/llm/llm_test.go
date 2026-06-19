@@ -172,6 +172,61 @@ func TestParseResponseInvalidActionCoerced(t *testing.T) {
 	}
 }
 
+func TestParseResponseSubcategory(t *testing.T) {
+	cfg := baseConfig(t, t.TempDir())
+	data := map[string]any{
+		"response": `{"category": "Images", "subcategory": "cat", "tags": ["photo"], "action": "move", "reason": "x"}`,
+	}
+	decision, ok := parseResponse(data, categorySet(cfg.Categories))
+	if !ok {
+		t.Fatal("expected ok")
+	}
+	if decision.Subcategory != "cat" {
+		t.Errorf("Subcategory = %q, want cat", decision.Subcategory)
+	}
+}
+
+func TestBuildPromptIncludesSubcategoryForImages(t *testing.T) {
+	tmp := t.TempDir()
+	cfg := baseConfig(t, tmp)
+	cfg.SubcategorizeImages = true
+
+	img := filepath.Join(tmp, "cat.png")
+	if err := os.WriteFile(img, []byte("fake-image"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	prompt, images, err := buildPrompt(img, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(images) == 0 {
+		t.Error("expected image base64 payload")
+	}
+	if !strings.Contains(prompt, "For image files, also provide") {
+		t.Errorf("prompt missing subcategory instructions")
+	}
+}
+
+func TestBuildPromptOmitsSubcategoryWhenDisabled(t *testing.T) {
+	tmp := t.TempDir()
+	cfg := baseConfig(t, tmp)
+	cfg.SubcategorizeImages = false
+
+	img := filepath.Join(tmp, "cat.png")
+	if err := os.WriteFile(img, []byte("fake-image"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	prompt, _, err := buildPrompt(img, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(prompt, "For image files, also provide") {
+		t.Errorf("prompt should not contain subcategory instructions when disabled")
+	}
+}
+
 type fakeTransport struct {
 	handler func(req *http.Request) (*http.Response, error)
 }
