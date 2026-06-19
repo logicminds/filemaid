@@ -1,0 +1,286 @@
+package state_test
+
+import (
+	"database/sql"
+	"errors"
+	"os"
+	"path/filepath"
+	"testing"
+
+	"github.com/logicminds/filemaid/internal/state"
+
+	_ "modernc.org/sqlite"
+)
+
+func TestOpen_CreatesParentDirAndSchema(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "nested", "state.db")
+
+	repo, err := state.Open(dbPath)
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+	defer repo.Close()
+
+	if _, err := os.Stat(dbPath); errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("database file was not created: %v", err)
+	}
+
+	// Re-opening an existing DB should succeed without error.
+	repo2, err := state.Open(dbPath)
+	if err != nil {
+		t.Fatalf("Open existing db failed: %v", err)
+	}
+	repo2.Close()
+}
+
+func TestRecordAndFindByHash(t *testing.T) {
+	repo, err := state.Open(filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+	defer repo.Close()
+
+	cases := []struct {
+		name     string
+		original string
+		final    string
+		sha256   string
+		category string
+		tags     []string
+		action   string
+		reason   string
+	}{
+		{
+			name:     "move with tags",
+			original: "/downloads/report.pdf",
+			final:    "/docs/report.pdf",
+			sha256:   "abc123",
+			category: "Documents",
+			tags:     []string{"work", "2024"},
+			action:   "move",
+			reason:   "classified by LLM",
+		},
+		{
+			name:     "delete without tags",
+			original: "/downloads/temp.tmp",
+			final:    "",
+			sha256:   "def456",
+			category: "Temporary",
+			tags:     nil,
+			action:   "delete",
+			reason:   "temporary file",
+		},
+		{
+			name:     "review with empty tags",
+			original: "/downloads/unknown.bin",
+			final:    "",
+			sha256:   "ghi789",
+			category: "Unknown",
+			tags:     []string{},
+			action:   "review",
+			reason:   "low confidence",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := repo.Record(tc.original, tc.final, tc.sha256, tc.category, tc.tags, tc.action, tc.reason); err != nil {
+				t.Fatalf("Record failed: %v", err)
+			}
+
+			got, err := repo.FindByHash(tc.sha256)
+			if err != nil {
+				t.Fatalf("FindByHash failed: %v", err)
+			}
+			if got == nil {
+				t.Fatal("FindByHash returned nil for recorded hash")
+			}
+
+			if got.OriginalPath != tc.original {
+				t.Errorf("OriginalPath = %q, want %q", got.OriginalPath, tc.original)
+			}
+			if got.FinalPath != tc.final {
+				t.Errorf("FinalPath = %q, want %q", got.FinalPath, tc.final)
+			}
+			if got.SHA256 != tc.sha256 {
+				t.Errorf("SHA256 = %q, want %q", got.SHA256, tc.sha256)
+			}
+			if got.Category != tc.category {
+				t.Errorf("Category = %q, want %q", got.Category, tc.category)
+			}
+			wantTags := ""
+			if len(tc.tags) > 0 {
+				for i, tag := range tc.tags {
+					if i > 0 {
+						wantTags += ","
+					}
+					wantTags += tag
+				}
+			}
+			if got.Tags != wantTags {
+				t.Errorf("Tags = %q, want %q", got.Tags, wantTags)
+			}
+			if got.Action != tc.action {
+				t.Errorf("Action = %q, want %q", got.Action, tc.action)
+			}
+			if got.Reason != tc.reason {
+				t.Errorf("Reason = %q, want %q", got.Reason, tc.reason)
+			}
+			if got.CreatedAt == "" {
+				t.Error("CreatedAt is empty")
+			}
+		})
+	}
+}
+
+func TestFindByHash_MostRecent(t *testing.T) {
+	repo, err := state.Open(filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+	defer repo.Close()
+
+	sha := "dupsha"
+	if err := repo.Record("/a/file1.txt", "/b/file1.txt", sha, "A", []string{"a"}, "move", "first"); err != nil {
+		t.Fatalf("Record failed: %v", err)
+	}
+	if err := repo.Record("/a/file2.txt", "/b/file2.txt", sha, "B", []string{"b"}, "move", "second"); err != nil {
+		t.Fatalf("Record failed: %v", err)
+	}
+
+	got, err := repo.FindByHash(sha)
+	if err != nil {
+		t.Fatalf("FindByHash failed: %v", err)
+	}
+	if got == nil {
+		t.Fatal("FindByHash returned nil")
+	}
+	if got.OriginalPath != "/a/file2.txt" {
+		t.Errorf("most recent OriginalPath = %q, want %q", got.OriginalPath, "/a/file2.txt")
+	}
+	if got.Category != "B" {
+		t.Errorf("most recent Category = %q, want %q", got.Category, "B")
+	}
+}
+
+func TestFindByHash_NotFound(t *testing.T) {
+	repo, err := state.Open(filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+	defer repo.Close()
+
+	got, err := repo.FindByHash("does-not-exist")
+	if err != nil {
+		t.Fatalf("FindByHash failed: %v", err)
+	}
+	if got != nil {
+		t.Fatalf("FindByHash = %+v, want nil", got)
+	}
+}
+
+func TestFakeRepo_RecordAndFindByHash(t *testing.T) {
+	fake := state.NewFake()
+
+	if err := fake.Record("/src/a.txt", "/dst/a.txt", "hash1", "Cat", []string{"x", "y"}, "move", "reason"); err != nil {
+		t.Fatalf("Record failed: %v", err)
+	}
+	if err := fake.Record("/src/b.txt", "", "hash2", "Cat", nil, "delete", "reason"); err != nil {
+		t.Fatalf("Record failed: %v", err)
+	}
+
+	got, err := fake.FindByHash("hash1")
+	if err != nil {
+		t.Fatalf("FindByHash failed: %v", err)
+	}
+	if got == nil {
+		t.Fatal("FindByHash returned nil")
+	}
+	if got.OriginalPath != "/src/a.txt" || got.Tags != "x,y" || got.Action != "move" {
+		t.Errorf("unexpected record: %+v", got)
+	}
+
+	if err := fake.Close(); err != nil {
+		t.Fatalf("Close failed: %v", err)
+	}
+}
+
+func TestFakeRepo_FindByHash_MostRecent(t *testing.T) {
+	fake := state.NewFake()
+
+	_ = fake.Record("/a/1", "/b/1", "sha", "A", nil, "move", "first")
+	_ = fake.Record("/a/2", "/b/2", "sha", "B", nil, "move", "second")
+
+	got, err := fake.FindByHash("sha")
+	if err != nil {
+		t.Fatalf("FindByHash failed: %v", err)
+	}
+	if got == nil || got.OriginalPath != "/a/2" {
+		t.Fatalf("most recent record = %+v, want /a/2", got)
+	}
+}
+
+func TestFakeRepo_FindByHash_NotFound(t *testing.T) {
+	fake := state.NewFake()
+	got, err := fake.FindByHash("missing")
+	if err != nil {
+		t.Fatalf("FindByHash failed: %v", err)
+	}
+	if got != nil {
+		t.Fatalf("FindByHash = %+v, want nil", got)
+	}
+}
+func TestFakeRepo_Records_Snapshot(t *testing.T) {
+	fake := state.NewFake()
+	_ = fake.Record("/a", "/b", "h1", "C", []string{"t"}, "move", "r")
+	_ = fake.Record("/c", "", "h2", "C", nil, "delete", "r")
+
+	records := fake.Records()
+	if len(records) != 2 {
+		t.Fatalf("len(Records) = %d, want 2", len(records))
+	}
+	if records[0].SHA256 != "h1" || records[1].SHA256 != "h2" {
+		t.Errorf("unexpected records: %+v", records)
+	}
+
+	// Mutating the returned snapshot must not affect internal state.
+	records[0].SHA256 = "mutated"
+	again := fake.Records()
+	if again[0].SHA256 != "h1" {
+		t.Error("Records returned a reference to internal state")
+	}
+}
+
+func TestFakeRepo_Close_NoOp(t *testing.T) {
+	fake := state.NewFake()
+	if err := fake.Close(); err != nil {
+		t.Fatalf("Close returned error: %v", err)
+	}
+}
+
+func TestOpen_CreatesIndex(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "filemaid.db")
+
+	repo, err := state.Open(dbPath)
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+	defer repo.Close()
+
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("open db for inspection: %v", err)
+	}
+	defer db.Close()
+
+	var name string
+	err = db.QueryRow("SELECT name FROM sqlite_master WHERE type='index' AND name='idx_sha256'").Scan(&name)
+	if err != nil {
+		t.Fatalf("idx_sha256 index not found: %v", err)
+	}
+	if name != "idx_sha256" {
+		t.Fatalf("unexpected index name: %q", name)
+	}
+}
