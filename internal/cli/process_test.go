@@ -154,7 +154,7 @@ func TestProcessPathsClassifiesAndApplies(t *testing.T) {
 	os.MkdirAll(filepath.Dir(src), 0755)
 	os.WriteFile(src, []byte("hello"), 0644)
 
-	if err := processPaths([]string{src}); err != nil {
+	if _, err := processPaths([]string{src}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -187,7 +187,7 @@ func TestProcessPathsDuplicateForcesReview(t *testing.T) {
 	os.WriteFile(src1, []byte("same"), 0644)
 	os.WriteFile(src2, []byte("same"), 0644)
 
-	if err := processPaths([]string{src1, src2}); err != nil {
+	if _, err := processPaths([]string{src1, src2}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -267,7 +267,7 @@ func TestProcessPathsFallsBackToReviewOnClassifyError(t *testing.T) {
 	os.MkdirAll(filepath.Dir(src), 0755)
 	os.WriteFile(src, []byte("hello"), 0644)
 
-	if err := processPaths([]string{src}); err != nil {
+	if _, err := processPaths([]string{src}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -366,5 +366,89 @@ func TestProcessCommandSucceedsWhenValidationPasses(t *testing.T) {
 	records := db.(*state.FakeRepo).Records()
 	if len(records) != 1 {
 		t.Fatalf("expected 1 history record, got %d", len(records))
+	}
+}
+
+func TestFormatProcessTable(t *testing.T) {
+	results := []processResult{
+		{Path: "/tmp/note.txt", Category: "Documents", Tags: []string{"txt"}, Action: "move", Result: "/archive/note.txt", OK: true},
+		{Path: "/tmp/unknown", Category: "Unknown", Tags: []string{}, Action: "review", Result: "/review/unknown", OK: true},
+		{Path: "/tmp/bad", Category: "Documents", Tags: []string{}, Action: "move", Result: "", OK: false, Error: "move failed"},
+	}
+	out := formatProcessTable(results)
+	for _, want := range []string{"File", "Category", "Tags", "Action", "Result", "Status", "Documents", "txt", "✅", "❌"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("table output missing %q:\n%s", want, out)
+		}
+	}
+}
+
+func TestFormatProcessResultsJSON(t *testing.T) {
+	results := []processResult{
+		{Path: "/tmp/note.txt", Category: "Documents", Tags: []string{"txt"}, Action: "move", Result: "/archive/note.txt", OK: true},
+	}
+	out, err := formatProcessResults(results, "json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{`"path": "/tmp/note.txt"`, `"category": "Documents"`, `"tags": [`, `"action": "move"`, `"result": "/archive/note.txt"`, `"ok": true`} {
+		if !strings.Contains(out, want) {
+			t.Errorf("json output missing %q:\n%s", want, out)
+		}
+	}
+}
+
+func TestProcessCommandPrintsTable(t *testing.T) {
+	tmp := t.TempDir()
+	cfg = testConfig(tmp)
+	db = state.NewFake()
+	processFS = actions.NewRecordingFS()
+	classifier = &fakeClassifier{decision: llm.Decision{
+		Category: "Documents",
+		Tags:     []string{"txt"},
+		Action:   "move",
+		Reason:   "text",
+	}}
+
+	src := filepath.Join(tmp, "Desktop", "note.txt")
+	os.MkdirAll(filepath.Dir(src), 0755)
+	os.WriteFile(src, []byte("hello"), 0644)
+
+	out := captureStdout(t, func() {
+		if err := processCmd.RunE(nil, []string{src}); err != nil {
+			t.Fatalf("process failed: %v", err)
+		}
+	})
+	if !strings.Contains(out, "File") || !strings.Contains(out, "✅") {
+		t.Errorf("expected table output, got:\n%s", out)
+	}
+}
+
+func TestProcessCommandPrintsJSON(t *testing.T) {
+	tmp := t.TempDir()
+	cfg = testConfig(tmp)
+	db = state.NewFake()
+	processFS = actions.NewRecordingFS()
+	classifier = &fakeClassifier{decision: llm.Decision{
+		Category: "Documents",
+		Tags:     []string{"txt"},
+		Action:   "move",
+		Reason:   "text",
+	}}
+
+	src := filepath.Join(tmp, "Desktop", "note.txt")
+	os.MkdirAll(filepath.Dir(src), 0755)
+	os.WriteFile(src, []byte("hello"), 0644)
+
+	processJSON = true
+	t.Cleanup(func() { processJSON = false })
+
+	out := captureStdout(t, func() {
+		if err := processCmd.RunE(nil, []string{src}); err != nil {
+			t.Fatalf("process failed: %v", err)
+		}
+	})
+	if !strings.Contains(out, `"ok": true`) {
+		t.Errorf("expected JSON output, got:\n%s", out)
 	}
 }

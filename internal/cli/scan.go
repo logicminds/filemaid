@@ -21,6 +21,8 @@ var (
 
 func init() {
 	scanCmd.Flags().StringVar(&scanDir, "dir", "", "directory to scan (default: watch_dirs)")
+	scanCmd.Flags().StringVar(&processFormat, "format", "table", "output format (table|json)")
+	scanCmd.Flags().BoolVar(&processJSON, "json", false, "output results as JSON (shorthand for --format json)")
 	rootCmd.AddCommand(scanCmd)
 }
 
@@ -32,36 +34,58 @@ var scanCmd = &cobra.Command{
 		if err := classifier.Validate(cfg); err != nil {
 			return fmt.Errorf("model validation failed: %w", err)
 		}
+
+		var allResults []processResult
+		var err error
 		if scanDir != "" {
-			return runScanDir(scanDir)
-		}
-		for _, d := range cfg.WatchDirs {
-			if err := runScanDir(d); err != nil {
-				return err
+			allResults, err = runScanDir(scanDir)
+		} else {
+			for _, d := range cfg.WatchDirs {
+				results, runErr := runScanDir(d)
+				if runErr != nil {
+					return runErr
+				}
+				allResults = append(allResults, results...)
 			}
 		}
+		if err != nil {
+			return err
+		}
+		if len(allResults) == 0 {
+			fmt.Println("No files to process.")
+			return nil
+		}
+		format := processFormat
+		if processJSON {
+			format = "json"
+		}
+		out, err := formatProcessResults(allResults, format)
+		if err != nil {
+			return err
+		}
+		fmt.Println(out)
 		return nil
 	},
 }
 
 // runScanDir scans a single directory for files older than min_age_hours and
 // processes them. It mirrors the Python scan_dir behaviour.
-func runScanDir(directory string) error {
+func runScanDir(directory string) ([]processResult, error) {
 	root, err := filepath.Abs(directory)
 	if err != nil {
-		return fmt.Errorf("resolve scan directory: %w", err)
+		return nil, fmt.Errorf("resolve scan directory: %w", err)
 	}
 	root = filepath.Clean(root)
 
 	if len(cfg.AllowedDirs) > 0 && !actions.WithinAllowed(root, cfg.AllowedDirs) {
 		slog.Error("scan directory not allowed", "dir", root)
-		return nil
+		return nil, nil
 	}
 
 	files, err := scanGetFiles(root)
 	if err != nil {
 		slog.Error("permission denied scanning", "dir", root, "error", err)
-		return nil
+		return nil, nil
 	}
 
 	cutoff := time.Now().Add(-time.Duration(cfg.MinAgeHours) * time.Hour)
@@ -88,7 +112,7 @@ func runScanDir(directory string) error {
 
 	if len(toProcess) == 0 {
 		slog.Info("no files to scan in", "dir", root)
-		return nil
+		return nil, nil
 	}
 
 	return processPaths(toProcess)
