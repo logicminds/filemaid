@@ -45,6 +45,9 @@ var processCmd = &cobra.Command{
 	Long:  "Process one or more files: classify them with the configured LLM and apply the resulting move/tag/delete/review decision.",
 	Args:  cobra.MinimumNArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
+		if err := classifier.Validate(cfg); err != nil {
+			return fmt.Errorf("model validation failed: %w", err)
+		}
 		return processPaths(args)
 	},
 }

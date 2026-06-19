@@ -38,7 +38,12 @@ func NewDecision() Decision {
 
 // Classifier turns a file path into a classification Decision.
 type Classifier interface {
+	// Classify classifies a single file and returns a Decision.
 	Classify(path string, cfg *config.Config) (Decision, error)
+	// Validate checks that the configured Ollama model is reachable and can
+	// generate a response. Commands that depend on classification should call
+	// Validate before touching any files.
+	Validate(cfg *config.Config) error
 }
 
 // HTTPTransport abstracts the HTTP layer so tests can fake Ollama responses.
@@ -178,6 +183,37 @@ func (c *Client) checkModel(ollamaURL, model string) error {
 		}
 	}
 	return fmt.Errorf("model %q not found in Ollama; run `filemaid setup` or `ollama pull %s`", model, model)
+}
+
+// Validate checks that Ollama is reachable and that the configured model can
+// generate a response. It returns an error if the model is missing, Ollama is
+// unreachable, or the model fails to generate. Commands should call Validate
+// before performing any file operations that depend on classification.
+func (c *Client) Validate(cfg *config.Config) error {
+	if err := c.checkModel(cfg.OllamaURL, cfg.Model); err != nil {
+		return err
+	}
+
+	ollamaURL := strings.TrimRight(cfg.OllamaURL, "/")
+	body := map[string]any{
+		"model":  cfg.Model,
+		"prompt": "Reply with the single word OK.",
+		"stream": false,
+		"options": map[string]any{
+			"temperature": 0,
+			"num_predict": 3,
+			"num_ctx":     8192,
+		},
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	_, err := c.postJSON(ctx, ollamaURL+"/api/generate", body, 60*time.Second)
+	if err != nil {
+		return fmt.Errorf("model %q validation failed: %w", cfg.Model, err)
+	}
+	return nil
 }
 
 var imageExts = map[string]bool{
