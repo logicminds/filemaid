@@ -178,11 +178,25 @@ func (c *Client) checkModel(ollamaURL, model string) error {
 	}
 
 	for _, m := range list.Models {
-		if m.Name == model {
+		if modelMatch(model, m.Name) {
 			return nil
 		}
 	}
 	return fmt.Errorf("model %q not found in Ollama; run `filemaid setup` or `ollama pull %s`", model, model)
+}
+
+// modelMatch reports whether the configured model name want matches the name
+// returned by Ollama's /api/tags endpoint. A want value with no tag is treated
+// as a family name and matches any tag for that model, consistent with setup.
+func modelMatch(want, have string) bool {
+	if want == have {
+		return true
+	}
+	// If want has no tag, accept any tag for the same base model.
+	if !strings.Contains(want, ":") {
+		return strings.HasPrefix(have, want+":")
+	}
+	return false
 }
 
 // Validate checks that Ollama is reachable and that the configured model can
