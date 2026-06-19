@@ -39,7 +39,7 @@ var (
 )
 
 // applierFunc matches the signature of actions.Apply so it can be swapped in tests.
-type applierFunc func(decision llm.Decision, src string, cfg *config.Config, db state.Repo, isDuplicate bool, fs actions.FS) (string, error)
+type applierFunc func(decision llm.Decision, src string, fileHash string, cfg *config.Config, db state.Repo, isDuplicate bool, fs actions.FS) (string, error)
 
 func init() {
 	processCmd.Flags().StringVar(&processFormat, "format", "table", "output format (table|json)")
@@ -179,7 +179,7 @@ func processPaths(paths []string) ([]processResult, error) {
 			}
 		}
 
-		result, err := applyDecision(decision, src, cfg, db, isDuplicate, processFS)
+		result, err := applyDecision(decision, src, fileHash, cfg, db, isDuplicate, processFS)
 		if err != nil {
 			slog.Error("apply failed", "path", src, "error", err)
 			results = append(results, processResult{
