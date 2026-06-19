@@ -71,7 +71,7 @@ func TestAcceptanceClassifyRealFiles(t *testing.T) {
 				t.Fatalf("abs path: %v", err)
 			}
 
-			decision, err := client.Classify(path, cfg)
+			decision, err := client.Classify(path, "", cfg)
 			if err != nil {
 				t.Fatalf("classify %s: %v", path, err)
 			}
@@ -119,7 +119,7 @@ func TestAcceptanceParseableResponse(t *testing.T) {
 			t.Fatalf("abs path: %v", err)
 		}
 
-		decision, err := client.Classify(path, cfg)
+		decision, err := client.Classify(path, "", cfg)
 		if err != nil {
 			t.Fatalf("classify %s: %v", path, err)
 		}

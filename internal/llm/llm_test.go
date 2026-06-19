@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/logicminds/filemaid/internal/config"
@@ -333,6 +334,32 @@ func modelListResponse(model string) *http.Response {
 	})
 }
 
+// fakeDecisionCache is an in-memory DecisionCache for tests.
+type fakeDecisionCache struct {
+	mu        sync.Mutex
+	decisions map[string]Decision
+}
+
+func (f *fakeDecisionCache) FindDecisionByHash(sha256 string) (Decision, bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.decisions == nil {
+		return Decision{}, false, nil
+	}
+	d, ok := f.decisions[sha256]
+	return d, ok, nil
+}
+
+func (f *fakeDecisionCache) RecordDecision(sha256 string, decision Decision) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.decisions == nil {
+		f.decisions = make(map[string]Decision)
+	}
+	f.decisions[sha256] = decision
+	return nil
+}
+
 func TestClassifyUsesChatEndpoint(t *testing.T) {
 	tmp := t.TempDir()
 	cfg := baseConfig(t, tmp)
@@ -386,7 +413,7 @@ func TestClassifyUsesChatEndpoint(t *testing.T) {
 	}
 
 	client := NewClient(transport)
-	decision, err := client.Classify(textFile, cfg)
+	decision, err := client.Classify(textFile, "", cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -420,7 +447,7 @@ func TestClassifyDoesNotFallbackToGenerate(t *testing.T) {
 	}
 
 	client := NewClient(transport)
-	decision, err := client.Classify(textFile, cfg)
+	decision, err := client.Classify(textFile, "", cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -454,7 +481,7 @@ func TestClassifyFallsBackOnError(t *testing.T) {
 	}
 
 	client := NewClient(transport)
-	decision, err := client.Classify(textFile, cfg)
+	decision, err := client.Classify(textFile, "", cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -510,7 +537,7 @@ func TestClassifyRetriesWithoutImagesOnFailure(t *testing.T) {
 	}
 
 	client := NewClient(transport)
-	decision, err := client.Classify(img, cfg)
+	decision, err := client.Classify(img, "", cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -549,7 +576,7 @@ func TestClassifyDoesNotRetryWithoutImagesOnGenericError(t *testing.T) {
 	}
 
 	client := NewClient(transport)
-	decision, err := client.Classify(img, cfg)
+	decision, err := client.Classify(img, "", cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -585,7 +612,7 @@ func TestClassifySkipsHiddenFilesNoSpecialHandling(t *testing.T) {
 	}
 
 	client := NewClient(transport)
-	decision, err := client.Classify(textFile, cfg)
+	decision, err := client.Classify(textFile, "", cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -663,7 +690,7 @@ func TestClassifierInterface(t *testing.T) {
 	}
 
 	var classifier Classifier = NewClient(transport)
-	decision, err := classifier.Classify(textFile, cfg)
+	decision, err := classifier.Classify(textFile, "", cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -722,7 +749,7 @@ func TestCheckModelMissingModel(t *testing.T) {
 
 	client := NewClient(transport)
 	cfg := baseConfig(t, t.TempDir())
-	_, err := client.Classify("", cfg)
+	_, err := client.Classify("", "", cfg)
 	if err == nil {
 		t.Fatal("expected error for missing model")
 	}
@@ -896,5 +923,223 @@ func TestValidateSucceedsWhenModelHasDifferentTag(t *testing.T) {
 	cfg.Model = "filemaid-test"
 	if err := client.Validate(cfg); err != nil {
 		t.Fatalf("Validate failed: %v", err)
+	}
+}
+
+func TestCheckModelCached(t *testing.T) {
+	tmp := t.TempDir()
+	cfg := baseConfig(t, tmp)
+
+	textFile := filepath.Join(tmp, "note.txt")
+	if err := os.WriteFile(textFile, []byte("hello world"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var tagsCalls int
+	transport := &fakeTransport{
+		handler: func(req *http.Request) (*http.Response, error) {
+			if strings.HasSuffix(req.URL.String(), "/api/tags") {
+				tagsCalls++
+				return modelListResponse(cfg.Model), nil
+			}
+			return jsonResponse(map[string]any{
+				"message": map[string]any{
+					"tool_calls": []any{
+						map[string]any{
+							"function": map[string]any{
+								"arguments": map[string]any{
+									"category": "Documents",
+									"tags":     []any{"txt"},
+									"action":   "move",
+									"reason":   "text",
+								},
+							},
+						},
+					},
+				},
+			}), nil
+		},
+	}
+
+	client := NewClient(transport)
+	if _, err := client.Classify(textFile, "", cfg); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.Classify(textFile, "", cfg); err != nil {
+		t.Fatal(err)
+	}
+	if tagsCalls != 1 {
+		t.Errorf("expected 1 /api/tags call, got %d", tagsCalls)
+	}
+}
+
+func TestCheckModelCacheInvalidatedOnModelChange(t *testing.T) {
+	tmp := t.TempDir()
+	cfg := baseConfig(t, tmp)
+
+	textFile := filepath.Join(tmp, "note.txt")
+	if err := os.WriteFile(textFile, []byte("hello world"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var tagsCalls int
+	transport := &fakeTransport{
+		handler: func(req *http.Request) (*http.Response, error) {
+			if strings.HasSuffix(req.URL.String(), "/api/tags") {
+				tagsCalls++
+				return modelListResponse(cfg.Model), nil
+			}
+			return jsonResponse(map[string]any{
+				"response": `{"category": "Documents", "tags": [], "action": "move", "reason": "x"}`,
+			}), nil
+		},
+	}
+
+	client := NewClient(transport)
+	if _, err := client.Classify(textFile, "", cfg); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg.Model = "other-model"
+	if _, err := client.Classify(textFile, "", cfg); err != nil {
+		t.Fatal(err)
+	}
+
+	if tagsCalls != 2 {
+		t.Errorf("expected 2 /api/tags calls after model change, got %d", tagsCalls)
+	}
+}
+
+func TestClassifyHashCache(t *testing.T) {
+	tmp := t.TempDir()
+	cfg := baseConfig(t, tmp)
+
+	textFile := filepath.Join(tmp, "note.txt")
+	if err := os.WriteFile(textFile, []byte("hello world"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cache := &fakeDecisionCache{}
+	if err := cache.RecordDecision("hash1", Decision{
+		Category: "Images",
+		Action:   "move",
+		Reason:   "cached",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	var tagsCalls, chatCalls int
+	transport := &fakeTransport{
+		handler: func(req *http.Request) (*http.Response, error) {
+			if strings.HasSuffix(req.URL.String(), "/api/tags") {
+				tagsCalls++
+				return modelListResponse(cfg.Model), nil
+			}
+			chatCalls++
+			t.Errorf("unexpected /api/chat call")
+			return nil, io.EOF
+		},
+	}
+
+	client := NewClient(transport)
+	client.SetDecisionCache(cache)
+
+	decision, err := client.Classify(textFile, "hash1", cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if decision.Category != "Images" {
+		t.Errorf("Category = %q, want Images", decision.Category)
+	}
+	if tagsCalls != 0 {
+		t.Errorf("expected 0 /api/tags calls, got %d", tagsCalls)
+	}
+	if chatCalls != 0 {
+		t.Errorf("expected 0 /api/chat calls, got %d", chatCalls)
+	}
+}
+
+func TestClassifyRecordsDecisionInCache(t *testing.T) {
+	tmp := t.TempDir()
+	cfg := baseConfig(t, tmp)
+
+	textFile := filepath.Join(tmp, "note.txt")
+	if err := os.WriteFile(textFile, []byte("hello world"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cache := &fakeDecisionCache{}
+	transport := &fakeTransport{
+		handler: func(req *http.Request) (*http.Response, error) {
+			if strings.HasSuffix(req.URL.String(), "/api/tags") {
+				return modelListResponse(cfg.Model), nil
+			}
+			return jsonResponse(map[string]any{
+				"message": map[string]any{
+					"tool_calls": []any{
+						map[string]any{
+							"function": map[string]any{
+								"arguments": map[string]any{
+									"category": "Documents",
+									"tags":     []any{"txt"},
+									"action":   "move",
+									"reason":   "text",
+								},
+							},
+						},
+					},
+				},
+			}), nil
+		},
+	}
+
+	client := NewClient(transport)
+	client.SetDecisionCache(cache)
+
+	if _, err := client.Classify(textFile, "hash1", cfg); err != nil {
+		t.Fatal(err)
+	}
+
+	d, ok, err := cache.FindDecisionByHash("hash1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ok {
+		t.Fatal("expected decision to be cached")
+	}
+	if d.Category != "Documents" {
+		t.Errorf("cached Category = %q, want Documents", d.Category)
+	}
+	if d.Action != "move" {
+		t.Errorf("cached Action = %q, want move", d.Action)
+	}
+}
+
+func TestValidateUsesCachedModelCheck(t *testing.T) {
+	var tagsCalls int
+	transport := &fakeTransport{
+		handler: func(req *http.Request) (*http.Response, error) {
+			if strings.HasSuffix(req.URL.String(), "/api/tags") {
+				tagsCalls++
+				return modelListResponse("filemaid-test"), nil
+			}
+			if strings.HasSuffix(req.URL.String(), "/api/generate") {
+				return jsonResponse(map[string]any{"response": "OK"}), nil
+			}
+			return jsonResponse(map[string]any{}), nil
+		},
+	}
+
+	client := NewClient(transport)
+	cfg := baseConfig(t, t.TempDir())
+	cfg.Model = "filemaid-test"
+	if err := client.Validate(cfg); err != nil {
+		t.Fatalf("first Validate failed: %v", err)
+	}
+	if err := client.Validate(cfg); err != nil {
+		t.Fatalf("second Validate failed: %v", err)
+	}
+	if tagsCalls != 1 {
+		t.Errorf("expected 1 /api/tags call, got %d", tagsCalls)
 	}
 }

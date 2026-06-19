@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/logicminds/filemaid/internal/config"
@@ -36,15 +37,21 @@ func NewDecision() Decision {
 		Action:   "review",
 	}
 }
-
 // Classifier turns a file path into a classification Decision.
 type Classifier interface {
 	// Classify classifies a single file and returns a Decision.
-	Classify(path string, cfg *config.Config) (Decision, error)
+	Classify(path string, fileHash string, cfg *config.Config) (Decision, error)
 	// Validate checks that the configured Ollama model is reachable and can
 	// generate a response. Commands that depend on classification should call
 	// Validate before touching any files.
 	Validate(cfg *config.Config) error
+}
+
+// DecisionCache stores and retrieves classification decisions keyed by content
+// hash so repeated identical files can skip LLM calls.
+type DecisionCache interface {
+	FindDecisionByHash(sha256 string) (Decision, bool, error)
+	RecordDecision(sha256 string, decision Decision) error
 }
 
 // HTTPTransport abstracts the HTTP layer so tests can fake Ollama responses.
@@ -56,6 +63,14 @@ type HTTPTransport interface {
 // Client is an Ollama-backed Classifier.
 type Client struct {
 	transport HTTPTransport
+	cache     DecisionCache
+
+	mu      sync.Mutex
+	checked struct {
+		url   string
+		model string
+		err   error
+	}
 }
 
 // NewClient creates a classifier. If transport is nil, the default HTTP
@@ -64,8 +79,21 @@ func NewClient(transport HTTPTransport) *Client {
 	return &Client{transport: transport}
 }
 
+// SetDecisionCache attaches a decision cache to the client. When set, Classify
+// checks the cache by file hash before calling Ollama and records the result
+// after a successful classification.
+func (c *Client) SetDecisionCache(cache DecisionCache) {
+	c.cache = cache
+}
+
 // Classify classifies a single file using Ollama.
-func (c *Client) Classify(path string, cfg *config.Config) (Decision, error) {
+func (c *Client) Classify(path string, fileHash string, cfg *config.Config) (Decision, error) {
+	if fileHash != "" && c.cache != nil {
+		if d, ok, err := c.cache.FindDecisionByHash(fileHash); err == nil && ok {
+			return d, nil
+		}
+	}
+
 	if err := c.checkModel(cfg.OllamaURL, cfg.Model); err != nil {
 		return Decision{}, err
 	}
@@ -101,11 +129,17 @@ func (c *Client) Classify(path string, cfg *config.Config) (Decision, error) {
 	}
 
 	if err == nil {
+		if fileHash != "" && c.cache != nil {
+			_ = c.cache.RecordDecision(fileHash, decision)
+		}
 		return decision, nil
 	}
 
 	d := NewDecision()
 	d.Reason = fmt.Sprintf("ollama error: %s", err.Error())
+	if fileHash != "" && c.cache != nil {
+		_ = c.cache.RecordDecision(fileHash, d)
+	}
 	return d, nil
 }
 
@@ -128,8 +162,29 @@ func isImageRelatedError(err error) bool {
 
 // checkModel asks Ollama whether the configured model exists locally. It
 // returns a clear error so callers can warn the user and exit instead of
-// retrying unknown models and crashing.
+// retrying unknown models and crashing. Results are cached per (url, model)
+// on the Client so repeated checks do not contact Ollama again.
 func (c *Client) checkModel(ollamaURL, model string) error {
+	c.mu.Lock()
+	if c.checked.url == ollamaURL && c.checked.model == model {
+		err := c.checked.err
+		c.mu.Unlock()
+		return err
+	}
+	c.mu.Unlock()
+
+	err := c.fetchCheckModel(ollamaURL, model)
+
+	c.mu.Lock()
+	c.checked.url = ollamaURL
+	c.checked.model = model
+	c.checked.err = err
+	c.mu.Unlock()
+	return err
+}
+
+// fetchCheckModel performs the actual Ollama /api/tags request.
+func (c *Client) fetchCheckModel(ollamaURL, model string) error {
 	url := strings.TrimRight(ollamaURL, "/") + "/api/tags"
 	transport := c.transport
 	if transport == nil {

@@ -74,6 +74,9 @@ var processCmd = &cobra.Command{
 		if err := classifier.Validate(cfg); err != nil {
 			return fmt.Errorf("model validation failed: %w", err)
 		}
+		if c, ok := classifier.(*llm.Client); ok {
+			c.SetDecisionCache(db)
+		}
 		results, err := processPaths(args)
 		if err != nil {
 			return err
@@ -212,7 +215,7 @@ func processPaths(paths []string) ([]processResult, error) {
 			if !item.ageMatched {
 				fmt.Fprintf(os.Stderr, "Classifying %s...\n", item.src)
 				var err error
-				decision, err = classifier.Classify(item.src, cfg)
+				decision, err = classifier.Classify(item.src, item.fileHash, cfg)
 				if err != nil {
 					slog.Warn("classification failed", "path", item.src, "error", err)
 					decision = llm.NewDecision()

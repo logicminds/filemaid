@@ -224,7 +224,7 @@ type fakeClassifier struct {
 	validated bool
 }
 
-func (f *fakeClassifier) Classify(path string, cfg *config.Config) (llm.Decision, error) {
+func (f *fakeClassifier) Classify(path string, fileHash string, cfg *config.Config) (llm.Decision, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.calls = append(f.calls, path)
@@ -379,7 +379,7 @@ func newBlockingClassifier() *blockingClassifier {
 	return b
 }
 
-func (b *blockingClassifier) Classify(path string, cfg *config.Config) (llm.Decision, error) {
+func (b *blockingClassifier) Classify(path string, fileHash string, cfg *config.Config) (llm.Decision, error) {
 	b.mu.Lock()
 	b.active++
 	if b.active > b.maxActive {
@@ -390,7 +390,7 @@ func (b *blockingClassifier) Classify(path string, cfg *config.Config) (llm.Deci
 	}
 	b.active--
 	b.mu.Unlock()
-	return b.fakeClassifier.Classify(path, cfg)
+	return b.fakeClassifier.Classify(path, fileHash, cfg)
 }
 
 func (b *blockingClassifier) release() {
