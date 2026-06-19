@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/logicminds/filemaid/internal/actions"
@@ -33,6 +34,23 @@ var (
 	// nowFunc returns the current time. Tests may replace it with a fixed clock.
 	nowFunc = time.Now
 )
+
+// defaultProcessWorkers limits how many files are classified and applied
+// concurrently. Classification is the expensive LLM-bound step; apply is
+// mutex-serialized to keep filesystem and history operations deterministic.
+const defaultProcessWorkers = 4
+
+// processItem carries the sequential preprocessing state for a single accepted
+// file into the concurrent classify+apply stage.
+type processItem struct {
+	pos         int
+	src         string
+	fileHash    string
+	isDuplicate bool
+	ageDecision llm.Decision
+	ageMatched  bool
+}
+
 var (
 	processFormat string
 	processJSON   bool
@@ -121,7 +139,10 @@ func formatProcessTable(results []processResult) string {
 // out-of-allowed files; honour age rules; detect duplicates; coerce unsafe
 // deletes to review; log the result; and return a displayable result per file.
 func processPaths(paths []string) ([]processResult, error) {
-	var results []processResult
+	// Preprocess sequentially so skipping, hash/duplicate detection, age-rule
+	// matching and their logs remain deterministic and ordered.
+	items := make([]processItem, 0, len(paths))
+	seenHashes := make(map[string]bool)
 	for _, raw := range paths {
 		src, err := filepath.Abs(raw)
 		if err != nil {
@@ -158,58 +179,92 @@ func processPaths(paths []string) ([]processResult, error) {
 			slog.Warn("duplicate lookup failed", "path", src, "error", err)
 		}
 		isDuplicate := rec != nil && processFS.Exists(rec.FinalPath)
+		if seenHashes[fileHash] {
+			isDuplicate = true
+		}
+		seenHashes[fileHash] = true
 
-		decision, matched := checkAgeRule(src, cfg)
-		if !matched {
-			fmt.Fprintf(os.Stderr, "Classifying %s...\n", src)
-			decision, err = classifier.Classify(src, cfg)
+		ageDecision, ageMatched := checkAgeRule(src, cfg)
+
+		items = append(items, processItem{
+			pos:         len(items),
+			src:         src,
+			fileHash:    fileHash,
+			isDuplicate: isDuplicate,
+			ageDecision: ageDecision,
+			ageMatched:  ageMatched,
+		})
+	}
+
+	results := make([]processResult, len(items))
+	var wg sync.WaitGroup
+	sem := make(chan struct{}, defaultProcessWorkers)
+	var applyMu sync.Mutex
+
+	for _, item := range items {
+		wg.Add(1)
+		go func(item processItem) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+
+			decision := item.ageDecision
+			if !item.ageMatched {
+				fmt.Fprintf(os.Stderr, "Classifying %s...\n", item.src)
+				var err error
+				decision, err = classifier.Classify(item.src, cfg)
+				if err != nil {
+					slog.Warn("classification failed", "path", item.src, "error", err)
+					decision = llm.NewDecision()
+				}
+			}
+
+			if item.isDuplicate {
+				if actions.MatchesPatterns(item.src, cfg.SafeDeletePatterns) {
+					decision.Action = "delete"
+					decision.Reason += "; duplicate matches safe delete pattern"
+				} else if decision.Action != "review" {
+					decision.Action = "review"
+					decision.Reason += "; duplicate detected"
+				}
+			}
+
+			applyMu.Lock()
+			result, err := applyDecision(decision, item.src, item.fileHash, cfg, db, item.isDuplicate, processFS)
+			applyMu.Unlock()
+
 			if err != nil {
-				slog.Warn("classification failed", "path", src, "error", err)
-				decision = llm.NewDecision()
+				slog.Error("apply failed", "path", item.src, "error", err)
+				results[item.pos] = processResult{
+					Path:     item.src,
+					Category: decision.Category,
+					Tags:     processTags(decision),
+					Action:   decision.Action,
+					Result:   "",
+					OK:       false,
+					Error:    err.Error(),
+				}
+				return
 			}
-		}
 
-		if isDuplicate {
-			if actions.MatchesPatterns(src, cfg.SafeDeletePatterns) {
-				decision.Action = "delete"
-				decision.Reason += "; duplicate matches safe delete pattern"
-			} else if decision.Action != "review" {
-				decision.Action = "review"
-				decision.Reason += "; duplicate detected"
-			}
-		}
-
-		result, err := applyDecision(decision, src, fileHash, cfg, db, isDuplicate, processFS)
-		if err != nil {
-			slog.Error("apply failed", "path", src, "error", err)
-			results = append(results, processResult{
-				Path:     src,
+			slog.Info("processed",
+				"src", item.src,
+				"result", result,
+				"category", decision.Category,
+				"action", decision.Action,
+				"reason", decision.Reason,
+			)
+			results[item.pos] = processResult{
+				Path:     item.src,
 				Category: decision.Category,
 				Tags:     processTags(decision),
 				Action:   decision.Action,
-				Result:   "",
-				OK:       false,
-				Error:    err.Error(),
-			})
-			continue
-		}
-
-		slog.Info("processed",
-			"src", src,
-			"result", result,
-			"category", decision.Category,
-			"action", decision.Action,
-			"reason", decision.Reason,
-		)
-		results = append(results, processResult{
-			Path:     src,
-			Category: decision.Category,
-			Tags:     processTags(decision),
-			Action:   decision.Action,
-			Result:   result,
-			OK:       true,
-		})
+				Result:   result,
+				OK:       true,
+			}
+		}(item)
 	}
+	wg.Wait()
 	return results, nil
 }
 

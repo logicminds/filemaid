@@ -3,10 +3,12 @@ package cli
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -195,15 +197,26 @@ func TestProcessPathsDuplicateForcesReview(t *testing.T) {
 	if len(records) != 2 {
 		t.Fatalf("expected 2 history records, got %d", len(records))
 	}
-	if records[0].Action != "move" {
-		t.Errorf("first action = %q, want move", records[0].Action)
+
+	var moves, reviews int
+	for _, r := range records {
+		switch r.Action {
+		case "move":
+			moves++
+		case "review":
+			reviews++
+		}
 	}
-	if records[1].Action != "review" {
-		t.Errorf("second action = %q, want review", records[1].Action)
+	if moves != 1 {
+		t.Errorf("expected 1 move action, got %d", moves)
+	}
+	if reviews != 1 {
+		t.Errorf("expected 1 review action, got %d", reviews)
 	}
 }
 
 type fakeClassifier struct {
+	mu        sync.Mutex
 	decision  llm.Decision
 	err       error
 	validate  error
@@ -212,13 +225,26 @@ type fakeClassifier struct {
 }
 
 func (f *fakeClassifier) Classify(path string, cfg *config.Config) (llm.Decision, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.calls = append(f.calls, path)
 	return f.decision, f.err
 }
 
 func (f *fakeClassifier) Validate(cfg *config.Config) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.validated = true
 	return f.validate
+}
+
+// Calls returns a snapshot of Classify calls seen so far.
+func (f *fakeClassifier) Calls() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make([]string, len(f.calls))
+	copy(out, f.calls)
+	return out
 }
 
 func testConfig(tmpDir string) *config.Config {
@@ -299,6 +325,133 @@ func TestProcessPathsLogsApplyError(t *testing.T) {
 
 	if !bytes.Contains(buf.Bytes(), []byte("apply failed")) {
 		t.Errorf("expected 'apply failed' log, got %q", buf.String())
+	}
+}
+
+func TestProcessPathsResultsInInputOrder(t *testing.T) {
+	tmp := t.TempDir()
+	cfg = testConfig(tmp)
+	db = state.NewFake()
+	processFS = actions.NewRecordingFS()
+	classifier = &fakeClassifier{decision: llm.Decision{
+		Category: "Documents",
+		Tags:     []string{"txt"},
+		Action:   "move",
+		Reason:   "text",
+	}}
+
+	paths := make([]string, 5)
+	for i := range paths {
+		p := filepath.Join(tmp, "Desktop", fmt.Sprintf("file%d.txt", i))
+		os.MkdirAll(filepath.Dir(p), 0755)
+		os.WriteFile(p, []byte(fmt.Sprintf("content%d", i)), 0644)
+		paths[i] = p
+	}
+
+	results, err := processPaths(paths)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(results) != len(paths) {
+		t.Fatalf("expected %d results, got %d", len(paths), len(results))
+	}
+	for i, want := range paths {
+		if results[i].Path != want {
+			t.Errorf("results[%d].Path = %q, want %q", i, results[i].Path, want)
+		}
+	}
+}
+
+// blockingClassifier blocks Classify calls until release() is invoked so tests
+// can observe concurrent classification.
+type blockingClassifier struct {
+	fakeClassifier
+	mu        sync.Mutex
+	cond      *sync.Cond
+	active    int
+	maxActive int
+	proceed   bool
+}
+
+func newBlockingClassifier() *blockingClassifier {
+	b := &blockingClassifier{}
+	b.cond = sync.NewCond(&b.mu)
+	return b
+}
+
+func (b *blockingClassifier) Classify(path string, cfg *config.Config) (llm.Decision, error) {
+	b.mu.Lock()
+	b.active++
+	if b.active > b.maxActive {
+		b.maxActive = b.active
+	}
+	for !b.proceed {
+		b.cond.Wait()
+	}
+	b.active--
+	b.mu.Unlock()
+	return b.fakeClassifier.Classify(path, cfg)
+}
+
+func (b *blockingClassifier) release() {
+	b.mu.Lock()
+	b.proceed = true
+	b.cond.Broadcast()
+	b.mu.Unlock()
+}
+
+func TestProcessPathsProcessesConcurrently(t *testing.T) {
+	tmp := t.TempDir()
+	cfg = testConfig(tmp)
+	db = state.NewFake()
+	processFS = actions.NewRecordingFS()
+
+	bc := newBlockingClassifier()
+	bc.decision = llm.Decision{Category: "Documents", Action: "review", Reason: "test"}
+	classifier = bc
+	t.Cleanup(func() { classifier = llm.NewClient(nil) })
+
+	paths := make([]string, 5)
+	for i := range paths {
+		p := filepath.Join(tmp, "Desktop", fmt.Sprintf("concurrent%d.txt", i))
+		os.MkdirAll(filepath.Dir(p), 0755)
+		os.WriteFile(p, []byte(fmt.Sprintf("content%d", i)), 0644)
+		paths[i] = p
+	}
+
+	done := make(chan []processResult)
+	go func() {
+		res, err := processPaths(paths)
+		if err != nil {
+			t.Error(err)
+		}
+		done <- res
+	}()
+
+	// Wait for at least two concurrent Classify calls to confirm workers run
+	// in parallel rather than sequentially.
+	for {
+		bc.mu.Lock()
+		ma := bc.maxActive
+		bc.mu.Unlock()
+		if ma >= 2 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	bc.release()
+	results := <-done
+
+	if len(results) != len(paths) {
+		t.Fatalf("expected %d results, got %d", len(paths), len(results))
+	}
+
+	bc.mu.Lock()
+	peak := bc.maxActive
+	bc.mu.Unlock()
+	if peak < 2 {
+		t.Errorf("expected concurrent classification, got max active %d", peak)
 	}
 }
 
