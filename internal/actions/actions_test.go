@@ -166,7 +166,7 @@ func TestApplyMovesFileToCategory(t *testing.T) {
 	}
 
 	decision := llm.Decision{Category: "Images", Action: "move", Reason: "png"}
-	result, err := Apply(decision, src, cfg, db, false, fs)
+	result, err := Apply(decision, src, mustHash(t, src), cfg, db, false, fs)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -196,7 +196,7 @@ func TestApplySkipDisallowedSource(t *testing.T) {
 	}
 
 	decision := llm.Decision{Category: "Images", Action: "move", Reason: "png"}
-	result, err := Apply(decision, src, cfg, db, false, fs)
+	result, err := Apply(decision, src, mustHash(t, src), cfg, db, false, fs)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -223,7 +223,7 @@ func TestApplyForcesReviewOnUnsafeDelete(t *testing.T) {
 	}
 
 	decision := llm.Decision{Category: "Documents", Action: "delete", Reason: "delete it"}
-	result, err := Apply(decision, src, cfg, db, false, fs)
+	result, err := Apply(decision, src, mustHash(t, src), cfg, db, false, fs)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -271,7 +271,7 @@ func TestApplyAllowsDeleteForSafePattern(t *testing.T) {
 	}
 
 	decision := llm.Decision{Category: "Unknown", Action: "delete", Reason: "temp file"}
-	result, err := Apply(decision, src, cfg, db, false, fs)
+	result, err := Apply(decision, src, mustHash(t, src), cfg, db, false, fs)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -302,7 +302,7 @@ func TestApplyRedirectsOutsideAllowedDestination(t *testing.T) {
 	}
 
 	decision := llm.Decision{Category: "Images", Action: "move", Destination: "/tmp/evil", Reason: "hack"}
-	result, err := Apply(decision, src, cfg, db, false, fs)
+	result, err := Apply(decision, src, mustHash(t, src), cfg, db, false, fs)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -326,7 +326,7 @@ func TestApplyDestinationOutsideAllowedRecordsReason(t *testing.T) {
 	}
 
 	decision := llm.Decision{Category: "Images", Action: "move", Destination: "/tmp/evil", Reason: "hack"}
-	if _, err := Apply(decision, src, cfg, db, false, fs); err != nil {
+	if _, err := Apply(decision, src, mustHash(t, src), cfg, db, false, fs); err != nil {
 		t.Fatal(err)
 	}
 	recs := db.Records()
@@ -350,7 +350,7 @@ func TestApplyRecordsHistory(t *testing.T) {
 	}
 
 	decision := llm.Decision{Category: "Documents", Action: "move", Reason: "txt"}
-	if _, err := Apply(decision, src, cfg, db, false, fs); err != nil {
+	if _, err := Apply(decision, src, mustHash(t, src), cfg, db, false, fs); err != nil {
 		t.Fatal(err)
 	}
 	recs := db.Records()
@@ -380,7 +380,7 @@ func TestApplyDuplicateCoercesDeleteToReview(t *testing.T) {
 	}
 
 	decision := llm.Decision{Category: "Documents", Action: "delete", Reason: "delete dup"}
-	if _, err := Apply(decision, src1, cfg, db, false, fs); err != nil {
+	if _, err := Apply(decision, src1, mustHash(t, src1), cfg, db, false, fs); err != nil {
 		t.Fatal(err)
 	}
 
@@ -388,7 +388,7 @@ func TestApplyDuplicateCoercesDeleteToReview(t *testing.T) {
 	if err := os.WriteFile(src2, []byte("same content"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	result, err := Apply(decision, src2, cfg, db, false, fs)
+	result, err := Apply(decision, src2, mustHash(t, src2), cfg, db, false, fs)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -416,7 +416,7 @@ func TestApplySetsTags(t *testing.T) {
 	}
 
 	decision := llm.Decision{Category: "Images", Tags: []string{"image", "desktop"}, Action: "move", Reason: "png"}
-	if _, err := Apply(decision, src, cfg, db, false, fs); err != nil {
+	if _, err := Apply(decision, src, mustHash(t, src), cfg, db, false, fs); err != nil {
 		t.Fatal(err)
 	}
 	if len(fs.Tags) != 1 {
@@ -443,7 +443,7 @@ func TestApplyAddsSubcategoryAsTag(t *testing.T) {
 	}
 
 	decision := llm.Decision{Category: "Images", Subcategory: "cat", Tags: []string{"photo"}, Action: "move", Reason: "png"}
-	if _, err := Apply(decision, src, cfg, db, false, fs); err != nil {
+	if _, err := Apply(decision, src, mustHash(t, src), cfg, db, false, fs); err != nil {
 		t.Fatal(err)
 	}
 	if len(fs.Tags) != 1 {
@@ -471,7 +471,7 @@ func TestApplyDoesNotDuplicateSubcategoryTag(t *testing.T) {
 	}
 
 	decision := llm.Decision{Category: "Images", Subcategory: "cat", Tags: []string{"cat", "photo"}, Action: "move", Reason: "png"}
-	if _, err := Apply(decision, src, cfg, db, false, fs); err != nil {
+	if _, err := Apply(decision, src, mustHash(t, src), cfg, db, false, fs); err != nil {
 		t.Fatal(err)
 	}
 	if len(fs.Tags) != 1 {
@@ -511,7 +511,7 @@ func TestApplyTrashFailureForcesReview(t *testing.T) {
 	}
 
 	decision := llm.Decision{Category: "Unknown", Action: "delete", Reason: "temp file"}
-	result, err := Apply(decision, src, cfg, db, false, fs)
+	result, err := Apply(decision, src, mustHash(t, src), cfg, db, false, fs)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -542,12 +542,51 @@ func TestApplyMoveFailureReturnsError(t *testing.T) {
 	}
 
 	decision := llm.Decision{Category: "Documents", Action: "move", Reason: "txt"}
-	_, err := Apply(decision, src, cfg, db, false, fs)
+	_, err := Apply(decision, src, mustHash(t, src), cfg, db, false, fs)
 	if err == nil {
 		t.Fatal("expected error")
 	}
 	if !strings.Contains(err.Error(), "move failed") {
 		t.Errorf("error = %q, want move failed", err)
+	}
+}
+
+// TestApplySkipsGracefullyWhenFileDisappears verifies that if a file is moved
+// by a concurrent process between hash computation and the Apply call, Apply
+// returns a "skipped" result (no error, no DB record) instead of failing.
+// This models the scenario where the LaunchAgent and a manual scan run at the
+// same time and both try to process the same file.
+func TestApplySkipsGracefullyWhenFileDisappears(t *testing.T) {
+	tmp := t.TempDir()
+	cfg := testConfig(t, tmp)
+	db := state.NewFake()
+	fs := NewRecordingFS()
+
+	src := filepath.Join(tmp, "Desktop", "screenshot.png")
+	if err := os.MkdirAll(filepath.Dir(src), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(src, []byte("img"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Simulate: hash was computed before the LLM call, then the file was moved
+	// away by a concurrent process.
+	hash := mustHash(t, src)
+	if err := os.Remove(src); err != nil {
+		t.Fatal(err)
+	}
+
+	decision := llm.Decision{Category: "Images", Action: "move", Reason: "png"}
+	result, err := Apply(decision, src, hash, cfg, db, false, fs)
+	if err != nil {
+		t.Fatalf("expected no error when file is gone, got: %v", err)
+	}
+	if !strings.Contains(result, "skipped") {
+		t.Errorf("result = %q, want to contain 'skipped'", result)
+	}
+	if len(db.Records()) != 0 {
+		t.Errorf("expected no DB record for disappeared file, got %d", len(db.Records()))
 	}
 }
 
@@ -570,11 +609,11 @@ func TestApplyUniqueDestCollision(t *testing.T) {
 	}
 
 	decision := llm.Decision{Category: "Documents", Action: "move", Reason: "doc"}
-	result1, err := Apply(decision, src1, cfg, db, false, fs)
+	result1, err := Apply(decision, src1, mustHash(t, src1), cfg, db, false, fs)
 	if err != nil {
 		t.Fatal(err)
 	}
-	result2, err := Apply(decision, src2, cfg, db, false, fs)
+	result2, err := Apply(decision, src2, mustHash(t, src2), cfg, db, false, fs)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -601,7 +640,7 @@ func TestApplyUnknownCategoryGoesToReview(t *testing.T) {
 	}
 
 	decision := llm.Decision{Category: "NoSuchCategory", Action: "move", Reason: "unknown"}
-	result, err := Apply(decision, src, cfg, db, false, fs)
+	result, err := Apply(decision, src, mustHash(t, src), cfg, db, false, fs)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -645,6 +684,17 @@ func TestEncodeStringArrayPlist(t *testing.T) {
 	if string(plist[:8]) != "bplist00" {
 		t.Errorf("bad header: %q", plist[:8])
 	}
+}
+
+// mustHash computes the SHA-256 hash of path or fatals the test if the file
+// cannot be read.
+func mustHash(t *testing.T, path string) string {
+	t.Helper()
+	h, err := ComputeHash(path)
+	if err != nil {
+		t.Fatalf("ComputeHash(%q): %v", path, err)
+	}
+	return h
 }
 
 func stringSliceEqual(a, b []string) bool {

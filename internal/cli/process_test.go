@@ -285,7 +285,7 @@ func TestProcessPathsLogsApplyError(t *testing.T) {
 	cfg = testConfig(tmp)
 	db = state.NewFake()
 	classifier = &fakeClassifier{decision: llm.Decision{Category: "Documents", Action: "move", Reason: "text"}}
-	applyDecision = func(llm.Decision, string, *config.Config, state.Repo, bool, actions.FS) (string, error) {
+	applyDecision = func(llm.Decision, string, string, *config.Config, state.Repo, bool, actions.FS) (string, error) {
 		return "", errors.New("move failed")
 	}
 	t.Cleanup(func() { applyDecision = actions.Apply })

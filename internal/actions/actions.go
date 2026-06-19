@@ -2,6 +2,7 @@ package actions
 
 import (
 	"crypto/sha256"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -96,20 +97,22 @@ func UniqueDest(dest string, fs FS) string {
 
 // Apply carries out a classification Decision for src.
 //
+// fileHash must be the SHA-256 hex digest of src computed before any LLM call;
+// passing a pre-computed hash avoids a redundant file open and closes the race
+// window that occurs when a concurrent filemaid process moves the file during
+// classification.
+//
 // Safety rules:
 //   - Sources outside cfg.AllowedDirs are skipped.
 //   - Delete is only honored for files matching SafeDeletePatterns or when
 //     isDuplicate is true; otherwise the action is coerced to review.
 //   - Trash failures coerce the action to review.
 //   - Destinations outside cfg.AllowedDirs redirect to the dated review queue.
-func Apply(decision llm.Decision, src string, cfg *config.Config, db state.Repo, isDuplicate bool, fs FS) (string, error) {
+//   - If the source file is no longer present (moved by a concurrent process),
+//     Apply returns a "skipped" result without error.
+func Apply(decision llm.Decision, src string, fileHash string, cfg *config.Config, db state.Repo, isDuplicate bool, fs FS) (string, error) {
 	if len(cfg.AllowedDirs) > 0 && !WithinAllowed(src, cfg.AllowedDirs) {
 		return fmt.Sprintf("skipped (not allowed): %s", src), nil
-	}
-
-	fileHash, err := ComputeHash(src)
-	if err != nil {
-		return "", fmt.Errorf("hash failed: %w", err)
 	}
 
 	reviewBase := datedReviewPath(cfg.ReviewDir, filepath.Base(src))
@@ -158,6 +161,9 @@ func Apply(decision llm.Decision, src string, cfg *config.Config, db state.Repo,
 		return "", fmt.Errorf("mkdir failed: %w", err)
 	}
 	if err := fs.Move(src, dest); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return fmt.Sprintf("skipped (%s no longer exists)", filepath.Base(src)), nil
+		}
 		return "", fmt.Errorf("move failed: %s -> %s: %w", src, dest, err)
 	}
 
