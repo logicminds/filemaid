@@ -1,0 +1,7 @@
+{
+  "database": "dolt",
+  "backend": "dolt",
+  "dolt_mode": "embedded",
+  "dolt_database": "filemaid",
+  "project_id": "296071b7-756a-49f9-8e8f-c98d1ca688ad"
+}
