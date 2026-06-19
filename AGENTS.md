@@ -2,12 +2,12 @@
 
 ## Project Overview
 
-`filemaid` is a local, macOS-only file organizer. It classifies files dropped on `~/Desktop` or in `~/Downloads` using a local Ollama LLM, moves them into categorized archive folders, applies Finder tags, and quarantines uncertain items for review. It also runs scheduled cleanup of stale development artifacts (Docker images, npm/cargo/pip/brew caches, Xcode DerivedData).
+`filemaid` is a local, macOS-only file organizer. It classifies files dropped on `~/Desktop` or in `~/Downloads` using a local Ollama LLM, moves them into categorized archive folders, applies Finder tags, and quarantines uncertain items for review. It also runs scheduled cleanup of stale development artifacts (Docker images, npm/cargo/pip/brew caches, Xcode DerivedData) and stale review-queue items.
 
 Two triggers are supported:
 
 - **macOS Shortcuts folder automations** — instant per-file processing, no Full Disk Access required.
-- **`biz.logicminds.filemaid.scan` LaunchAgent** — periodic scan every 15 minutes.
+- **`biz.logicminds.filemaid.scan` LaunchAgent** — optional periodic scan every 15 minutes. The installer asks whether to enable it; disable with `./install.sh --no-scan`.
 - **`biz.logicminds.filemaid.cleanup` LaunchAgent** — cleanup at 06:00, 12:00, 18:00, and 23:00.
 
 ## Architecture & Data Flow
@@ -48,7 +48,7 @@ class Decision:
 | Directory | Purpose |
 |-----------|---------|
 | `filemaid/` | Core Python package: CLI, classifier, actions, state, config. |
-| `filemaid/cleaners/` | Plugin modules for dev-artifact cleanup; registered in `__init__.py`. |
+| `filemaid/cleaners/` | Plugin modules for dev-artifact and review-queue cleanup; registered in `__init__.py`. |
 | Project root | Packaging (`pyproject.toml`), default config (`config.json`), LaunchAgent plists, install/uninstall scripts, and the implementation plan. |
 
 ## Development Commands
@@ -96,7 +96,7 @@ There is no test/lint runner today (see Testing & QA).
 | `filemaid/state.py` | SQLite schema and helpers (`init_db`, `record`, `find_by_hash`). |
 | `filemaid/config.py` | Default config, merge logic, `~` expansion. |
 | `filemaid/cleaners/__init__.py` | `CLEANERS` registry. |
-| `filemaid/cleaners/{docker,npm,cargo,pip,brew,xcode}.py` | Individual dev-artifact cleaners. |
+| `filemaid/cleaners/{docker,npm,cargo,pip,brew,xcode,review}.py` | Individual dev-artifact cleaners (plus `review.py` for review-queue cleanup). |
 | `config.json` | Default user-facing configuration (copied to `~/.config/filemaid/config.json` on install). |
 | `pyproject.toml` | Setuptools packaging metadata; console script `filemaid = filemaid.__main__:main`. |
 | `install.sh` / `uninstall.sh` | Agent install/remove scripts. |

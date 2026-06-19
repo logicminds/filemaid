@@ -18,7 +18,8 @@
     "cargo",
     "pip",
     "brew",
-    "xcode"
+    "xcode",
+    "review"
   ],
   "review_dir": "~/.filemaid/review",
   "log_path": "~/.local/share/filemaid/filemaid.log",
@@ -69,5 +70,10 @@
       "enabled": true,
       "mode": "safe"
     }
+  },
+  "review_cleanup": {
+    "enabled": true,
+    "mode": "safe",
+    "max_age_days": 30
   }
 }

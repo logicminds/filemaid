@@ -34,6 +34,12 @@ cd ~/Projects/filemaid
 ./install.sh
 ```
 
+By default the installer asks whether to enable the scheduled scan agent. To skip it and run `filemaid scan` manually, use:
+
+```zsh
+./install.sh --no-scan
+```
+
 - `~/.local/bin/filemaid` — command-line wrapper
 - `~/.config/filemaid/config.json` — user configuration
 - `~/.local/share/filemaid/` — logs and SQLite database
@@ -92,6 +98,27 @@ For instant per-file processing, add a Shortcuts folder automation:
 4. Repeat for `Downloads`.
 
 Shortcuts runs in your user session and does not require Full Disk Access.
+
+
+## How Classification Works
+
+When a file is processed, filemaid sends its name, extension, size, modification time, and (for supported images and text files) a content snippet to the local Ollama model. The model returns one of the categories listed in `config.json`, along with suggested Finder tags and an action (`move`, `delete`, or `review`).
+
+- If the model returns a known category, the file is moved to the matching folder under `categories`.
+- If the model is unsure, returns an unknown category, or the response cannot be parsed, the file is sent to `~/.filemaid/review/` instead.
+- The model is only allowed to choose from categories you define. Adding a new category in `config.json` is enough for the model to classify files into it.
+
+To add a new category, add it to the `categories` map in `~/.config/filemaid/config.json`:
+
+```json
+{
+  "categories": {
+    "Presentations": "~/Documents/Archive/Presentations"
+  }
+}
+```
+
+The next time filemaid runs, the model may classify matching files into `~/Documents/Archive/Presentations`.
 
 ## Configuration
 
@@ -182,8 +209,10 @@ filemaid process <paths>
 
 | Agent | Schedule | Logs |
 |-------|----------|------|
-| `biz.logicminds.filemaid.scan` | Every 15 minutes | `~/.local/share/filemaid/scan.log` |
+| `biz.logicminds.filemaid.scan` | Every 15 minutes (optional) | `~/.local/share/filemaid/scan.log` |
 | `biz.logicminds.filemaid.cleanup` | 06:00, 12:00, 18:00, 23:00 | `~/.local/share/filemaid/cleanup.log` |
+
+The scan agent is optional. If you choose not to install it, run `filemaid scan` manually or use the Shortcuts folder automations below.
 
 ## Uninstall
 

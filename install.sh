@@ -1,5 +1,37 @@
 #!/bin/zsh
 set -e
+
+INSTALL_SCAN=true
+
+usage() {
+    cat <<EOF
+Usage: ./install.sh [options]
+
+Options:
+  --no-scan    Do not install the scheduled scan LaunchAgent.
+               filemaid scan can still be run manually.
+  -h, --help   Show this help message.
+EOF
+    exit 0
+}
+
+for arg in "$@"; do
+    case "$arg" in
+        --no-scan) INSTALL_SCAN=false ;;
+        -h|--help) usage ;;
+        *) echo "Unknown option: $arg" >&2; usage ;;
+    esac
+done
+
+if [[ -t 0 && "$INSTALL_SCAN" == true ]]; then
+    printf "Install the scheduled scan LaunchAgent? [Y/n]: "
+    read -r REPLY
+    case "$REPLY" in
+        [Nn]*) INSTALL_SCAN=false ;;
+        *) INSTALL_SCAN=true ;;
+    esac
+fi
+
 PROJECT="$HOME/Projects/filemaid"
 CONFIG_DIR="$HOME/.config/filemaid"
 DATA_DIR="$HOME/.local/share/filemaid"
@@ -96,8 +128,10 @@ exec "$PYTHON" -m filemaid "\$@"
 EOF
 chmod +x "$BIN_DIR/filemaid"
 
-cp "$PROJECT/biz.logicminds.filemaid.scan.plist" "$LAUNCHD_DIR/"
 cp "$PROJECT/biz.logicminds.filemaid.cleanup.plist" "$LAUNCHD_DIR/"
+if [[ "$INSTALL_SCAN" == true ]]; then
+    cp "$PROJECT/biz.logicminds.filemaid.scan.plist" "$LAUNCHD_DIR/"
+fi
 
 # Create custom Ollama models if Ollama is installed
 if command -v ollama >/dev/null 2>&1; then
@@ -117,8 +151,18 @@ for label in "$SCAN" "$CLEANUP"; do
     launchctl print "gui/$(id -u)/$label" >/dev/null 2>&1 && launchctl bootout "gui/$(id -u)/$label" || true
 done
 
-launchctl bootstrap "gui/$(id -u)" "$LAUNCHD_DIR/biz.logicminds.filemaid.scan.plist"
-launchctl bootstrap "gui/$(id -u)" "$LAUNCHD_DIR/biz.logicminds.filemaid.cleanup.plist"
+if [[ "$INSTALL_SCAN" != true ]]; then
+    rm -f "$LAUNCHD_DIR/biz.logicminds.filemaid.scan.plist"
+fi
 
-echo "filemaid installed"
-echo "NOTE: If the scan agent cannot read Desktop/Downloads, grant Full Disk Access to $PYTHON in System Settings -> Privacy & Security -> Full Disk Access, or rely on Shortcuts folder automations instead."
+launchctl bootstrap "gui/$(id -u)" "$LAUNCHD_DIR/biz.logicminds.filemaid.cleanup.plist"
+if [[ "$INSTALL_SCAN" == true ]]; then
+    launchctl bootstrap "gui/$(id -u)" "$LAUNCHD_DIR/biz.logicminds.filemaid.scan.plist"
+fi
+
+if [[ "$INSTALL_SCAN" == true ]]; then
+    echo "filemaid installed (periodic scan agent enabled)"
+    echo "NOTE: If the scan agent cannot read Desktop/Downloads, grant Full Disk Access to $PYTHON in System Settings -> Privacy & Security -> Full Disk Access, or rely on Shortcuts folder automations instead."
+else
+    echo "filemaid installed (periodic scan agent disabled; run 'filemaid scan' manually)"
+fi
