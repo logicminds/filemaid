@@ -14,6 +14,12 @@ import (
 	"time"
 )
 
+const testModelHashTag = "v0bd815a6bf36"
+
+func versionedModel(name string) string {
+	return name + ":" + testModelHashTag
+}
+
 type fakeRunner struct {
 	calls      []string
 	runErr     error
@@ -126,7 +132,7 @@ func TestCheckRequirements(t *testing.T) {
 	}
 
 	runner.lookPath["ollama"] = "/usr/local/bin/ollama"
-	runner.outputs["ollama list"] = "filemaid-gemma4-12b\n"
+	runner.outputs["ollama list"] = versionedModel("filemaid-gemma4-12b") + "\n"
 	info, err = checkRequirements(runner)
 	if err != nil {
 		t.Fatalf("checkRequirements: %v", err)
@@ -212,8 +218,8 @@ func TestInstallFull(t *testing.T) {
 	xe := prepareExecutable(t, dir)
 	inst, runner, home := newTestInstaller(t, xe)
 	runner.lookPath["ollama"] = "/usr/local/bin/ollama"
-	runner.outputs["ollama list"] = "filemaid-gemma4-12b\n"
-	runner.outputs["ollama list"] = "filemaid-gemma4-12b\n"
+	runner.outputs["ollama list"] = versionedModel("filemaid-gemma4-12b") + "\n"
+	runner.outputs["ollama list"] = versionedModel("filemaid-gemma4-12b") + "\n"
 
 	if err := inst.Install(InstallOptions{ModelName: "filemaid-gemma4-12b"}); err != nil {
 		t.Fatalf("install failed: %v", err)
@@ -279,7 +285,7 @@ func TestInstallFull(t *testing.T) {
 
 	assertCall(t, runner.calls, "launchctl bootstrap gui/501 "+cleanupPlist)
 	assertCall(t, runner.calls, "launchctl bootstrap gui/501 "+scanPlist)
-	assertCall(t, runner.calls, "ollama create filemaid-gemma4-12b -f "+filepath.Join(dstModelfiles, "Modelfile.filemaid-gemma4-12b"))
+	assertCall(t, runner.calls, "ollama create "+versionedModel("filemaid-gemma4-12b")+" -f "+filepath.Join(dstModelfiles, "Modelfile.filemaid-gemma4-12b"))
 	for _, unwanted := range []string{"filemaid-gemma4-26b", "filemaid-metadata"} {
 		for _, call := range runner.calls {
 			if strings.Contains(call, "ollama create "+unwanted) {
@@ -318,7 +324,7 @@ func TestInstallOverwritesExistingModelfiles(t *testing.T) {
 	exe := prepareExecutable(t, dir)
 	inst, runner, home := newTestInstaller(t, exe)
 	runner.lookPath["ollama"] = "/usr/local/bin/ollama"
-	runner.outputs["ollama list"] = "filemaid-gemma4-12b\n"
+	runner.outputs["ollama list"] = versionedModel("filemaid-gemma4-12b") + "\n"
 
 	configDir := filepath.Join(home, ".config", "filemaid")
 	mkdir(t, configDir)
@@ -345,7 +351,7 @@ func TestInstallSkipsOllamaCreateWhenHashUnchanged(t *testing.T) {
 	exe := prepareExecutable(t, dir)
 	inst, runner, home := newTestInstaller(t, exe)
 	runner.lookPath["ollama"] = "/usr/local/bin/ollama"
-	runner.outputs["ollama list"] = "filemaid-gemma4-12b\n"
+	runner.outputs["ollama list"] = versionedModel("filemaid-gemma4-12b") + "\n"
 
 	if err := inst.Install(InstallOptions{ModelName: "filemaid-gemma4-12b"}); err != nil {
 		t.Fatalf("install failed: %v", err)
@@ -353,7 +359,7 @@ func TestInstallSkipsOllamaCreateWhenHashUnchanged(t *testing.T) {
 
 	createCount := 0
 	for _, c := range runner.calls {
-		if c == "ollama create filemaid-gemma4-12b -f "+filepath.Join(home, ".config", "filemaid", "modelfiles", "Modelfile.filemaid-gemma4-12b") {
+		if c == "ollama create "+versionedModel("filemaid-gemma4-12b")+" -f "+filepath.Join(home, ".config", "filemaid", "modelfiles", "Modelfile.filemaid-gemma4-12b") {
 			createCount++
 		}
 	}
@@ -364,7 +370,7 @@ func TestInstallSkipsOllamaCreateWhenHashUnchanged(t *testing.T) {
 	// Simulate an upgrade: re-run setup with the same embedded modelfiles.
 	inst2, runner2, _ := newTestInstaller(t, exe)
 	runner2.lookPath["ollama"] = "/usr/local/bin/ollama"
-	runner2.outputs["ollama list"] = "filemaid-gemma4-12b\n"
+	runner2.outputs["ollama list"] = versionedModel("filemaid-gemma4-12b") + "\n"
 	inst2.Home = inst.Home
 	inst2.DataDir = inst.DataDir
 	if err := inst2.Install(InstallOptions{ModelName: "filemaid-gemma4-12b"}); err != nil {
@@ -383,7 +389,7 @@ func TestInstallRerunsOllamaCreateWhenHashChanged(t *testing.T) {
 	exe := prepareExecutable(t, dir)
 	inst, runner, home := newTestInstaller(t, exe)
 	runner.lookPath["ollama"] = "/usr/local/bin/ollama"
-	runner.outputs["ollama list"] = "filemaid-gemma4-12b\n"
+	runner.outputs["ollama list"] = versionedModel("filemaid-gemma4-12b") + "\n"
 
 	if err := inst.Install(InstallOptions{ModelName: "filemaid-gemma4-12b"}); err != nil {
 		t.Fatalf("install failed: %v", err)
@@ -409,21 +415,21 @@ func TestInstallRerunsOllamaCreateWhenHashChanged(t *testing.T) {
 
 	inst2, runner2, _ := newTestInstaller(t, exe)
 	runner2.lookPath["ollama"] = "/usr/local/bin/ollama"
-	runner2.outputs["ollama list"] = "filemaid-gemma4-12b\n"
+	runner2.outputs["ollama list"] = versionedModel("filemaid-gemma4-12b") + "\n"
 	inst2.Home = inst.Home
 	inst2.DataDir = inst.DataDir
 	if err := inst2.Install(InstallOptions{ModelName: "filemaid-gemma4-12b"}); err != nil {
 		t.Fatalf("second install failed: %v", err)
 	}
 
-	assertCall(t, runner2.calls, "ollama create filemaid-gemma4-12b -f "+filepath.Join(home, ".config", "filemaid", "modelfiles", "Modelfile.filemaid-gemma4-12b"))
+	assertCall(t, runner2.calls, "ollama create "+versionedModel("filemaid-gemma4-12b")+" -f "+filepath.Join(home, ".config", "filemaid", "modelfiles", "Modelfile.filemaid-gemma4-12b"))
 }
 func TestInstallCreatesModelWhenMissingFromOllama(t *testing.T) {
 	dir := t.TempDir()
 	exe := prepareExecutable(t, dir)
 	inst, runner, home := newTestInstaller(t, exe)
 	runner.lookPath["ollama"] = "/usr/local/bin/ollama"
-	runner.outputs["ollama list"] = "filemaid-gemma4-12b\n"
+	runner.outputs["ollama list"] = versionedModel("filemaid-gemma4-12b") + "\n"
 
 	if err := inst.Install(InstallOptions{ModelName: "filemaid-gemma4-12b"}); err != nil {
 		t.Fatalf("install failed: %v", err)
@@ -434,13 +440,13 @@ func TestInstallCreatesModelWhenMissingFromOllama(t *testing.T) {
 	inst2.Home = inst.Home
 	inst2.DataDir = inst.DataDir
 	runner2.lookPath["ollama"] = "/usr/local/bin/ollama"
-	runner2.outputsSeq["ollama list"] = []string{"\n", "\n", "filemaid-gemma4-12b\n"}
+	runner2.outputsSeq["ollama list"] = []string{"\n", "\n", versionedModel("filemaid-gemma4-12b") + "\n"}
 
 	if err := inst2.Install(InstallOptions{ModelName: "filemaid-gemma4-12b"}); err != nil {
 		t.Fatalf("second install failed: %v", err)
 	}
 
-	assertCall(t, runner2.calls, "ollama create filemaid-gemma4-12b -f "+filepath.Join(home, ".config", "filemaid", "modelfiles", "Modelfile.filemaid-gemma4-12b"))
+	assertCall(t, runner2.calls, "ollama create "+versionedModel("filemaid-gemma4-12b")+" -f "+filepath.Join(home, ".config", "filemaid", "modelfiles", "Modelfile.filemaid-gemma4-12b"))
 }
 
 func TestInstallFailsWhenOllamaCreateFails(t *testing.T) {
@@ -449,13 +455,13 @@ func TestInstallFailsWhenOllamaCreateFails(t *testing.T) {
 	inst, runner, home := newTestInstaller(t, exe)
 	runner.lookPath["ollama"] = "/usr/local/bin/ollama"
 	runner.outputs["ollama list"] = "\n"
-	runner.runErrFor["ollama create filemaid-gemma4-12b -f "+filepath.Join(home, ".config", "filemaid", "modelfiles", "Modelfile.filemaid-gemma4-12b")] = fmt.Errorf("pull failed")
+	runner.runErrFor["ollama create "+versionedModel("filemaid-gemma4-12b")+" -f "+filepath.Join(home, ".config", "filemaid", "modelfiles", "Modelfile.filemaid-gemma4-12b")] = fmt.Errorf("pull failed")
 
 	if err := inst.Install(InstallOptions{ModelName: "filemaid-gemma4-12b"}); err == nil {
 		t.Fatal("expected error when ollama create fails")
 	}
 
-	assertCall(t, runner.calls, "ollama create filemaid-gemma4-12b -f "+filepath.Join(home, ".config", "filemaid", "modelfiles", "Modelfile.filemaid-gemma4-12b"))
+	assertCall(t, runner.calls, "ollama create "+versionedModel("filemaid-gemma4-12b")+" -f "+filepath.Join(home, ".config", "filemaid", "modelfiles", "Modelfile.filemaid-gemma4-12b"))
 }
 
 func TestInstallFailsWhenModelMissingAndDiskSpaceInsufficient(t *testing.T) {
@@ -487,14 +493,14 @@ func TestInstallSkipsDiskCheckWhenModelExists(t *testing.T) {
 	exe := prepareExecutable(t, dir)
 	inst, runner, _ := newTestInstaller(t, exe)
 	runner.lookPath["ollama"] = "/usr/local/bin/ollama"
-	runner.outputs["ollama list"] = "filemaid-gemma4-12b\n"
+	runner.outputs["ollama list"] = versionedModel("filemaid-gemma4-12b") + "\n"
 	inst.FreeSpace = func(string) (uint64, error) { return 1 * 1024 * 1024 * 1024, nil }
 
 	if err := inst.Install(InstallOptions{ModelName: "filemaid-gemma4-12b"}); err != nil {
 		t.Fatalf("install failed: %v", err)
 	}
 
-	assertCall(t, runner.calls, "ollama create filemaid-gemma4-12b -f "+filepath.Join(inst.Home, ".config", "filemaid", "modelfiles", "Modelfile.filemaid-gemma4-12b"))
+	assertCall(t, runner.calls, "ollama create "+versionedModel("filemaid-gemma4-12b")+" -f "+filepath.Join(inst.Home, ".config", "filemaid", "modelfiles", "Modelfile.filemaid-gemma4-12b"))
 }
 
 func TestInstallNoScan(t *testing.T) {
@@ -502,7 +508,7 @@ func TestInstallNoScan(t *testing.T) {
 	exe := prepareExecutable(t, dir)
 	inst, runner, home := newTestInstaller(t, exe)
 	runner.lookPath["ollama"] = "/usr/local/bin/ollama"
-	runner.outputs["ollama list"] = "filemaid-gemma4-12b\n"
+	runner.outputs["ollama list"] = versionedModel("filemaid-gemma4-12b") + "\n"
 
 	launchdDir := filepath.Join(home, "Library", "LaunchAgents")
 	mkdir(t, launchdDir)
@@ -538,7 +544,7 @@ func TestInstallPreservesExistingConfig(t *testing.T) {
 	inst.Runner = runner
 	inst.QuietRunner = runner
 	runner.lookPath["ollama"] = "/usr/local/bin/ollama"
-	runner.outputs["ollama list"] = "filemaid-gemma4-12b\n"
+	runner.outputs["ollama list"] = versionedModel("filemaid-gemma4-12b") + "\n"
 
 	configDir := filepath.Join(home, ".config", "filemaid")
 	mkdir(t, configDir)
@@ -562,7 +568,7 @@ func TestInstallInteractiveDefaults(t *testing.T) {
 	exe := prepareExecutable(t, dir)
 	inst, runner, home := newTestInstaller(t, exe)
 	runner.lookPath["ollama"] = "/usr/local/bin/ollama"
-	runner.outputs["ollama list"] = "filemaid-gemma4-12b\n"
+	runner.outputs["ollama list"] = versionedModel("filemaid-gemma4-12b") + "\n"
 	inst.Reader = bufio.NewReader(strings.NewReader("\n"))
 
 	if err := inst.Install(InstallOptions{ModelName: "filemaid-gemma4-12b", Interactive: true}); err != nil {
@@ -586,7 +592,7 @@ func TestInstallInteractiveCustom(t *testing.T) {
 	exe := prepareExecutable(t, dir)
 	inst, runner, home := newTestInstaller(t, exe)
 	runner.lookPath["ollama"] = "/usr/local/bin/ollama"
-	runner.outputs["ollama list"] = "filemaid-gemma4-12b\n"
+	runner.outputs["ollama list"] = versionedModel("filemaid-gemma4-12b") + "\n"
 
 	input := strings.Join([]string{
 		"n",                     // do not use defaults
@@ -627,7 +633,7 @@ func TestInstallCustomDirs(t *testing.T) {
 	exe := prepareExecutable(t, dir)
 	inst, runner, home := newTestInstaller(t, exe)
 	runner.lookPath["ollama"] = "/usr/local/bin/ollama"
-	runner.outputs["ollama list"] = "filemaid-gemma4-12b\n"
+	runner.outputs["ollama list"] = versionedModel("filemaid-gemma4-12b") + "\n"
 
 	opts := InstallOptions{
 		BinDir:    filepath.Join(home, "bin"),
@@ -789,7 +795,7 @@ func TestInstallBootstrapFailure(t *testing.T) {
 	exe := prepareExecutable(t, dir)
 	inst, runner, _ := newTestInstaller(t, exe)
 	runner.lookPath["ollama"] = "/usr/local/bin/ollama"
-	runner.outputs["ollama list"] = "filemaid-gemma4-12b\n"
+	runner.outputs["ollama list"] = versionedModel("filemaid-gemma4-12b") + "\n"
 	runner.runErr = fmt.Errorf("launchctl failed")
 
 	if err := inst.Install(InstallOptions{ModelName: "filemaid-gemma4-12b"}); err == nil {
@@ -895,4 +901,82 @@ func TestDedupeStrings(t *testing.T) {
 	if !slices.Equal(got, want) {
 		t.Errorf("got %v, want %v", got, want)
 	}
+}
+
+func TestParseOllamaModelList(t *testing.T) {
+	input := `NAME                    ID              SIZE      MODIFIED     
+filemaid-gemma4-12b:latest    55c12e2e0694    7.2 GB    33 minutes ago     
+filemaid-gemma4-26b:v2       878932d42345    15 GB     3 hours ago        
+qwen2.5:7b                   845dbda0ea48    4.7 GB    44 hours ago       
+`
+	got := parseOllamaModelList(input)
+	want := []string{"filemaid-gemma4-12b:latest", "filemaid-gemma4-26b:v2", "qwen2.5:7b"}
+	if !slices.Equal(got, want) {
+		t.Errorf("got %v, want %v", got, want)
+	}
+}
+
+func TestModelFamily(t *testing.T) {
+	cases := []struct {
+		name string
+		want string
+	}{
+		{"filemaid-gemma4-12b:latest", "filemaid-gemma4-12b"},
+		{"filemaid-gemma4-12b:v2", "filemaid-gemma4-12b"},
+		{"filemaid-gemma4-12b", "filemaid-gemma4-12b"},
+		{"qwen2.5:7b", "qwen2.5"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := modelFamily(tc.name); got != tc.want {
+				t.Errorf("modelFamily(%q) = %q, want %q", tc.name, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestRemoveOllamaModelsKeepsCurrentVersion(t *testing.T) {
+	runner := newFakeRunner()
+	inst := &Installer{Runner: runner}
+	models := []string{
+		"filemaid-gemma4-12b:v0bd815a6bf36",
+		"filemaid-gemma4-12b:vdeadbeef",
+		"filemaid-gemma4-12b:latest",
+		"filemaid-gemma4-26b:v1",
+	}
+	inst.removeOllamaModels(models, "filemaid-gemma4-12b", "v0bd815a6bf36")
+
+	assertCall(t, runner.calls, "ollama rm filemaid-gemma4-12b:vdeadbeef")
+	assertCall(t, runner.calls, "ollama rm filemaid-gemma4-12b:latest")
+	for _, unwanted := range []string{"filemaid-gemma4-12b:v0bd815a6bf36", "filemaid-gemma4-26b:v1"} {
+		for _, c := range runner.calls {
+			if c == "ollama rm "+unwanted {
+				t.Errorf("unexpected rm call: %s", c)
+			}
+		}
+	}
+}
+
+func TestRemoveOllamaModelsLogsRemovalFailures(t *testing.T) {
+	runner := newFakeRunner()
+	runner.runErrFor["ollama rm filemaid-gemma4-12b:vdeadbeef"] = fmt.Errorf("in use")
+	inst := &Installer{Runner: runner}
+	inst.removeOllamaModels([]string{"filemaid-gemma4-12b:vdeadbeef"}, "filemaid-gemma4-12b", "v0bd815a6bf36")
+	assertCall(t, runner.calls, "ollama rm filemaid-gemma4-12b:vdeadbeef")
+}
+
+func TestCreateOllamaModelsCleansUpStaleVersions(t *testing.T) {
+	dir := t.TempDir()
+	exe := prepareExecutable(t, dir)
+	inst, runner, home := newTestInstaller(t, exe)
+	runner.lookPath["ollama"] = "/usr/local/bin/ollama"
+	runner.outputsSeq["ollama list"] = []string{"filemaid-gemma4-12b:vdeadbeef\n", "filemaid-gemma4-12b:vdeadbeef\n"}
+	runner.outputs["ollama list"] = versionedModel("filemaid-gemma4-12b") + "\n"
+
+	if err := inst.Install(InstallOptions{ModelName: "filemaid-gemma4-12b"}); err != nil {
+		t.Fatalf("install failed: %v", err)
+	}
+
+	assertCall(t, runner.calls, "ollama rm filemaid-gemma4-12b:vdeadbeef")
+	assertCall(t, runner.calls, "ollama create "+versionedModel("filemaid-gemma4-12b")+" -f "+filepath.Join(home, ".config", "filemaid", "modelfiles", "Modelfile.filemaid-gemma4-12b"))
 }
