@@ -11,31 +11,34 @@ jobs:
     runs-on: macos-latest
     strategy:
       matrix:
-        python-version: ["3.13", "3.14"]
+        go-version: ["1.23", "1.24"]
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Set up Python ${{ matrix.python-version }}
-        uses: actions/setup-python@v5
+      - name: Set up Go ${{ matrix.go-version }}
+        uses: actions/setup-go@v5
         with:
-          python-version: ${{ matrix.python-version }}
+          go-version: ${{ matrix.go-version }}
 
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install pytest pytest-cov
+      - name: Download dependencies
+        run: go mod download
+
+      - name: Build binary
+        run: go build -o bin/filemaid ./cmd/filemaid
 
       - name: Run tests with coverage
-        run: |
-          python -m pytest tests/ --cov=filemaid --cov-report=term-missing --cov-fail-under=80
+        run: go test -coverprofile=coverage.out ./...
+
+      - name: Enforce coverage gate
+        run: go tool cover -func=coverage.out | awk 'END {print $3}' | sed 's/%//' | awk '{if ($1 < 80) {print "coverage " $1 "% below 80%"; exit 1} print "coverage " $1 "% ok"}'
 
       - name: Upload coverage report
         uses: actions/upload-artifact@v4
         with:
-          name: coverage-report-${{ matrix.python-version }}
-          path: htmlcov/
+          name: coverage-report-${{ matrix.go-version }}
+          path: coverage.out
           if-no-files-found: ignore
 
   lint:
@@ -45,22 +48,43 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - name: Set up Go
+        uses: actions/setup-go@v5
         with:
-          python-version: "3.13"
+          go-version: "1.24"
 
-      - name: Syntax check all Python files
-        run: |
-          for f in filemaid/*.py filemaid/cleaners/*.py tests/*.py; do
-            python -m py_compile "$f" || exit 1
-          done
+      - name: Verify formatting
+        run: test -z "$(gofmt -l .)"
 
-      - name: Validate JSON configs
-        run: |
-          python -m json.tool config.json > /dev/null
+      - name: Run go vet
+        run: go vet ./...
 
-      - name: Validate launchd plists
+      - name: Build binary
+        run: go build ./cmd/filemaid
+
+      - name: Validate JSON configs and generated launchd plists
         run: |
-          plutil -lint biz.logicminds.filemaid.scan.plist
-          plutil -lint biz.logicminds.filemaid.cleanup.plist
+          go run ./cmd/filemaid config > /dev/null
+          go test ./internal/setup/... -run TestRenderPlists
+
+  build:
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.24"
+
+      - name: Build release binary
+        run: go build -ldflags="-s -w" -o filemaid ./cmd/filemaid
+
+      - name: Upload binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: filemaid-macos-binary
+          path: filemaid
+          if-no-files-found: error
