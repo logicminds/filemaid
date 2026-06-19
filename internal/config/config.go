@@ -9,21 +9,22 @@ import (
 
 // Config holds the filemaid configuration.
 type Config struct {
-	OllamaURL          string                   `json:"ollama_url"`
-	Model              string                   `json:"model"`
-	WatchDirs          []string                 `json:"watch_dirs"`
-	AllowedDirs        []string                 `json:"allowed_dirs"`
-	AllowedCleaners    []string                 `json:"allowed_cleaners"`
-	ReviewDir          string                   `json:"review_dir"`
-	LogPath            string                   `json:"log_path"`
-	DBPath             string                   `json:"db_path"`
-	Tags               bool                     `json:"tags"`
-	MinAgeHours        int                      `json:"min_age_hours"`
-	Categories         map[string]string        `json:"categories"`
-	SafeDeletePatterns []string                 `json:"safe_delete_patterns"`
-	AgeRules           []AgeRule                `json:"age_rules"`
-	DevCleanup         map[string]CleanerConfig `json:"dev_cleanup"`
-	ReviewCleanup      ReviewCleanupConfig      `json:"review_cleanup"`
+	OllamaURL           string                   `json:"ollama_url"`
+	Model               string                   `json:"model"`
+	WatchDirs           []string                 `json:"watch_dirs"`
+	AllowedDirs         []string                 `json:"allowed_dirs"`
+	AllowedCleaners     []string                 `json:"allowed_cleaners"`
+	ReviewDir           string                   `json:"review_dir"`
+	LogPath             string                   `json:"log_path"`
+	DBPath              string                   `json:"db_path"`
+	Tags                bool                     `json:"tags"`
+	SubcategorizeImages bool                     `json:"subcategorize_images"`
+	MinAgeHours         int                      `json:"min_age_hours"`
+	Categories          map[string]string        `json:"categories"`
+	SafeDeletePatterns  []string                 `json:"safe_delete_patterns"`
+	AgeRules            []AgeRule                `json:"age_rules"`
+	DevCleanup          map[string]CleanerConfig `json:"dev_cleanup"`
+	ReviewCleanup       ReviewCleanupConfig      `json:"review_cleanup"`
 }
 
 // AgeRule describes a pattern-based automatic action.
@@ -49,16 +50,17 @@ type ReviewCleanupConfig struct {
 // Defaults returns a fully populated default configuration.
 func Defaults() *Config {
 	return &Config{
-		OllamaURL:       "http://localhost:11434",
-		Model:           "filemaid-gemma4-26b",
-		WatchDirs:       []string{"~/Desktop", "~/Downloads"},
-		AllowedDirs:     []string{"~/Desktop", "~/Downloads", "~/Documents/Archive", "~/.filemaid/review"},
-		AllowedCleaners: []string{"docker", "npm", "cargo", "pip", "brew", "xcode"},
-		ReviewDir:       "~/.filemaid/review",
-		LogPath:         "~/.local/share/filemaid/filemaid.log",
-		DBPath:          "~/.local/share/filemaid/filemaid.db",
-		Tags:            true,
-		MinAgeHours:     0,
+		OllamaURL:           "http://localhost:11434",
+		Model:               "filemaid-gemma4-26b",
+		WatchDirs:           []string{"~/Desktop", "~/Downloads"},
+		AllowedDirs:         []string{"~/Desktop", "~/Downloads", "~/Documents/Archive", "~/.filemaid/review"},
+		AllowedCleaners:     []string{"docker", "npm", "cargo", "pip", "brew", "xcode"},
+		ReviewDir:           "~/.filemaid/review",
+		LogPath:             "~/.local/share/filemaid/filemaid.log",
+		DBPath:              "~/.local/share/filemaid/filemaid.db",
+		Tags:                true,
+		SubcategorizeImages: true,
+		MinAgeHours:         0,
 		Categories: map[string]string{
 			"Screenshots": "~/Documents/Archive/Screenshots",
 			"Documents":   "~/Documents/Archive/Documents",

@@ -24,6 +24,9 @@ func TestDefaultsMatchPythonReference(t *testing.T) {
 	if cfg.Tags != true {
 		t.Errorf("Tags = %v, want true", cfg.Tags)
 	}
+	if cfg.SubcategorizeImages != true {
+		t.Errorf("SubcategorizeImages = %v, want true", cfg.SubcategorizeImages)
+	}
 	if cfg.MinAgeHours != 0 {
 		t.Errorf("MinAgeHours = %d, want 0", cfg.MinAgeHours)
 	}

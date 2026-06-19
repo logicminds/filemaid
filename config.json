@@ -25,6 +25,7 @@
   "log_path": "~/.local/share/filemaid/filemaid.log",
   "db_path": "~/.local/share/filemaid/filemaid.db",
   "tags": true,
+  "subcategorize_images": true,
   "min_age_hours": 0,
   "categories": {
     "Screenshots": "~/Documents/Archive/Screenshots",

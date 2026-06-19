@@ -5,6 +5,8 @@ package setup
 import (
 	"bufio"
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -30,6 +32,9 @@ type InstallOptions struct {
 	// ModelName, if non-empty, selects the model to write into config.json.
 	// If empty, setup detects RAM and prompts the user for confirmation.
 	ModelName string
+	// Interactive enables the configuration interview. When false, the
+	// embedded default config is used with only ModelName substituted.
+	Interactive bool
 }
 
 // systemInfo collects host facts needed for installation and prompts.
@@ -53,8 +58,7 @@ func checkRequirements(runner Runner) (*systemInfo, error) {
 
 	if _, err := runner.LookPath("ollama"); err == nil {
 		info.OllamaInstalled = true
-		q := quietRunner{}
-		if err := q.Run("ollama", "list"); err == nil {
+		if err := runner.Run("ollama", "list"); err == nil {
 			info.OllamaRunning = true
 		}
 	}
@@ -94,6 +98,8 @@ func totalMemoryGB() (int, error) {
 
 // selectModel picks the model to install.
 // If opts.ModelName is set, it is validated and used.
+// If opts.Interactive is false and no model is set, the RAM-based
+// recommendation is used without prompting.
 // Otherwise the user is prompted with the RAM-based recommendation.
 func selectModel(opts InstallOptions, info *systemInfo, reader *bufio.Reader) (string, error) {
 	if opts.ModelName != "" {
@@ -103,6 +109,9 @@ func selectModel(opts InstallOptions, info *systemInfo, reader *bufio.Reader) (s
 			}
 		}
 		return "", fmt.Errorf("unknown model %q; choose one of: %s", opts.ModelName, strings.Join(info.Choices, ", "))
+	}
+	if !opts.Interactive {
+		return info.Recommended, nil
 	}
 
 	fmt.Fprintf(os.Stderr, "\nDetected %d GB of memory.\n", info.TotalMemoryGB)
@@ -151,13 +160,14 @@ func printOllamaInstructions() {
 // SetupState records the paths chosen during installation so uninstall can
 // remove only the files that were installed.
 type SetupState struct {
-	BinaryPath   string    `json:"binary_path"`
-	ConfigDir    string    `json:"config_dir"`
-	DataDir      string    `json:"data_dir"`
-	LaunchdDir   string    `json:"launchd_dir"`
-	ScanAgent    string    `json:"scan_agent"`
-	CleanupAgent string    `json:"cleanup_agent"`
-	InstalledAt  time.Time `json:"installed_at"`
+	BinaryPath   string            `json:"binary_path"`
+	ConfigDir    string            `json:"config_dir"`
+	DataDir      string            `json:"data_dir"`
+	LaunchdDir   string            `json:"launchd_dir"`
+	ScanAgent    string            `json:"scan_agent"`
+	CleanupAgent string            `json:"cleanup_agent"`
+	InstalledAt  time.Time         `json:"installed_at"`
+	ModelHashes  map[string]string `json:"model_hashes"`
 }
 
 // FS abstracts filesystem operations so tests can substitute a fake.
@@ -175,6 +185,30 @@ type FS interface {
 type Runner interface {
 	Run(name string, arg ...string) error
 	LookPath(name string) (string, error)
+}
+
+// outputRunner extends Runner with a way to capture command stdout.
+type outputRunner interface {
+	Runner
+	RunOutput(name string, arg ...string) (string, error)
+}
+
+// IsSetup reports whether filemaid has been installed by checking for the
+// setup state file in the default data directory.
+func IsSetup() (bool, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return false, fmt.Errorf("home dir: %w", err)
+	}
+	statePath := filepath.Join(home, ".local", "share", "filemaid", "setup.json")
+	_, err = os.Stat(statePath)
+	if err == nil {
+		return true, nil
+	}
+	if os.IsNotExist(err) {
+		return false, nil
+	}
+	return false, err
 }
 
 type osFS struct{}
@@ -228,6 +262,12 @@ func (loudRunner) Run(name string, arg ...string) error {
 
 func (loudRunner) LookPath(name string) (string, error) { return exec.LookPath(name) }
 
+func (loudRunner) RunOutput(name string, arg ...string) (string, error) {
+	cmd := exec.Command(name, arg...)
+	out, err := cmd.Output()
+	return string(out), err
+}
+
 // quietRunner captures subprocess output and discards it. Use it for
 // idempotent teardown commands that are expected to fail on first install.
 type quietRunner struct{}
@@ -239,15 +279,25 @@ func (quietRunner) Run(name string, arg ...string) error {
 
 func (quietRunner) LookPath(name string) (string, error) { return exec.LookPath(name) }
 
+func (quietRunner) RunOutput(name string, arg ...string) (string, error) {
+	cmd := exec.Command(name, arg...)
+	out, err := cmd.Output()
+	return string(out), err
+}
+
 // Installer performs a filemaid installation. All dependencies are fields so
 // tests can inject fakes.
 type Installer struct {
 	FS             FS
 	Runner         Runner
+	QuietRunner    Runner
 	Home           string
 	UID            int
 	Now            time.Time
 	ExecutablePath string
+	DataDir        string
+	// Reader supplies interactive input. Defaults to os.Stdin.
+	Reader *bufio.Reader
 }
 
 const (
@@ -276,16 +326,19 @@ func newDefaultInstaller() (*Installer, error) {
 	return &Installer{
 		FS:             osFS{},
 		Runner:         loudRunner{},
+		QuietRunner:    quietRunner{},
 		Home:           home,
 		UID:            os.Getuid(),
 		Now:            time.Now(),
 		ExecutablePath: exe,
+		DataDir:        filepath.Join(home, ".local", "share", "filemaid"),
+		Reader:         bufio.NewReader(os.Stdin),
 	}, nil
 }
 
 // Install runs the installation with the configured dependencies.
 func (i *Installer) Install(opts InstallOptions) error {
-	info, err := checkRequirements(i.Runner)
+	info, err := checkRequirements(i.QuietRunner)
 	if err != nil {
 		return fmt.Errorf("check requirements: %w", err)
 	}
@@ -324,7 +377,11 @@ func (i *Installer) Install(opts InstallOptions) error {
 		}
 	}
 
-	modelName, err := selectModel(opts, info, bufio.NewReader(os.Stdin))
+	reader := i.Reader
+	if reader == nil {
+		reader = bufio.NewReader(os.Stdin)
+	}
+	modelName, err := selectModel(opts, info, reader)
 	if err != nil {
 		return err
 	}
@@ -346,7 +403,14 @@ func (i *Installer) Install(opts InstallOptions) error {
 	}
 
 	dstConfig := filepath.Join(configDir, "config.json")
-	if err := i.copyDefaultConfig(dstConfig, modelName); err != nil {
+	overrides := map[string]any{"model": modelName}
+	if opts.Interactive {
+		overrides, err = interviewConfig(reader, overrides)
+		if err != nil {
+			return fmt.Errorf("config interview: %w", err)
+		}
+	}
+	if err := i.copyDefaultConfig(dstConfig, overrides); err != nil {
 		return fmt.Errorf("copy config: %w", err)
 	}
 
@@ -400,8 +464,14 @@ func (i *Installer) Install(opts InstallOptions) error {
 		}
 	}
 
-	if err := i.createOllamaModels(configDir); err != nil {
+	if err := i.createOllamaModels(configDir, modelName); err != nil {
 		slog.Debug("create ollama models", "error", err)
+	}
+
+	// Build model hash state after modelfiles have been written.
+	modelHashes, err := i.hashEmbeddedModelfiles()
+	if err != nil {
+		return fmt.Errorf("hash modelfiles: %w", err)
 	}
 
 	state := SetupState{
@@ -412,6 +482,7 @@ func (i *Installer) Install(opts InstallOptions) error {
 		ScanAgent:    scanLabel,
 		CleanupAgent: cleanupLabel,
 		InstalledAt:  i.Now,
+		ModelHashes:  modelHashes,
 	}
 	stateJSON, err := json.MarshalIndent(state, "", "  ")
 	if err != nil {
@@ -442,9 +513,6 @@ func (i *Installer) copyModelfiles(dstDir string) error {
 	}
 	for _, name := range names {
 		dst := filepath.Join(dstDir, name)
-		if i.FS.Exists(dst) {
-			continue
-		}
 		data, err := assets.ReadModelfile(name)
 		if err != nil {
 			return fmt.Errorf("read embedded modelfile %s: %w", name, err)
@@ -456,7 +524,7 @@ func (i *Installer) copyModelfiles(dstDir string) error {
 	return nil
 }
 
-func (i *Installer) copyDefaultConfig(dst, modelName string) error {
+func (i *Installer) copyDefaultConfig(dst string, overrides map[string]any) error {
 	if i.FS.Exists(dst) {
 		return nil
 	}
@@ -468,7 +536,9 @@ func (i *Installer) copyDefaultConfig(dst, modelName string) error {
 	if err := json.Unmarshal(data, &cfg); err != nil {
 		return fmt.Errorf("parse embedded config: %w", err)
 	}
-	cfg["model"] = modelName
+	for k, v := range overrides {
+		cfg[k] = v
+	}
 	updated, err := json.MarshalIndent(cfg, "", "  ")
 	if err != nil {
 		return fmt.Errorf("marshal config: %w", err)
@@ -477,27 +547,105 @@ func (i *Installer) copyDefaultConfig(dst, modelName string) error {
 	return i.FS.WriteFile(dst, updated, 0o644)
 }
 
-func (i *Installer) createOllamaModels(configDir string) error {
+// createOllamaModels creates or recreates the selected Ollama model only when
+// the embedded Modelfile has changed since the last setup. Modelfiles for all
+// variants are copied to disk so users can switch models by editing config.json
+// and running `ollama create` manually.
+func (i *Installer) createOllamaModels(configDir, selectedModel string) error {
 	if _, err := i.Runner.LookPath("ollama"); err != nil {
 		return err
 	}
-	modelfilesDir := filepath.Join(configDir, "modelfiles")
-	entries, err := i.FS.ReadDir(modelfilesDir)
+	data, err := assets.ReadModelfile("Modelfile." + selectedModel)
 	if err != nil {
-		return err
+		return fmt.Errorf("read embedded modelfile %s: %w", selectedModel, err)
 	}
-	for _, entry := range entries {
-		name := entry.Name()
-		if entry.IsDir() || !strings.HasPrefix(name, "Modelfile.") {
-			continue
-		}
-		modelName := strings.TrimPrefix(name, "Modelfile.")
-		path := filepath.Join(modelfilesDir, name)
-		if err := i.Runner.Run("ollama", "create", modelName, "-f", path); err != nil {
-			slog.Debug("ollama create failed", "model", modelName, "error", err)
-		}
+	hash := hashBytes(data)
+
+	if previous, ok := i.readStoredModelHash(selectedModel); ok && previous == hash {
+		slog.Debug("ollama model up to date", "model", selectedModel, "hash", hash)
+		return nil
 	}
+
+	path := filepath.Join(configDir, "modelfiles", "Modelfile."+selectedModel)
+
+	fmt.Fprintln(os.Stderr)
+	fmt.Fprintf(os.Stderr, "Creating Ollama model %q. This may download several gigabytes and take a few minutes.\n", selectedModel)
+	fmt.Fprintln(os.Stderr, "Do not interrupt the download.")
+	fmt.Fprintln(os.Stderr)
+
+	if err := i.Runner.Run("ollama", "create", selectedModel, "-f", path); err != nil {
+		return fmt.Errorf("create model %s: %w", selectedModel, err)
+	}
+
+	if err := i.waitForModel(selectedModel); err != nil {
+		return fmt.Errorf("model %s did not appear in ollama list after create: %w", selectedModel, err)
+	}
+
+	fmt.Fprintf(os.Stderr, "Model %q is ready.\n", selectedModel)
 	return nil
+}
+
+// waitForModel polls `ollama list` until the named model appears, giving Ollama
+// time to finish downloading and registering the model.
+func (i *Installer) waitForModel(model string) error {
+	const maxAttempts = 60
+	const delay = 5 * time.Second
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		output, err := i.runOutput("ollama", "list")
+		if err == nil && strings.Contains(output, model) {
+			return nil
+		}
+		time.Sleep(delay)
+	}
+	return fmt.Errorf("timed out waiting for %q", model)
+}
+
+// runOutput runs a command and returns its stdout as a string.
+func (i *Installer) runOutput(name string, arg ...string) (string, error) {
+	if r, ok := i.Runner.(outputRunner); ok {
+		return r.RunOutput(name, arg...)
+	}
+	cmd := exec.Command(name, arg...)
+	out, err := cmd.Output()
+	return string(out), err
+}
+
+func (i *Installer) hashEmbeddedModelfiles() (map[string]string, error) {
+	names, err := assets.ListModelfiles()
+	if err != nil {
+		return nil, err
+	}
+	hashes := make(map[string]string, len(names))
+	for _, name := range names {
+		data, err := assets.ReadModelfile(name)
+		if err != nil {
+			return nil, fmt.Errorf("read embedded modelfile %s: %w", name, err)
+		}
+		hashes[name] = hashBytes(data)
+	}
+	return hashes, nil
+}
+
+func (i *Installer) readStoredModelHash(modelName string) (string, bool) {
+	dataDir := i.DataDir
+	if dataDir == "" {
+		dataDir = filepath.Join(i.Home, ".local", "share", "filemaid")
+	}
+	data, err := i.FS.ReadFile(filepath.Join(dataDir, "setup.json"))
+	if err != nil {
+		return "", false
+	}
+	var state SetupState
+	if err := json.Unmarshal(data, &state); err != nil {
+		return "", false
+	}
+	h, ok := state.ModelHashes["Modelfile."+modelName]
+	return h, ok
+}
+
+func hashBytes(b []byte) string {
+	sum := sha256.Sum256(b)
+	return hex.EncodeToString(sum[:])
 }
 
 var funcMap = template.FuncMap{
@@ -576,4 +724,220 @@ func RenderCleanupPlist(binDir, dataDir string) (string, error) {
 		return "", err
 	}
 	return buf.String(), nil
+}
+
+func interviewConfig(reader *bufio.Reader, base map[string]any) (map[string]any, error) {
+	fmt.Fprintln(os.Stderr, "Let's configure filemaid. Press Enter to accept the defaults.")
+	fmt.Fprintln(os.Stderr)
+
+	useDefaults, err := promptYesNo(reader, "Use recommended defaults for everything", true)
+	if err != nil {
+		return nil, err
+	}
+	if useDefaults {
+		fmt.Fprintln(os.Stderr)
+		return base, nil
+	}
+
+	out := make(map[string]any, len(base))
+	for k, v := range base {
+		out[k] = v
+	}
+
+	watchDefault := []string{"~/Desktop", "~/Downloads"}
+	watchDirs, err := promptList(reader, "Watch directories (comma-separated)", watchDefault)
+	if err != nil {
+		return nil, err
+	}
+	out["watch_dirs"] = watchDirs
+
+	archiveBase, err := promptString(reader, "Archive base directory", "~/Documents/Archive")
+	if err != nil {
+		return nil, err
+	}
+	out["categories"] = buildCategories(archiveBase)
+
+	allowed := append([]string{}, watchDirs...)
+	allowed = append(allowed, archiveBase, "~/.filemaid/review")
+	out["allowed_dirs"] = dedupeStrings(allowed)
+
+	tags, err := promptYesNo(reader, "Apply Finder tags to organized files", true)
+	if err != nil {
+		return nil, err
+	}
+	out["tags"] = tags
+
+	enableCleaners, err := promptYesNo(reader, "Enable development cache cleanup", true)
+	if err != nil {
+		return nil, err
+	}
+	out["dev_cleanup"] = promptDevCleanup(reader, enableCleaners)
+
+	reviewDays, err := promptInt(reader, "Clean up review queue items older than (days, 0 to disable)", 30)
+	if err != nil {
+		return nil, err
+	}
+	out["review_cleanup"] = map[string]any{
+		"enabled":      reviewDays > 0,
+		"mode":         "safe",
+		"max_age_days": reviewDays,
+	}
+
+	if reviewDays <= 0 {
+		allowedCleaners := []string{}
+		if ac, ok := out["allowed_cleaners"].([]string); ok {
+			for _, c := range ac {
+				if c != "review" {
+					allowedCleaners = append(allowedCleaners, c)
+				}
+			}
+			out["allowed_cleaners"] = allowedCleaners
+		}
+	}
+
+	patterns, err := promptString(reader, "Safe delete patterns (comma-separated globs, e.g. ~/Downloads/*.dmg)", "")
+	if err != nil {
+		return nil, err
+	}
+	if patterns != "" {
+		out["safe_delete_patterns"] = splitTrim(patterns)
+	}
+
+	fmt.Fprintln(os.Stderr)
+	return out, nil
+}
+
+func buildCategories(archiveBase string) map[string]string {
+	return map[string]string{
+		"Screenshots": archiveBase + "/Screenshots",
+		"Documents":   archiveBase + "/Documents",
+		"Receipts":    archiveBase + "/Receipts",
+		"Images":      archiveBase + "/Images",
+		"Installers":  archiveBase + "/Installers",
+		"Code":        archiveBase + "/Code",
+		"Archives":    archiveBase + "/Archives",
+		"Media":       archiveBase + "/Media",
+		"Unknown":     "~/.filemaid/review",
+	}
+}
+
+func promptDevCleanup(reader *bufio.Reader, enableAll bool) map[string]any {
+	cleaners := []string{"docker", "npm", "cargo", "pip", "brew", "xcode"}
+	out := make(map[string]any, len(cleaners))
+	for _, name := range cleaners {
+		enabled := enableAll
+		if enableAll {
+			var err error
+			enabled, err = promptYesNo(reader, fmt.Sprintf("  Enable %s cleaner", name), true)
+			if err != nil {
+				enabled = true
+			}
+		}
+		out[name] = map[string]any{"enabled": enabled, "mode": "safe"}
+	}
+	return out
+}
+
+func promptString(reader *bufio.Reader, question, def string) (string, error) {
+	if def == "" {
+		fmt.Fprintf(os.Stderr, "%s: ", question)
+	} else {
+		fmt.Fprintf(os.Stderr, "%s [%s]: ", question, def)
+	}
+	line, err := reader.ReadString('\n')
+	if err != nil {
+		return "", err
+	}
+	line = strings.TrimSpace(line)
+	if line == "" {
+		return def, nil
+	}
+	return line, nil
+}
+
+func promptInt(reader *bufio.Reader, question string, def int) (int, error) {
+	fmt.Fprintf(os.Stderr, "%s [%d]: ", question, def)
+	line, err := reader.ReadString('\n')
+	if err != nil {
+		return 0, err
+	}
+	line = strings.TrimSpace(line)
+	if line == "" {
+		return def, nil
+	}
+	n, err := strconv.Atoi(line)
+	if err != nil {
+		return 0, fmt.Errorf("expected a number, got %q", line)
+	}
+	return n, nil
+}
+
+func promptYesNo(reader *bufio.Reader, question string, def bool) (bool, error) {
+	marker := "y/N"
+	if def {
+		marker = "Y/n"
+	}
+	fmt.Fprintf(os.Stderr, "%s [%s]: ", question, marker)
+	line, err := reader.ReadString('\n')
+	if err != nil {
+		return false, err
+	}
+	line = strings.ToLower(strings.TrimSpace(line))
+	if line == "" {
+		return def, nil
+	}
+	switch line {
+	case "y", "yes":
+		return true, nil
+	case "n", "no":
+		return false, nil
+	default:
+		return false, fmt.Errorf("expected y/n, got %q", line)
+	}
+}
+
+func promptList(reader *bufio.Reader, question string, def []string) ([]string, error) {
+	s := promptStringWithDefault(question, strings.Join(def, ","))
+	fmt.Fprint(os.Stderr, s)
+	line, err := reader.ReadString('\n')
+	if err != nil {
+		return nil, err
+	}
+	line = strings.TrimSpace(line)
+	if line == "" {
+		return def, nil
+	}
+	return splitTrim(line), nil
+}
+
+func promptStringWithDefault(question, def string) string {
+	if def == "" {
+		return fmt.Sprintf("%s: ", question)
+	}
+	return fmt.Sprintf("%s [%s]: ", question, def)
+}
+
+func splitTrim(s string) []string {
+	parts := strings.Split(s, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+func dedupeStrings(ss []string) []string {
+	seen := make(map[string]struct{}, len(ss))
+	out := make([]string, 0, len(ss))
+	for _, s := range ss {
+		if _, ok := seen[s]; ok {
+			continue
+		}
+		seen[s] = struct{}{}
+		out = append(out, s)
+	}
+	return out
 }

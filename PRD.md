@@ -68,7 +68,8 @@ Every classification produces a `Decision` value:
 | Field | Type | Description |
 |-------|------|-------------|
 | `category` | string | One of the configured category names, or `Unknown`. |
-| `tags` | []string | 1–3 Finder tag suggestions. |
+| `subcategory` | string | Optional concise subject or scene description for images and screenshots (e.g. `cat`, `Safari`). Added as a Finder tag when present. |
+| `tags` | []string | 1–3 Finder tag suggestions. The subcategory is prepended if it is not already present. |
 | `action` | string | `move`, `delete`, or `review`. Default: `review`. |
 | `destination` | string | Optional explicit destination path; normally empty. |
 | `reason` | string | Human-readable explanation. |
@@ -79,10 +80,10 @@ For each file, the classifier builds a prompt containing:
 
 - Absolute path, basename, lowercase extension, size in bytes, ISO modification time.
 - The list of configured category names.
-- For images (`png`, `jpg`, `jpeg`, `gif`, `webp`, `heic`): a note that the image is attached, and the image is sent as base64 to the LLM.
+- For images (`png`, `jpg`, `jpeg`, `gif`, `webp`, `heic`): a note that the image is attached, the image is sent as base64 to the LLM, and (when `subcategorize_images` is `true`) instructions to return a subject or scene subcategory such as `cat`, `dog`, `wedding`, or `car` for photos, and an app or context such as `Safari`, `Terminal`, `Slack`, or `browser` for screenshots.
 - For text files (`txt`, `md`, `csv`, `json`, `xml`, `yaml`, `yml`, `py`, `js`, `ts`, `jsx`, `tsx`, `html`, `css`, `sh`, `zsh`, `bash`, `swift`, `c`, `cpp`, `h`, `rs`, `go`, `java`, `kt`, `rb`, `php`, `pl`, `sql`): the first 2048 bytes.
 
-The model must return a single JSON object with keys `category`, `tags`, `action`, `destination`, and `reason`. `destination` must be empty.
+The model must return a single JSON object with keys `category`, `subcategory`, `tags`, `action`, `destination`, and `reason`. `destination` must be empty. `subcategory` may be empty when `subcategorize_images` is disabled or not applicable.
 
 #### 4.3.3 LLM Transport & Fallback
 
@@ -270,7 +271,8 @@ Both agents redirect stdout/stderr to `~/.local/share/filemaid/{scan,cleanup}.lo
 - Detect a suitable Python interpreter for the existing version (≥ 3.12). For the Go rewrite, the install script should instead place the compiled Go binary at `~/.local/bin/filemaid`.
 - Create directories: `~/.config/filemaid`, `~/.local/share/filemaid`, `~/.filemaid/review`, `~/.local/bin`, `~/Library/LaunchAgents`.
 - Recommend an Ollama model by installed RAM: ≥ 24 GB → `filemaid-gemma4-26b`, ≥ 16 GB → `filemaid-gemma4-12b`, else `filemaid-metadata`.
-- Copy `config.json` to `~/.config/filemaid/config.json` if it does not exist, updating the `model` field to the selected model.
+- Run an interactive configuration interview to confirm or override watch directories, archive location, Finder tags, dev cleaners, review-queue retention, and safe-delete patterns. The `--no-interactive` flag skips this interview.
+- Copy `config.json` to `~/.config/filemaid/config.json` if it does not exist, updating it with the selected model and any interview answers.
 - Generate `biz.logicminds.filemaid.cleanup.plist` and optionally `biz.logicminds.filemaid.scan.plist` dynamically and write them to `~/Library/LaunchAgents`.
 - Create custom Ollama models from `modelfiles/` if Ollama is installed.
 - Bootstrap agents with `launchctl bootstrap gui/$(id -u)`.
@@ -284,7 +286,21 @@ Both agents redirect stdout/stderr to `~/.local/share/filemaid/{scan,cleanup}.lo
 
 ## 5. Configuration
 
-### 5.1 Resolution
+### 5.1 Setup Interview
+
+`filemaid setup` runs an interactive interview that asks the user to confirm or override:
+
+- Ollama model (RAM-based recommendation).
+- Watch directories (`watch_dirs`).
+- Archive base directory (drives `categories`).
+- Whether to apply Finder tags (`tags`).
+- Which development cache cleaners to enable (`dev_cleanup`).
+- Review-queue retention in days (`review_cleanup.max_age_days`).
+- Safe-delete glob patterns (`safe_delete_patterns`).
+
+Pressing `Enter` at any prompt accepts the default. The `--no-interactive` flag skips the interview and writes the shipped defaults, substituting only the selected model.
+
+### 5.2 Resolution
 
 1. Start with built-in defaults.
 2. Load `~/.config/filemaid/config.json` if it exists.
@@ -292,7 +308,7 @@ Both agents redirect stdout/stderr to `~/.local/share/filemaid/{scan,cleanup}.lo
 4. For top-level keys whose default is a dict, merge the user's dict on top of defaults (shallow merge per key).
 5. Ensure `categories["Unknown"]` exists and points to `review_dir`.
 
-### 5.2 Schema
+### 5.3 Schema
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
@@ -305,6 +321,7 @@ Both agents redirect stdout/stderr to `~/.local/share/filemaid/{scan,cleanup}.lo
 | `log_path` | string | `~/.local/share/filemaid/filemaid.log` | Application log file. |
 | `db_path` | string | `~/.local/share/filemaid/filemaid.db` | SQLite database file. |
 | `tags` | bool | `true` | Whether to apply Finder tags. |
+| `subcategorize_images` | bool | `true` | Request a subject/app subcategory for images and screenshots and add it as a Finder tag. |
 | `min_age_hours` | number | `0` | Minimum file age for `scan` eligibility. |
 | `categories` | map<string,string> | See `config.json` | Category name → destination folder. |
 | `safe_delete_patterns` | []string | `[]` | `fnmatch` patterns that may be deleted. |
@@ -312,7 +329,7 @@ Both agents redirect stdout/stderr to `~/.local/share/filemaid/{scan,cleanup}.lo
 | `dev_cleanup` | map<string,object> | Per-cleaner `{enabled:true, mode:"safe"}` | Cleaner settings. |
 | `review_cleanup` | object | `{enabled:true, mode:"safe", max_age_days:30}` | Review-queue cleanup settings. |
 
-### 5.3 Custom Ollama Models
+### 5.4 Custom Ollama Models
 
 Three Modelfiles are shipped:
 

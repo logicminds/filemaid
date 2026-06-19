@@ -172,6 +172,61 @@ func TestParseResponseInvalidActionCoerced(t *testing.T) {
 	}
 }
 
+func TestParseResponseSubcategory(t *testing.T) {
+	cfg := baseConfig(t, t.TempDir())
+	data := map[string]any{
+		"response": `{"category": "Images", "subcategory": "cat", "tags": ["photo"], "action": "move", "reason": "x"}`,
+	}
+	decision, ok := parseResponse(data, categorySet(cfg.Categories))
+	if !ok {
+		t.Fatal("expected ok")
+	}
+	if decision.Subcategory != "cat" {
+		t.Errorf("Subcategory = %q, want cat", decision.Subcategory)
+	}
+}
+
+func TestBuildPromptIncludesSubcategoryForImages(t *testing.T) {
+	tmp := t.TempDir()
+	cfg := baseConfig(t, tmp)
+	cfg.SubcategorizeImages = true
+
+	img := filepath.Join(tmp, "cat.png")
+	if err := os.WriteFile(img, []byte("fake-image"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	prompt, images, err := buildPrompt(img, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(images) == 0 {
+		t.Error("expected image base64 payload")
+	}
+	if !strings.Contains(prompt, "For image files, also provide") {
+		t.Errorf("prompt missing subcategory instructions")
+	}
+}
+
+func TestBuildPromptOmitsSubcategoryWhenDisabled(t *testing.T) {
+	tmp := t.TempDir()
+	cfg := baseConfig(t, tmp)
+	cfg.SubcategorizeImages = false
+
+	img := filepath.Join(tmp, "cat.png")
+	if err := os.WriteFile(img, []byte("fake-image"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	prompt, _, err := buildPrompt(img, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(prompt, "For image files, also provide") {
+		t.Errorf("prompt should not contain subcategory instructions when disabled")
+	}
+}
+
 type fakeTransport struct {
 	handler func(req *http.Request) (*http.Response, error)
 }
@@ -196,6 +251,16 @@ func jsonResponse(body map[string]any) *http.Response {
 	}
 }
 
+// modelListResponse returns an Ollama /api/tags response containing the
+// configured model so checkModel passes.
+func modelListResponse(model string) *http.Response {
+	return jsonResponse(map[string]any{
+		"models": []any{
+			map[string]any{"name": model},
+		},
+	})
+}
+
 func TestClassifyUsesChatEndpoint(t *testing.T) {
 	tmp := t.TempDir()
 	cfg := baseConfig(t, tmp)
@@ -209,6 +274,9 @@ func TestClassifyUsesChatEndpoint(t *testing.T) {
 	transport := &fakeTransport{
 		handler: func(req *http.Request) (*http.Response, error) {
 			calledURL = req.URL.String()
+			if strings.HasSuffix(calledURL, "/api/tags") {
+				return modelListResponse(cfg.Model), nil
+			}
 			body := readRequestBody(req)
 			if body["model"] != "dummy" {
 				t.Errorf("model = %v, want dummy", body["model"])
@@ -258,6 +326,9 @@ func TestClassifyUsesGenerateEndpoint(t *testing.T) {
 	transport := &fakeTransport{
 		handler: func(req *http.Request) (*http.Response, error) {
 			urls = append(urls, req.URL.String())
+			if strings.HasSuffix(req.URL.String(), "/api/tags") {
+				return modelListResponse(cfg.Model), nil
+			}
 			body := readRequestBody(req)
 			if strings.HasSuffix(req.URL.String(), "/api/chat") {
 				if body["model"] != "dummy" {
@@ -302,6 +373,9 @@ func TestClassifyFallsBackOnError(t *testing.T) {
 
 	transport := &fakeTransport{
 		handler: func(req *http.Request) (*http.Response, error) {
+			if strings.HasSuffix(req.URL.String(), "/api/tags") {
+				return modelListResponse(cfg.Model), nil
+			}
 			return nil, io.EOF
 		},
 	}
@@ -321,7 +395,6 @@ func TestClassifyFallsBackOnError(t *testing.T) {
 		t.Errorf("Reason = %q, want EOF mentioned", decision.Reason)
 	}
 }
-
 func TestClassifyRetriesWithoutImagesOnFailure(t *testing.T) {
 	tmp := t.TempDir()
 	cfg := baseConfig(t, tmp)
@@ -334,6 +407,9 @@ func TestClassifyRetriesWithoutImagesOnFailure(t *testing.T) {
 	var imageCounts []int
 	transport := &fakeTransport{
 		handler: func(req *http.Request) (*http.Response, error) {
+			if strings.HasSuffix(req.URL.String(), "/api/tags") {
+				return modelListResponse(cfg.Model), nil
+			}
 			body := readRequestBody(req)
 			var count int
 			if images, ok := body["images"].([]any); ok {
@@ -381,6 +457,9 @@ func TestClassifySkipsHiddenFilesNoSpecialHandling(t *testing.T) {
 
 	transport := &fakeTransport{
 		handler: func(req *http.Request) (*http.Response, error) {
+			if strings.HasSuffix(req.URL.String(), "/api/tags") {
+				return modelListResponse(cfg.Model), nil
+			}
 			return jsonResponse(map[string]any{
 				"response": `{"category": "Documents", "tags": [], "action": "move", "reason": "x"}`,
 			}), nil
@@ -456,6 +535,9 @@ func TestClassifierInterface(t *testing.T) {
 
 	transport := &fakeTransport{
 		handler: func(req *http.Request) (*http.Response, error) {
+			if strings.HasSuffix(req.URL.String(), "/api/tags") {
+				return modelListResponse(cfg.Model), nil
+			}
 			return jsonResponse(map[string]any{
 				"response": `{"category": "Documents", "tags": [], "action": "move", "reason": "x"}`,
 			}), nil
@@ -504,5 +586,29 @@ func TestParseResponseMissingFieldsUsesDefaults(t *testing.T) {
 	}
 	if decision.Action != "review" {
 		t.Errorf("Action = %q, want review", decision.Action)
+	}
+}
+func TestCheckModelMissingModel(t *testing.T) {
+	transport := &fakeTransport{
+		handler: func(req *http.Request) (*http.Response, error) {
+			if strings.HasSuffix(req.URL.String(), "/api/tags") {
+				return jsonResponse(map[string]any{
+					"models": []any{
+						map[string]any{"name": "other-model"},
+					},
+				}), nil
+			}
+			return jsonResponse(map[string]any{}), nil
+		},
+	}
+
+	client := NewClient(transport)
+	cfg := baseConfig(t, t.TempDir())
+	_, err := client.Classify("", cfg)
+	if err == nil {
+		t.Fatal("expected error for missing model")
+	}
+	if !strings.Contains(err.Error(), "not found in Ollama") {
+		t.Errorf("unexpected error message: %v", err)
 	}
 }
