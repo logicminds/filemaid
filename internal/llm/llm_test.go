@@ -299,6 +299,20 @@ func readRequestBody(req *http.Request) map[string]any {
 	_ = json.Unmarshal(data, &body)
 	return body
 }
+// chatImageCount returns the number of image payloads attached to the user
+// message in an /api/chat request body.
+func chatImageCount(body map[string]any) int {
+	msgs, ok := body["messages"].([]any)
+	if !ok || len(msgs) < 2 {
+		return 0
+	}
+	user, ok := msgs[1].(map[string]any)
+	if !ok {
+		return 0
+	}
+	imgs, _ := user["images"].([]any)
+	return len(imgs)
+}
 
 func jsonResponse(body map[string]any) *http.Response {
 	data, _ := json.Marshal(body)
@@ -339,6 +353,19 @@ func TestClassifyUsesChatEndpoint(t *testing.T) {
 			if body["model"] != "dummy" {
 				t.Errorf("model = %v, want dummy", body["model"])
 			}
+			if opts, ok := body["options"].(map[string]any); ok {
+				if opts["num_predict"] != float64(512) {
+					t.Errorf("num_predict = %v, want 512", opts["num_predict"])
+				}
+				if opts["num_ctx"] != float64(4096) {
+					t.Errorf("num_ctx = %v, want 4096", opts["num_ctx"])
+				}
+			} else {
+				t.Error("missing options in request body")
+			}
+			if body["keep_alive"] != "5m" {
+				t.Errorf("keep_alive = %v, want 5m", body["keep_alive"])
+			}
 			return jsonResponse(map[string]any{
 				"message": map[string]any{
 					"tool_calls": []any{
@@ -371,7 +398,7 @@ func TestClassifyUsesChatEndpoint(t *testing.T) {
 	}
 }
 
-func TestClassifyUsesGenerateEndpoint(t *testing.T) {
+func TestClassifyDoesNotFallbackToGenerate(t *testing.T) {
 	tmp := t.TempDir()
 	cfg := baseConfig(t, tmp)
 
@@ -380,23 +407,15 @@ func TestClassifyUsesGenerateEndpoint(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	var urls []string
 	transport := &fakeTransport{
 		handler: func(req *http.Request) (*http.Response, error) {
-			urls = append(urls, req.URL.String())
 			if strings.HasSuffix(req.URL.String(), "/api/tags") {
 				return modelListResponse(cfg.Model), nil
 			}
-			body := readRequestBody(req)
-			if strings.HasSuffix(req.URL.String(), "/api/chat") {
-				if body["model"] != "dummy" {
-					t.Errorf("chat model = %v, want dummy", body["model"])
-				}
-				return nil, io.EOF
+			if strings.HasSuffix(req.URL.String(), "/api/generate") {
+				t.Errorf("unexpected /api/generate call; Classify should use only /api/chat")
 			}
-			return jsonResponse(map[string]any{
-				"response": `{"category": "Documents", "tags": ["txt"], "action": "move", "reason": "text"}`,
-			}), nil
+			return nil, io.EOF
 		},
 	}
 
@@ -405,18 +424,14 @@ func TestClassifyUsesGenerateEndpoint(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if decision.Category != "Documents" {
-		t.Errorf("Category = %q, want Documents", decision.Category)
+	if decision.Category != "Unknown" {
+		t.Errorf("Category = %q, want Unknown", decision.Category)
 	}
-
-	var generateCalled bool
-	for _, u := range urls {
-		if strings.HasSuffix(u, "/api/generate") {
-			generateCalled = true
-		}
+	if decision.Action != "review" {
+		t.Errorf("Action = %q, want review", decision.Action)
 	}
-	if !generateCalled {
-		t.Errorf("expected /api/generate to be called, got URLs %v", urls)
+	if !strings.Contains(decision.Reason, "EOF") {
+		t.Errorf("Reason = %q, want EOF mentioned", decision.Reason)
 	}
 }
 
@@ -469,17 +484,27 @@ func TestClassifyRetriesWithoutImagesOnFailure(t *testing.T) {
 				return modelListResponse(cfg.Model), nil
 			}
 			body := readRequestBody(req)
-			var count int
-			if images, ok := body["images"].([]any); ok {
-				count = len(images)
-			}
+			count := chatImageCount(body)
 			imageCounts = append(imageCounts, count)
 
 			if count > 0 {
-				return nil, io.EOF
+				return nil, errors.New("model does not support images")
 			}
 			return jsonResponse(map[string]any{
-				"response": `{"category": "Images", "tags": [], "action": "move", "reason": "metadata"}`,
+				"message": map[string]any{
+					"tool_calls": []any{
+						map[string]any{
+							"function": map[string]any{
+								"arguments": map[string]any{
+									"category": "Images",
+									"tags":     []any{"png"},
+									"action":   "move",
+									"reason":   "image",
+								},
+							},
+						},
+					},
+				},
 			}), nil
 		},
 	}
@@ -492,15 +517,50 @@ func TestClassifyRetriesWithoutImagesOnFailure(t *testing.T) {
 	if decision.Category != "Images" {
 		t.Errorf("Category = %q, want Images", decision.Category)
 	}
-
-	foundZero := false
-	for _, c := range imageCounts {
-		if c == 0 {
-			foundZero = true
-		}
+	if len(imageCounts) != 2 {
+		t.Errorf("expected 2 calls, got %d: %v", len(imageCounts), imageCounts)
 	}
-	if !foundZero {
-		t.Errorf("expected a call without images, got counts %v", imageCounts)
+	if imageCounts[0] == 0 {
+		t.Errorf("expected first call with images, got %v", imageCounts)
+	}
+	if imageCounts[1] != 0 {
+		t.Errorf("expected second call without images, got %v", imageCounts)
+	}
+}
+
+func TestClassifyDoesNotRetryWithoutImagesOnGenericError(t *testing.T) {
+	tmp := t.TempDir()
+	cfg := baseConfig(t, tmp)
+
+	img := filepath.Join(tmp, "img.png")
+	if err := os.WriteFile(img, []byte("\x89PNG\r\n\x1a\nfake"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var callCount int
+	transport := &fakeTransport{
+		handler: func(req *http.Request) (*http.Response, error) {
+			if strings.HasSuffix(req.URL.String(), "/api/tags") {
+				return modelListResponse(cfg.Model), nil
+			}
+			callCount++
+			return nil, errors.New("ollama is offline")
+		},
+	}
+
+	client := NewClient(transport)
+	decision, err := client.Classify(img, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if decision.Category != "Unknown" {
+		t.Errorf("Category = %q, want Unknown", decision.Category)
+	}
+	if callCount != 1 {
+		t.Errorf("expected exactly 1 chat call for a generic error, got %d", callCount)
+	}
+	if !strings.Contains(decision.Reason, "ollama is offline") {
+		t.Errorf("Reason = %q, want error mentioned", decision.Reason)
 	}
 }
 

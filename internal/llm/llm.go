@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -77,61 +78,52 @@ func (c *Client) Classify(path string, cfg *config.Config) (Decision, error) {
 	}
 
 	categories := categorySet(cfg.Categories)
-	endpoint := "auto"
-
 	ollamaURL := strings.TrimRight(cfg.OllamaURL, "/")
 	model := cfg.Model
 
-	var lastErr string
-
-	tryGenerate := func(useImages bool) (map[string]any, error) {
-		localImages := images
-		if !useImages {
-			localImages = nil
+	tryChat := func(imgs []string) (Decision, error) {
+		data, err := c.requestChat(ollamaURL, model, prompt, imgs, categories)
+		if err != nil {
+			return Decision{}, err
 		}
-		return c.requestGenerate(ollamaURL, model, prompt, localImages)
-	}
-
-	tryChat := func(useImages bool) (map[string]any, error) {
-		localImages := images
-		if !useImages {
-			localImages = nil
+		if errMsg, ok := data["error"].(string); ok && errMsg != "" {
+			return Decision{}, errors.New(errMsg)
 		}
-		return c.requestChat(ollamaURL, model, prompt, localImages, categories)
-	}
-
-	strategies := []func(bool) (map[string]any, error){}
-	if endpoint == "auto" || endpoint == "chat" {
-		strategies = append(strategies, tryChat)
-	}
-	if endpoint == "auto" || endpoint == "generate" {
-		strategies = append(strategies, tryGenerate)
-	}
-
-	for _, strategy := range strategies {
-		for _, useImages := range []bool{true, false} {
-			if useImages && len(images) == 0 {
-				continue
-			}
-			data, err := strategy(useImages)
-			if err != nil {
-				lastErr = err.Error()
-				continue
-			}
-			decision, ok := parseResponse(data, categories)
-			if ok {
-				return decision, nil
-			}
+		if decision, ok := parseResponse(data, categories); ok {
+			return decision, nil
 		}
+		return Decision{}, errors.New("could not parse model response")
+	}
+
+	decision, err := tryChat(images)
+	if err != nil && len(images) > 0 && isImageRelatedError(err) {
+		decision, err = tryChat(nil)
+	}
+
+	if err == nil {
+		return decision, nil
 	}
 
 	d := NewDecision()
-	if lastErr != "" {
-		d.Reason = fmt.Sprintf("ollama error: %s", lastErr)
-	} else {
-		d.Reason = "could not parse model response"
-	}
+	d.Reason = fmt.Sprintf("ollama error: %s", err.Error())
 	return d, nil
+}
+
+// isImageRelatedError reports whether an error from Ollama is likely caused
+// by the attached image (for example, the model does not support vision or
+// the image payload could not be decoded). These errors trigger a single
+// retry without images.
+func isImageRelatedError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	for _, term := range []string{"image", "images", "vision", "visual", "base64", "decode", "encoding", "multimodal"} {
+		if strings.Contains(msg, term) {
+			return true
+		}
+	}
+	return false
 }
 
 // checkModel asks Ollama whether the configured model exists locally. It
@@ -371,10 +363,11 @@ func (c *Client) requestGenerate(ollamaURL, model, prompt string, images []strin
 		"prompt": prompt,
 		"images": images,
 		"stream": false,
+		"keep_alive": "5m",
 		"options": map[string]any{
 			"temperature": 0.2,
-			"num_predict": 2048,
-			"num_ctx":     8192,
+			"num_predict": 512,
+			"num_ctx":     4096,
 		},
 	}
 	return c.postJSON(context.Background(), ollamaURL+"/api/generate", body, 120*time.Second)
@@ -404,10 +397,11 @@ func (c *Client) requestChat(ollamaURL, model, prompt string, images []string, c
 		},
 		"tools":  []map[string]any{toolSchema(catList)},
 		"stream": false,
+		"keep_alive": "5m",
 		"options": map[string]any{
 			"temperature": 0.2,
-			"num_predict": 2048,
-			"num_ctx":     8192,
+			"num_predict": 512,
+			"num_ctx":     4096,
 		},
 	}
 	return c.postJSON(context.Background(), ollamaURL+"/api/chat", body, 120*time.Second)
