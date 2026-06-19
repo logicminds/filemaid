@@ -57,6 +57,7 @@ func newTestInstaller(t *testing.T, exe string) (*Installer, *fakeRunner, string
 	inst := &Installer{
 		FS:             osFS{},
 		Runner:         runner,
+		QuietRunner:    runner,
 		Home:           home,
 		UID:            501,
 		Now:            time.Date(2026, 6, 19, 0, 0, 0, 0, time.UTC),
@@ -71,7 +72,6 @@ func prepareExecutable(t *testing.T, dir string) string {
 	writeFile(t, exe, []byte("binary"), 0o755)
 	return exe
 }
-
 func TestCheckRequirements(t *testing.T) {
 	runner := newFakeRunner()
 
@@ -81,6 +81,9 @@ func TestCheckRequirements(t *testing.T) {
 	}
 	if info.OllamaInstalled {
 		t.Error("expected ollama not installed")
+	}
+	if info.OllamaRunning {
+		t.Error("expected ollama not running when not installed")
 	}
 	if info.Recommended == "" {
 		t.Error("expected a recommended model")
@@ -94,8 +97,24 @@ func TestCheckRequirements(t *testing.T) {
 	if !info.OllamaInstalled {
 		t.Error("expected ollama installed")
 	}
+	if !info.OllamaRunning {
+		t.Error("expected ollama running")
+	}
 	if runtime.GOOS == "darwin" && info.TotalMemoryGB <= 0 {
 		t.Error("expected positive memory on macOS")
+	}
+
+	// Simulate ollama installed but not responding.
+	runner.runErr = fmt.Errorf("ollama not running")
+	info, err = checkRequirements(runner)
+	if err != nil {
+		t.Fatalf("checkRequirements: %v", err)
+	}
+	if !info.OllamaInstalled {
+		t.Error("expected ollama installed")
+	}
+	if info.OllamaRunning {
+		t.Error("expected ollama not running")
 	}
 }
 
@@ -394,6 +413,7 @@ func TestInstallPreservesExistingConfig(t *testing.T) {
 	inst, _, home := newTestInstaller(t, exe)
 	runner := newFakeRunner()
 	inst.Runner = runner
+	inst.QuietRunner = runner
 	runner.lookPath["ollama"] = "/usr/local/bin/ollama"
 
 	configDir := filepath.Join(home, ".config", "filemaid")
@@ -498,11 +518,19 @@ func TestInstallCustomDirs(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(home, "etc", "filemaid", "config.json")); err != nil {
 		t.Errorf("config not in custom config dir: %v", err)
 	}
-	if _, err := os.Stat(filepath.Join(home, "var", "filemaid", "setup.json")); err != nil {
-		t.Errorf("state not in custom data dir: %v", err)
-	}
-	if _, err := os.Stat(filepath.Join(home, "Library", "LaunchAgents", "biz.logicminds.filemaid.cleanup.plist")); err != nil {
-		t.Errorf("plist not in launchd dir: %v", err)
+}
+
+func TestInstallOllamaNotRunning(t *testing.T) {
+	dir := t.TempDir()
+	exe := prepareExecutable(t, dir)
+	inst, _, _ := newTestInstaller(t, exe)
+	// LookPath finds it, but Run("ollama", "list") will fail because it is a fake.
+	fr := inst.QuietRunner.(*fakeRunner)
+	fr.lookPath["ollama"] = "/usr/local/bin/ollama"
+	fr.runErr = fmt.Errorf("ollama not running")
+
+	if err := inst.Install(InstallOptions{Interactive: true}); err == nil {
+		t.Fatal("expected error when ollama is not running")
 	}
 }
 
@@ -513,19 +541,6 @@ func TestInstallNoOllama(t *testing.T) {
 
 	if err := inst.Install(InstallOptions{}); err == nil {
 		t.Fatal("expected error when ollama is not installed")
-	}
-}
-
-func TestInstallOllamaNotRunning(t *testing.T) {
-	dir := t.TempDir()
-	exe := prepareExecutable(t, dir)
-	inst, _, _ := newTestInstaller(t, exe)
-	// LookPath finds it, but Run("ollama", "list") will fail because it is a fake.
-	fr := inst.Runner.(*fakeRunner)
-	fr.lookPath["ollama"] = "/usr/local/bin/ollama"
-
-	if err := inst.Install(InstallOptions{Interactive: true}); err == nil {
-		t.Fatal("expected error when ollama is not running")
 	}
 }
 

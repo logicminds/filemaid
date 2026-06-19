@@ -58,8 +58,7 @@ func checkRequirements(runner Runner) (*systemInfo, error) {
 
 	if _, err := runner.LookPath("ollama"); err == nil {
 		info.OllamaInstalled = true
-		q := quietRunner{}
-		if err := q.Run("ollama", "list"); err == nil {
+		if err := runner.Run("ollama", "list"); err == nil {
 			info.OllamaRunning = true
 		}
 	}
@@ -255,6 +254,7 @@ func (quietRunner) LookPath(name string) (string, error) { return exec.LookPath(
 type Installer struct {
 	FS             FS
 	Runner         Runner
+	QuietRunner    Runner
 	Home           string
 	UID            int
 	Now            time.Time
@@ -290,6 +290,7 @@ func newDefaultInstaller() (*Installer, error) {
 	return &Installer{
 		FS:             osFS{},
 		Runner:         loudRunner{},
+		QuietRunner:    quietRunner{},
 		Home:           home,
 		UID:            os.Getuid(),
 		Now:            time.Now(),
@@ -301,7 +302,7 @@ func newDefaultInstaller() (*Installer, error) {
 
 // Install runs the installation with the configured dependencies.
 func (i *Installer) Install(opts InstallOptions) error {
-	info, err := checkRequirements(i.Runner)
+	info, err := checkRequirements(i.QuietRunner)
 	if err != nil {
 		return fmt.Errorf("check requirements: %w", err)
 	}
