@@ -373,7 +373,7 @@ func (c *Client) requestGenerate(ollamaURL, model, prompt string, images []strin
 		"stream": false,
 		"options": map[string]any{
 			"temperature": 0.2,
-			"num_predict": 512,
+			"num_predict": 2048,
 			"num_ctx":     8192,
 		},
 	}
@@ -406,7 +406,7 @@ func (c *Client) requestChat(ollamaURL, model, prompt string, images []string, c
 		"stream": false,
 		"options": map[string]any{
 			"temperature": 0.2,
-			"num_predict": 512,
+			"num_predict": 2048,
 			"num_ctx":     8192,
 		},
 	}
@@ -514,9 +514,34 @@ func parseResponse(data map[string]any, categories map[string]bool) (Decision, b
 					}
 				}
 			}
+
+			// Some models return raw JSON in the assistant message content
+			// instead of using tool_calls. Try to extract JSON from there as a
+			// fallback before falling back to the legacy /api/generate response.
+			if contentRaw, ok := msg["content"]; ok {
+				if content, ok := contentRaw.(string); ok && strings.TrimSpace(content) != "" {
+					if parsed, ok := extractJSON(content); ok {
+						dest, _ := stringField(parsed, "destination")
+						return buildDecision(parsed, categories, dest), true
+					}
+				}
+			}
+
+			// Models with a visible reasoning/thinking field may embed the final
+			// JSON decision inside that field. Use it as a last resort for chat
+			// responses before giving up on the chat endpoint.
+			if thinkingRaw, ok := msg["thinking"]; ok {
+				if thinking, ok := thinkingRaw.(string); ok && strings.TrimSpace(thinking) != "" {
+					if parsed, ok := extractJSON(thinking); ok {
+						dest, _ := stringField(parsed, "destination")
+						return buildDecision(parsed, categories, dest), true
+					}
+				}
+			}
 		}
 	}
 
+	// Legacy /api/generate response path.
 	if respRaw, ok := data["response"]; ok {
 		if resp, ok := respRaw.(string); ok {
 			if parsed, ok := extractJSON(resp); ok {
