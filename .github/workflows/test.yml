@@ -10,8 +10,9 @@ jobs:
   test:
     runs-on: macos-latest
     strategy:
+      fail-fast: false
       matrix:
-        go-version: ["1.24", "1.25", "1.26"]
+        go-version: ["1.25", "1.26"]
 
     steps:
       - name: Checkout repository
@@ -51,7 +52,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: "1.24"
+          go-version: "1.25"
 
       - name: Verify formatting
         run: test -z "$(gofmt -l .)"
@@ -64,6 +65,8 @@ jobs:
 
       - name: Validate JSON configs and generated launchd plists
         run: |
+          mkdir -p ~/.local/share/filemaid
+          echo '{}' > ~/.local/share/filemaid/setup.json
           go run ./cmd/filemaid config > /dev/null
           go test ./internal/setup/... -run TestRenderPlists
 
@@ -77,7 +80,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: "1.24"
+          go-version: "1.25"
 
       - name: Build release binary
         run: go build -ldflags="-s -w" -o filemaid ./cmd/filemaid

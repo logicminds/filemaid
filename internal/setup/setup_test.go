@@ -18,15 +18,28 @@ type fakeRunner struct {
 	calls    []string
 	runErr   error
 	lookPath map[string]string
+	outputs  map[string]string
 }
 
 func newFakeRunner() *fakeRunner {
-	return &fakeRunner{lookPath: map[string]string{}}
+	return &fakeRunner{
+		lookPath: map[string]string{},
+		outputs:  map[string]string{},
+	}
 }
 
 func (r *fakeRunner) Run(name string, arg ...string) error {
 	r.calls = append(r.calls, name+" "+strings.Join(arg, " "))
 	return r.runErr
+}
+
+func (r *fakeRunner) RunOutput(name string, arg ...string) (string, error) {
+	r.calls = append(r.calls, name+" "+strings.Join(arg, " "))
+	key := name + " " + strings.Join(arg, " ")
+	if out, ok := r.outputs[key]; ok {
+		return out, nil
+	}
+	return "", r.runErr
 }
 
 func (r *fakeRunner) LookPath(name string) (string, error) {
@@ -90,6 +103,7 @@ func TestCheckRequirements(t *testing.T) {
 	}
 
 	runner.lookPath["ollama"] = "/usr/local/bin/ollama"
+	runner.outputs["ollama list"] = "filemaid-gemma4-12b\n"
 	info, err = checkRequirements(runner)
 	if err != nil {
 		t.Fatalf("checkRequirements: %v", err)
@@ -163,7 +177,7 @@ func TestSelectModel(t *testing.T) {
 		t.Errorf("got %q, want metadata", got)
 	}
 
-	// Unknown flag.
+	// Unknown --model flag.
 	_, err = selectModel(InstallOptions{ModelName: "nope"}, info, nil)
 	if err == nil {
 		t.Error("expected error for unknown model")
@@ -172,9 +186,11 @@ func TestSelectModel(t *testing.T) {
 
 func TestInstallFull(t *testing.T) {
 	dir := t.TempDir()
-	exe := prepareExecutable(t, dir)
-	inst, runner, home := newTestInstaller(t, exe)
+	xe := prepareExecutable(t, dir)
+	inst, runner, home := newTestInstaller(t, xe)
 	runner.lookPath["ollama"] = "/usr/local/bin/ollama"
+	runner.outputs["ollama list"] = "filemaid-gemma4-12b\n"
+	runner.outputs["ollama list"] = "filemaid-gemma4-12b\n"
 
 	if err := inst.Install(InstallOptions{ModelName: "filemaid-gemma4-12b"}); err != nil {
 		t.Fatalf("install failed: %v", err)
@@ -279,6 +295,7 @@ func TestInstallOverwritesExistingModelfiles(t *testing.T) {
 	exe := prepareExecutable(t, dir)
 	inst, runner, home := newTestInstaller(t, exe)
 	runner.lookPath["ollama"] = "/usr/local/bin/ollama"
+	runner.outputs["ollama list"] = "filemaid-gemma4-12b\n"
 
 	configDir := filepath.Join(home, ".config", "filemaid")
 	mkdir(t, configDir)
@@ -305,6 +322,7 @@ func TestInstallSkipsOllamaCreateWhenHashUnchanged(t *testing.T) {
 	exe := prepareExecutable(t, dir)
 	inst, runner, home := newTestInstaller(t, exe)
 	runner.lookPath["ollama"] = "/usr/local/bin/ollama"
+	runner.outputs["ollama list"] = "filemaid-gemma4-12b\n"
 
 	if err := inst.Install(InstallOptions{ModelName: "filemaid-gemma4-12b"}); err != nil {
 		t.Fatalf("install failed: %v", err)
@@ -323,6 +341,7 @@ func TestInstallSkipsOllamaCreateWhenHashUnchanged(t *testing.T) {
 	// Simulate an upgrade: re-run setup with the same embedded modelfiles.
 	inst2, runner2, _ := newTestInstaller(t, exe)
 	runner2.lookPath["ollama"] = "/usr/local/bin/ollama"
+	runner2.outputs["ollama list"] = "filemaid-gemma4-12b\n"
 	inst2.Home = inst.Home
 	inst2.DataDir = inst.DataDir
 	if err := inst2.Install(InstallOptions{ModelName: "filemaid-gemma4-12b"}); err != nil {
@@ -341,6 +360,7 @@ func TestInstallRerunsOllamaCreateWhenHashChanged(t *testing.T) {
 	exe := prepareExecutable(t, dir)
 	inst, runner, home := newTestInstaller(t, exe)
 	runner.lookPath["ollama"] = "/usr/local/bin/ollama"
+	runner.outputs["ollama list"] = "filemaid-gemma4-12b\n"
 
 	if err := inst.Install(InstallOptions{ModelName: "filemaid-gemma4-12b"}); err != nil {
 		t.Fatalf("install failed: %v", err)
@@ -366,6 +386,7 @@ func TestInstallRerunsOllamaCreateWhenHashChanged(t *testing.T) {
 
 	inst2, runner2, _ := newTestInstaller(t, exe)
 	runner2.lookPath["ollama"] = "/usr/local/bin/ollama"
+	runner2.outputs["ollama list"] = "filemaid-gemma4-12b\n"
 	inst2.Home = inst.Home
 	inst2.DataDir = inst.DataDir
 	if err := inst2.Install(InstallOptions{ModelName: "filemaid-gemma4-12b"}); err != nil {
@@ -380,6 +401,7 @@ func TestInstallNoScan(t *testing.T) {
 	exe := prepareExecutable(t, dir)
 	inst, runner, home := newTestInstaller(t, exe)
 	runner.lookPath["ollama"] = "/usr/local/bin/ollama"
+	runner.outputs["ollama list"] = "filemaid-gemma4-12b\n"
 
 	launchdDir := filepath.Join(home, "Library", "LaunchAgents")
 	mkdir(t, launchdDir)
@@ -415,6 +437,7 @@ func TestInstallPreservesExistingConfig(t *testing.T) {
 	inst.Runner = runner
 	inst.QuietRunner = runner
 	runner.lookPath["ollama"] = "/usr/local/bin/ollama"
+	runner.outputs["ollama list"] = "filemaid-gemma4-12b\n"
 
 	configDir := filepath.Join(home, ".config", "filemaid")
 	mkdir(t, configDir)
@@ -438,6 +461,7 @@ func TestInstallInteractiveDefaults(t *testing.T) {
 	exe := prepareExecutable(t, dir)
 	inst, runner, home := newTestInstaller(t, exe)
 	runner.lookPath["ollama"] = "/usr/local/bin/ollama"
+	runner.outputs["ollama list"] = "filemaid-gemma4-12b\n"
 	inst.Reader = bufio.NewReader(strings.NewReader("\n"))
 
 	if err := inst.Install(InstallOptions{ModelName: "filemaid-gemma4-12b", Interactive: true}); err != nil {
@@ -461,6 +485,7 @@ func TestInstallInteractiveCustom(t *testing.T) {
 	exe := prepareExecutable(t, dir)
 	inst, runner, home := newTestInstaller(t, exe)
 	runner.lookPath["ollama"] = "/usr/local/bin/ollama"
+	runner.outputs["ollama list"] = "filemaid-gemma4-12b\n"
 
 	input := strings.Join([]string{
 		"n",                     // do not use defaults
@@ -501,6 +526,7 @@ func TestInstallCustomDirs(t *testing.T) {
 	exe := prepareExecutable(t, dir)
 	inst, runner, home := newTestInstaller(t, exe)
 	runner.lookPath["ollama"] = "/usr/local/bin/ollama"
+	runner.outputs["ollama list"] = "filemaid-gemma4-12b\n"
 
 	opts := InstallOptions{
 		BinDir:    filepath.Join(home, "bin"),
@@ -527,6 +553,7 @@ func TestInstallOllamaNotRunning(t *testing.T) {
 	// LookPath finds it, but Run("ollama", "list") will fail because it is a fake.
 	fr := inst.QuietRunner.(*fakeRunner)
 	fr.lookPath["ollama"] = "/usr/local/bin/ollama"
+	fr.outputs["ollama list"] = "filemaid-gemma4-12b\n"
 	fr.runErr = fmt.Errorf("ollama not running")
 
 	if err := inst.Install(InstallOptions{Interactive: true}); err == nil {
@@ -661,6 +688,7 @@ func TestInstallBootstrapFailure(t *testing.T) {
 	exe := prepareExecutable(t, dir)
 	inst, runner, _ := newTestInstaller(t, exe)
 	runner.lookPath["ollama"] = "/usr/local/bin/ollama"
+	runner.outputs["ollama list"] = "filemaid-gemma4-12b\n"
 	runner.runErr = fmt.Errorf("launchctl failed")
 
 	if err := inst.Install(InstallOptions{ModelName: "filemaid-gemma4-12b"}); err == nil {

@@ -187,6 +187,30 @@ type Runner interface {
 	LookPath(name string) (string, error)
 }
 
+// outputRunner extends Runner with a way to capture command stdout.
+type outputRunner interface {
+	Runner
+	RunOutput(name string, arg ...string) (string, error)
+}
+
+// IsSetup reports whether filemaid has been installed by checking for the
+// setup state file in the default data directory.
+func IsSetup() (bool, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return false, fmt.Errorf("home dir: %w", err)
+	}
+	statePath := filepath.Join(home, ".local", "share", "filemaid", "setup.json")
+	_, err = os.Stat(statePath)
+	if err == nil {
+		return true, nil
+	}
+	if os.IsNotExist(err) {
+		return false, nil
+	}
+	return false, err
+}
+
 type osFS struct{}
 
 func (osFS) MkdirAll(path string, perm os.FileMode) error { return os.MkdirAll(path, perm) }
@@ -238,6 +262,12 @@ func (loudRunner) Run(name string, arg ...string) error {
 
 func (loudRunner) LookPath(name string) (string, error) { return exec.LookPath(name) }
 
+func (loudRunner) RunOutput(name string, arg ...string) (string, error) {
+	cmd := exec.Command(name, arg...)
+	out, err := cmd.Output()
+	return string(out), err
+}
+
 // quietRunner captures subprocess output and discards it. Use it for
 // idempotent teardown commands that are expected to fail on first install.
 type quietRunner struct{}
@@ -248,6 +278,12 @@ func (quietRunner) Run(name string, arg ...string) error {
 }
 
 func (quietRunner) LookPath(name string) (string, error) { return exec.LookPath(name) }
+
+func (quietRunner) RunOutput(name string, arg ...string) (string, error) {
+	cmd := exec.Command(name, arg...)
+	out, err := cmd.Output()
+	return string(out), err
+}
 
 // Installer performs a filemaid installation. All dependencies are fields so
 // tests can inject fakes.
@@ -531,10 +567,47 @@ func (i *Installer) createOllamaModels(configDir, selectedModel string) error {
 	}
 
 	path := filepath.Join(configDir, "modelfiles", "Modelfile."+selectedModel)
+
+	fmt.Fprintln(os.Stderr)
+	fmt.Fprintf(os.Stderr, "Creating Ollama model %q. This may download several gigabytes and take a few minutes.\n", selectedModel)
+	fmt.Fprintln(os.Stderr, "Do not interrupt the download.")
+	fmt.Fprintln(os.Stderr)
+
 	if err := i.Runner.Run("ollama", "create", selectedModel, "-f", path); err != nil {
 		return fmt.Errorf("create model %s: %w", selectedModel, err)
 	}
+
+	if err := i.waitForModel(selectedModel); err != nil {
+		return fmt.Errorf("model %s did not appear in ollama list after create: %w", selectedModel, err)
+	}
+
+	fmt.Fprintf(os.Stderr, "Model %q is ready.\n", selectedModel)
 	return nil
+}
+
+// waitForModel polls `ollama list` until the named model appears, giving Ollama
+// time to finish downloading and registering the model.
+func (i *Installer) waitForModel(model string) error {
+	const maxAttempts = 60
+	const delay = 5 * time.Second
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		output, err := i.runOutput("ollama", "list")
+		if err == nil && strings.Contains(output, model) {
+			return nil
+		}
+		time.Sleep(delay)
+	}
+	return fmt.Errorf("timed out waiting for %q", model)
+}
+
+// runOutput runs a command and returns its stdout as a string.
+func (i *Installer) runOutput(name string, arg ...string) (string, error) {
+	if r, ok := i.Runner.(outputRunner); ok {
+		return r.RunOutput(name, arg...)
+	}
+	cmd := exec.Command(name, arg...)
+	out, err := cmd.Output()
+	return string(out), err
 }
 
 func (i *Installer) hashEmbeddedModelfiles() (map[string]string, error) {
