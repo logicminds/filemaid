@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"os"
@@ -712,5 +713,72 @@ func TestValidateUsesConfiguredOllamaURL(t *testing.T) {
 		if host != "custom-ollama:11434" {
 			t.Errorf("expected requests to custom-ollama:11434, got %s", host)
 		}
+	}
+}
+
+func TestModelMatch(t *testing.T) {
+	cases := []struct {
+		want    string
+		have    string
+		matched bool
+	}{
+		{"filemaid-test", "filemaid-test", true},
+		{"filemaid-test", "filemaid-test:latest", true},
+		{"filemaid-test", "filemaid-test:v2", true},
+		{"filemaid-test:latest", "filemaid-test:latest", true},
+		{"filemaid-test:v2", "filemaid-test:v2", true},
+		{"filemaid-test:v2", "filemaid-test:latest", false},
+		{"filemaid-test", "other-model:latest", false},
+		{"filemaid", "filemaid2:latest", false},
+	}
+	for _, tc := range cases {
+		t.Run(fmt.Sprintf("%s/%s", tc.want, tc.have), func(t *testing.T) {
+			got := modelMatch(tc.want, tc.have)
+			if got != tc.matched {
+				t.Errorf("modelMatch(%q, %q) = %v, want %v", tc.want, tc.have, got, tc.matched)
+			}
+		})
+	}
+}
+
+func TestValidateSucceedsWhenModelHasImplicitLatestTag(t *testing.T) {
+	transport := &fakeTransport{
+		handler: func(req *http.Request) (*http.Response, error) {
+			if strings.HasSuffix(req.URL.String(), "/api/tags") {
+				return modelListResponse("filemaid-test:latest"), nil
+			}
+			if strings.HasSuffix(req.URL.String(), "/api/generate") {
+				return jsonResponse(map[string]any{"response": "OK"}), nil
+			}
+			return jsonResponse(map[string]any{}), nil
+		},
+	}
+
+	client := NewClient(transport)
+	cfg := baseConfig(t, t.TempDir())
+	cfg.Model = "filemaid-test"
+	if err := client.Validate(cfg); err != nil {
+		t.Fatalf("Validate failed: %v", err)
+	}
+}
+
+func TestValidateSucceedsWhenModelHasDifferentTag(t *testing.T) {
+	transport := &fakeTransport{
+		handler: func(req *http.Request) (*http.Response, error) {
+			if strings.HasSuffix(req.URL.String(), "/api/tags") {
+				return modelListResponse("filemaid-test:v2"), nil
+			}
+			if strings.HasSuffix(req.URL.String(), "/api/generate") {
+				return jsonResponse(map[string]any{"response": "OK"}), nil
+			}
+			return jsonResponse(map[string]any{}), nil
+		},
+	}
+
+	client := NewClient(transport)
+	cfg := baseConfig(t, t.TempDir())
+	cfg.Model = "filemaid-test"
+	if err := client.Validate(cfg); err != nil {
+		t.Fatalf("Validate failed: %v", err)
 	}
 }

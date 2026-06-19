@@ -735,9 +735,16 @@ func (i *Installer) createOllamaModels(configDir, selectedModel string) error {
 		return fmt.Errorf("read embedded modelfile %s: %w", selectedModel, err)
 	}
 	hash := hashBytes(data)
-	exists, err := i.modelExists(selectedModel)
+	models, err := i.listOllamaModels()
 	if err != nil {
 		return fmt.Errorf("list ollama models: %w", err)
+	}
+	exists := false
+	for _, name := range models {
+		if name == selectedModel || strings.HasPrefix(name, selectedModel+":") {
+			exists = true
+			break
+		}
 	}
 
 	if !exists {
@@ -762,15 +769,23 @@ func (i *Installer) createOllamaModels(configDir, selectedModel string) error {
 	fmt.Fprintln(os.Stderr, "Do not interrupt the download.")
 	fmt.Fprintln(os.Stderr)
 
-	if err := i.Runner.Run("ollama", "create", selectedModel, "-f", path); err != nil {
-		return fmt.Errorf("create model %s: %w", selectedModel, err)
+	// Build a deterministic, short tag from the modelfile hash so recreated
+	// models are versioned and the previous latest can be removed.
+	tag := "v" + hash[:12]
+	versionedModel := selectedModel + ":" + tag
+
+	if err := i.Runner.Run("ollama", "create", versionedModel, "-f", path); err != nil {
+		return fmt.Errorf("create model %s: %w", versionedModel, err)
 	}
 
-	if err := i.waitForModel(selectedModel); err != nil {
-		return fmt.Errorf("model %s did not appear in ollama list after create: %w", selectedModel, err)
+	if err := i.waitForModel(versionedModel); err != nil {
+		return fmt.Errorf("model %s did not appear in ollama list after create: %w", versionedModel, err)
 	}
 
-	fmt.Fprintf(os.Stderr, "Model %q is ready.\n", selectedModel)
+	// Keep only the current version for this model family.
+	i.removeOllamaModels(models, selectedModel, tag)
+
+	fmt.Fprintf(os.Stderr, "Model %q is ready.\n", versionedModel)
 	return nil
 }
 
@@ -792,12 +807,79 @@ func (i *Installer) waitForModel(model string) error {
 	}
 	return fmt.Errorf("timed out waiting for %q", model)
 }
+
 func (i *Installer) modelExists(model string) (bool, error) {
 	output, err := i.runOutput("ollama", "list")
 	if err != nil {
 		return false, err
 	}
 	return modelExistsInOutput(output, model), nil
+}
+
+// listOllamaModels returns the parsed model names from `ollama list` output.
+func (i *Installer) listOllamaModels() ([]string, error) {
+	output, err := i.runOutput("ollama", "list")
+	if err != nil {
+		return nil, err
+	}
+	return parseOllamaModelList(output), nil
+}
+
+// parseOllamaModelList extracts model names from `ollama list` output.
+func parseOllamaModelList(output string) []string {
+	var names []string
+	for _, line := range strings.Split(output, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		// Skip the header line.
+		if strings.HasPrefix(line, "NAME") {
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) == 0 {
+			continue
+		}
+		names = append(names, fields[0])
+	}
+	return names
+}
+
+// modelFamily returns the model name without its tag.
+func modelFamily(name string) string {
+	if i := strings.LastIndex(name, ":"); i >= 0 {
+		return name[:i]
+	}
+	return name
+}
+
+// removeOllamaModels deletes models returned by `ollama list` whose family
+// matches the given model name and whose tag differs from keepTag. It logs
+// failures but does not abort the install.
+func (i *Installer) removeOllamaModels(models []string, family, keepTag string) {
+	for _, name := range models {
+		if modelFamily(name) != family {
+			continue
+		}
+		if name == family || strings.HasSuffix(name, ":"+keepTag) {
+			continue
+		}
+		slog.Debug("removing stale ollama model", "model", name)
+		if err := i.Runner.Run("ollama", "rm", name); err != nil {
+			slog.Warn("failed to remove stale model", "model", name, "error", err)
+		}
+	}
+}
+
+// runOutput runs a command quietly and returns its stdout as a string.
+func (i *Installer) runOutput(name string, arg ...string) (string, error) {
+	if r, ok := i.QuietRunner.(outputRunner); ok {
+		return r.RunOutput(name, arg...)
+	}
+	cmd := exec.Command(name, arg...)
+	out, err := cmd.Output()
+	return string(out), err
 }
 
 func modelExistsInOutput(output, model string) bool {
@@ -816,16 +898,6 @@ func lineHasModel(line, model string) bool {
 	}
 	name := fields[0]
 	return name == model || strings.HasPrefix(name, model+":")
-}
-
-// runOutput runs a command quietly and returns its stdout as a string.
-func (i *Installer) runOutput(name string, arg ...string) (string, error) {
-	if r, ok := i.QuietRunner.(outputRunner); ok {
-		return r.RunOutput(name, arg...)
-	}
-	cmd := exec.Command(name, arg...)
-	out, err := cmd.Output()
-	return string(out), err
 }
 
 func (i *Installer) hashEmbeddedModelfiles() (map[string]string, error) {
