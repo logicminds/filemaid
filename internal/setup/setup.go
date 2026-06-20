@@ -866,7 +866,12 @@ func (i *Installer) createOllamaModels(configDir string, models []string) error 
 			return fmt.Errorf("model %s did not appear in ollama list after create: %w", versionedModel, err)
 		}
 
-		// Keep only the current version for this model family.
+		// Maintain an untagged alias so config can reference the model without a tag.
+		if err := i.Runner.Run("ollama", "cp", versionedModel, model); err != nil {
+			return fmt.Errorf("create alias %s: %w", model, err)
+		}
+
+		// Keep only the current version and the untagged alias for this model family.
 		i.removeOllamaModels(existingModels, model, tag)
 
 		fmt.Fprintf(os.Stderr, "Model %q is ready.\n", versionedModel)
@@ -967,13 +972,15 @@ func modelFamily(name string) string {
 }
 
 // removeOllamaModels deletes models returned by `ollama list` whose family
-// matches the given model name and whose tag differs from keepTag. It logs
+// matches the given model name and whose tag differs from keepTag. It keeps
+// the untagged alias (name == family) and the current hash tag. It logs
 // failures but does not abort the install.
 func (i *Installer) removeOllamaModels(models []string, family, keepTag string) {
 	for _, name := range models {
 		if modelFamily(name) != family {
 			continue
 		}
+		// Keep the untagged alias and the current hash tag.
 		if name == family || strings.HasSuffix(name, ":"+keepTag) {
 			continue
 		}
