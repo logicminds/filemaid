@@ -30,6 +30,9 @@ func TestDefaultsMatchPythonReference(t *testing.T) {
 	if cfg.Tags != true {
 		t.Errorf("Tags = %v, want true", cfg.Tags)
 	}
+	if cfg.Comments != true {
+		t.Errorf("Comments = %v, want true", cfg.Comments)
+	}
 	if cfg.SubcategorizeImages != true {
 		t.Errorf("SubcategorizeImages = %v, want true", cfg.SubcategorizeImages)
 	}

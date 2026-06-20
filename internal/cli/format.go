@@ -1,8 +1,27 @@
 package cli
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 )
+
+// collapseHome replaces the user's home directory prefix with "~" for display.
+// It returns the original path unchanged if the prefix does not match or home
+// cannot be determined. The result uses "/" separators so it matches the
+// conventional "~/..." notation regardless of OS.
+func collapseHome(p string) string {
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return p
+	}
+	home = filepath.Clean(home)
+	rel, err := filepath.Rel(home, p)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, "..") {
+		return p
+	}
+	return filepath.ToSlash(filepath.Join("~", rel))
+}
 
 // renderTable renders an ASCII table from headers and rows.
 func renderTable(headers []string, rows [][]string) string {

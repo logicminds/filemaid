@@ -274,6 +274,7 @@ func testConfig(tmpDir string) *config.Config {
 		AllowedDirs:        []string{desktop, downloads, images, documents, reviewDir},
 		ReviewDir:          reviewDir,
 		Tags:               false,
+		Comments:           false,
 		SafeDeletePatterns: []string{},
 		Categories: map[string]string{
 			"Images":    images,
@@ -537,15 +538,23 @@ func TestProcessCommandSucceedsWhenValidationPasses(t *testing.T) {
 }
 
 func TestFormatProcessTable(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
 	results := []processResult{
 		{Path: "/tmp/note.txt", Category: "Documents", Tags: []string{"txt"}, Action: "move", Result: "/archive/note.txt", OK: true},
+		{Path: filepath.Join(home, "Downloads", "receipt.pdf"), Category: "Receipts", Tags: []string{"pdf"}, Action: "move", Result: filepath.Join(home, "Documents", "Archive", "Receipts", "receipt.pdf"), OK: true},
 		{Path: "/tmp/unknown", Category: "Unknown", Tags: []string{}, Action: "review", Result: "/review/unknown", OK: true},
 		{Path: "/tmp/bad", Category: "Documents", Tags: []string{}, Action: "move", Result: "", OK: false, Error: "move failed"},
 	}
 	out := formatProcessTable(results)
-	for _, want := range []string{"File", "Category", "Tags", "Action", "Result", "Status", "Documents", "txt", "✅", "❌"} {
+	for _, want := range []string{"File", "Category", "Tags", "Action", "Result", "Status", "Documents", "txt", "Receipts", "pdf", "✅", "❌"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("table output missing %q:\n%s", want, out)
+		}
+	}
+	for _, want := range []string{"~/Downloads/receipt.pdf", "~/Documents/Archive/Receipts/receipt.pdf"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("table output should collapse home to %q:\n%s", want, out)
 		}
 	}
 }

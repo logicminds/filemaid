@@ -174,6 +174,9 @@ func Apply(decision llm.Decision, src string, fileHash string, cfg *config.Confi
 	if cfg.Tags {
 		fs.SetTags(dest, tags)
 	}
+	if cfg.Comments {
+		fs.SetFinderComment(dest, decision.Reason)
+	}
 
 	if err := db.Record(src, dest, fileHash, decision.Category, tags, decision.Action, decision.Reason); err != nil {
 		return "", fmt.Errorf("record history: %w", err)

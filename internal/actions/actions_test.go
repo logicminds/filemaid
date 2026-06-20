@@ -33,6 +33,7 @@ func testConfig(t *testing.T, tmp string) *config.Config {
 			"Unknown":   reviewDir,
 		},
 		Tags:               false,
+		Comments:           false,
 		SafeDeletePatterns: []string{"~/Downloads/*.tmp"},
 	}
 }
@@ -483,6 +484,81 @@ func TestApplyDoesNotDuplicateSubcategoryTag(t *testing.T) {
 	}
 }
 
+func TestApplySetsFinderComment(t *testing.T) {
+	tmp := t.TempDir()
+	cfg := testConfig(t, tmp)
+	cfg.Comments = true
+	db := state.NewFake()
+	fs := NewRecordingFS()
+
+	src := filepath.Join(tmp, "Desktop", "note.txt")
+	if err := os.MkdirAll(filepath.Dir(src), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(src, []byte("hello"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	decision := llm.Decision{Category: "Documents", Tags: []string{"txt"}, Action: "move", Reason: "simple text file"}
+	if _, err := Apply(decision, src, mustHash(t, src), cfg, db, false, fs); err != nil {
+		t.Fatal(err)
+	}
+	if len(fs.Comments) != 1 {
+		t.Fatalf("commented %d times, want 1", len(fs.Comments))
+	}
+	if fs.Comments[0].Comment != "simple text file" {
+		t.Errorf("comment = %q, want %q", fs.Comments[0].Comment, "simple text file")
+	}
+}
+
+func TestApplySkipsCommentWhenDisabled(t *testing.T) {
+	tmp := t.TempDir()
+	cfg := testConfig(t, tmp)
+	cfg.Comments = false
+	db := state.NewFake()
+	fs := NewRecordingFS()
+
+	src := filepath.Join(tmp, "Desktop", "note.txt")
+	if err := os.MkdirAll(filepath.Dir(src), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(src, []byte("hello"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	decision := llm.Decision{Category: "Documents", Action: "move", Reason: "simple text file"}
+	if _, err := Apply(decision, src, mustHash(t, src), cfg, db, false, fs); err != nil {
+		t.Fatal(err)
+	}
+	if len(fs.Comments) != 0 {
+		t.Errorf("commented %d times, want 0", len(fs.Comments))
+	}
+}
+
+func TestApplySkipsEmptyComment(t *testing.T) {
+	tmp := t.TempDir()
+	cfg := testConfig(t, tmp)
+	cfg.Comments = true
+	db := state.NewFake()
+	fs := NewRecordingFS()
+
+	src := filepath.Join(tmp, "Desktop", "note.txt")
+	if err := os.MkdirAll(filepath.Dir(src), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(src, []byte("hello"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	decision := llm.Decision{Category: "Documents", Action: "move", Reason: ""}
+	if _, err := Apply(decision, src, mustHash(t, src), cfg, db, false, fs); err != nil {
+		t.Fatal(err)
+	}
+	if len(fs.Comments) != 0 {
+		t.Errorf("commented %d times, want 0 for empty reason", len(fs.Comments))
+	}
+}
+
 func TestApplyTrashFailureForcesReview(t *testing.T) {
 	tmp := t.TempDir()
 	home := filepath.Join(tmp, "home")
@@ -771,6 +847,31 @@ func TestOSFSTrash(t *testing.T) {
 	}
 	// Best-effort; on macOS Finder may or may not cooperate in tests.
 	_ = fs.Trash(path)
+}
+
+func TestOSFSSetFinderComment(t *testing.T) {
+	tmp := t.TempDir()
+	fs := NewOSFS()
+	path := filepath.Join(tmp, "commented.txt")
+	if err := os.WriteFile(path, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// Should not panic; actual Finder comments require macOS metadata.
+	fs.SetFinderComment(path, "classified as document")
+}
+
+func TestEncodeStringPlist(t *testing.T) {
+	plist := encodeStringPlist("hello world")
+	if string(plist[:8]) != "bplist00" {
+		t.Errorf("bad header: %q", plist[:8])
+	}
+}
+
+func TestEncodeStringPlistLarge(t *testing.T) {
+	plist := encodeStringPlist("this is a very long comment that exceeds fifteen bytes")
+	if string(plist[:8]) != "bplist00" {
+		t.Errorf("bad header: %q", plist[:8])
+	}
 }
 
 func TestEncodeStringArrayPlistLarge(t *testing.T) {

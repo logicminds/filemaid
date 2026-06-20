@@ -13,7 +13,7 @@ A local, AI-powered file organizer for macOS. It watches your `Desktop` and `Dow
 ## Features
 
 - **Automatic classification** — files are classified by a local LLM using filename, extension, content snippets, and image analysis.
-- **Move + tag** — files are moved into `~/Documents/Archive/<category>/` and tagged with Finder tags.
+- **Move + tag + comment** — files are moved into `~/Documents/Archive/<category>/`, tagged with Finder tags, and the classification reason is stored in the Finder comment.
 - **Review-before-delete** — anything uncertain goes to `~/.filemaid/review/`; deletions only happen for explicitly safe patterns or duplicates.
 - **Dev cache cleanup** — scheduled cleanup for Docker, npm, cargo, pip, Homebrew, and Xcode.
 - **Two triggers** — instant Shortcuts folder automations or periodic launchd agents.
@@ -148,6 +148,8 @@ When a file is processed, filemaid sends its name, extension, size, modification
 
 For photos, the subcategory describes the main subject or scene (for example `cat`, `dog`, `baby`, `wedding`, or `car`). For screenshots, it describes the app or context (for example `Safari`, `Terminal`, `Slack`, `browser`, or `lock-screen`). The subcategory is added as a Finder tag when `tags` is enabled.
 
+The LLM's reason for the classification is written to the file's Finder comment when `comments` is enabled, so you can see why a file was organized the way it was from the Finder Get Info panel.
+
 Set `subcategorize_images` to `false` to disable the extra image detail and only receive the top-level category.
 
 - If the model returns a known category, the file is moved to the matching folder under `categories`.
@@ -186,9 +188,8 @@ The generated configuration is written to `~/.config/filemaid/config.json` and c
   "allowed_dirs": ["~/Desktop", "~/Downloads", "~/Documents/Archive", "~/.filemaid/review"],
   "allowed_cleaners": ["docker", "npm", "cargo", "pip", "brew", "xcode", "review"],
   "review_dir": "~/.filemaid/review",
-  "log_path": "~/.local/share/filemaid/filemaid.log",
-  "db_path": "~/.local/share/filemaid/filemaid.db",
   "tags": true,
+  "comments": true,
   "subcategorize_images": true,
   "min_age_hours": 0,
   "categories": {
@@ -235,6 +236,7 @@ The generated configuration is written to `~/.config/filemaid/config.json` and c
 | `log_path` | Path to the main application log. |
 | `db_path` | Path to the SQLite history database. |
 | `tags` | Whether to apply Finder tags to organized files. |
+| `comments` | Whether to write the classification reason as a Finder comment. |
 | `subcategorize_images` | When `true`, images and screenshots receive a subject/app subcategory that is also added as a Finder tag. |
 | `min_age_hours` | Minimum file age before processing (0 = process immediately). |
 | `categories` | Destination folders for each classification. The model may only return categories defined here. |

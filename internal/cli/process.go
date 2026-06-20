@@ -165,7 +165,7 @@ func formatProcessTable(results []processResult) string {
 			status = "✅"
 		}
 		tags := strings.Join(r.Tags, ", ")
-		rows = append(rows, []string{r.Path, r.Category, tags, r.Action, r.Result, status})
+		rows = append(rows, []string{collapseHome(r.Path), r.Category, tags, r.Action, collapseHome(r.Result), status})
 	}
 	return renderTable(headers, rows)
 }
@@ -257,7 +257,7 @@ func processPaths(paths []string) ([]processResult, error) {
 
 				decision := item.ageDecision
 				if !item.ageMatched {
-					fmt.Fprintf(os.Stderr, "Classifying %s...\n", item.src)
+					fmt.Fprintf(os.Stderr, "Classifying %s...\n", collapseHome(item.src))
 					var err error
 					decision, err = classifier.Classify(item.src, item.fileHash, cfg)
 					if err != nil {

@@ -20,6 +20,7 @@ type Config struct {
 	LogPath             string                   `json:"log_path"`
 	DBPath              string                   `json:"db_path"`
 	Tags                bool                     `json:"tags"`
+	Comments            bool                     `json:"comments"`
 	SubcategorizeImages bool                     `json:"subcategorize_images"`
 	MinAgeHours         int                      `json:"min_age_hours"`
 	Categories          map[string]string        `json:"categories"`
@@ -62,6 +63,7 @@ func Defaults() *Config {
 		LogPath:             "~/.local/share/filemaid/filemaid.log",
 		DBPath:              "~/.local/share/filemaid/filemaid.db",
 		Tags:                true,
+		Comments:            true,
 		SubcategorizeImages: true,
 		MinAgeHours:         0,
 		Categories: map[string]string{

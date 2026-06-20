@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sync"
+	"unicode/utf16"
 )
 
 // FS abstracts filesystem and subprocess operations so tests can inject
@@ -19,6 +20,7 @@ type FS interface {
 	MkdirAll(path string) error
 	Exists(path string) bool
 	SetTags(path string, tags []string)
+	SetFinderComment(path string, comment string)
 	Trash(path string) error
 }
 
@@ -87,6 +89,19 @@ func (o *OSFS) SetTags(path string, tags []string) {
 	_ = run("mdimport", path)
 }
 
+// SetFinderComment writes the LLM reason as a Finder comment via xattr and
+// re-indexes with mdimport. Errors are intentionally ignored, matching the
+// tag-writing behaviour.
+func (o *OSFS) SetFinderComment(path string, comment string) {
+	if comment == "" {
+		return
+	}
+	plist := encodeStringPlist(comment)
+	hex := fmt.Sprintf("%x", plist)
+	_ = run("xattr", "-w", "-x", "com.apple.metadata:kMDItemFinderComment", hex, path)
+	_ = run("mdimport", path)
+}
+
 // Trash sends path to the Finder trash via osascript. Errors are ignored to
 // match the Python implementation.
 func (o *OSFS) Trash(path string) error {
@@ -150,6 +165,41 @@ func encodeStringArrayPlist(items []string) []byte {
 	return buf.Bytes()
 }
 
+// encodeStringPlist emits a minimal binary plist containing a single string.
+// The string is encoded as UTF-16BE, which is the standard representation for
+// bplist strings and is what macOS expects for Finder comments stored in
+func encodeStringPlist(s string) []byte {
+	buf := bytes.NewBufferString("bplist00")
+	// Encode as UTF-16BE to match the bplist string format used by macOS.
+	utf16CodeUnits := utf16.Encode([]rune(s))
+	data := make([]byte, 0, len(utf16CodeUnits)*2)
+	for _, r := range utf16CodeUnits {
+		data = append(data, byte(r>>8), byte(r))
+	}
+	offset := buf.Len()
+	if len(utf16CodeUnits) < 15 {
+		buf.WriteByte(0x60 | byte(len(utf16CodeUnits)))
+	} else {
+		buf.WriteByte(0x6F)
+		writeInt(buf, int64(len(utf16CodeUnits)))
+	}
+	buf.Write(data)
+
+	offsetTableOffset := buf.Len()
+	buf.WriteByte(byte(offset))
+
+	// Trailer: 5 unused bytes, sort version, offset int size, object ref size,
+	// number of objects, top object index, offset table offset.
+	buf.Write(make([]byte, 5))
+	buf.WriteByte(0)    // sort version
+	buf.WriteByte(1)    // offset int size
+	buf.WriteByte(1)    // object ref size
+	writeUint64(buf, 1) // number of objects
+	writeUint64(buf, 0) // top object index
+	writeUint64(buf, uint64(offsetTableOffset))
+	return buf.Bytes()
+}
+
 func writeInt(buf *bytes.Buffer, n int64) {
 	switch {
 	case n >= 0 && n <= 0xFF:
@@ -180,6 +230,7 @@ type RecordingFS struct {
 	Mkdirs      []string
 	ExistsCalls []string
 	Tags        []TagRecord
+	Comments    []CommentRecord
 	Trashed     []string
 }
 
@@ -187,6 +238,12 @@ type RecordingFS struct {
 type TagRecord struct {
 	Path string
 	Tags []string
+}
+
+// CommentRecord captures a SetFinderComment call.
+type CommentRecord struct {
+	Path    string
+	Comment string
 }
 
 // NewRecordingFS returns an empty RecordingFS.
@@ -225,6 +282,16 @@ func (r *RecordingFS) SetTags(path string, tags []string) {
 	cp := make([]string, len(tags))
 	copy(cp, tags)
 	r.Tags = append(r.Tags, TagRecord{Path: path, Tags: cp})
+	r.mu.Unlock()
+}
+
+// SetFinderComment records the comment operation without shelling out.
+func (r *RecordingFS) SetFinderComment(path string, comment string) {
+	if comment == "" {
+		return
+	}
+	r.mu.Lock()
+	r.Comments = append(r.Comments, CommentRecord{Path: path, Comment: comment})
 	r.mu.Unlock()
 }
 
