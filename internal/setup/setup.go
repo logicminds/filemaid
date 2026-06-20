@@ -107,8 +107,8 @@ func totalMemoryGB() (int, error) {
 // already present in Ollama.
 var modelSpaceRequirements = map[string]uint64{
 	"filemaid-gemma4-26b": 16 * 1024 * 1024 * 1024,
-	"filemaid-gemma4-12b": 7 * 1024 * 1024 * 1024,
-	"filemaid-metadata":   1 * 1024 * 1024 * 1024,
+	"filemaid-gemma4-12b": 8 * 1024 * 1024 * 1024,
+	"filemaid-metadata":   5 * 1024 * 1024 * 1024,
 }
 
 // modelBaseNames maps filemaid wrapper model names to the underlying Ollama
