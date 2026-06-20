@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bytes"
+	"context"
 	"io"
 	"os"
 	"path/filepath"
@@ -75,7 +76,7 @@ func TestSmokeProcess(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, err := processPaths([]string{src}); err != nil {
+	if _, err := processPaths(context.Background(), []string{src}); err != nil {
 		t.Fatalf("processPaths failed: %v", err)
 	}
 
@@ -198,7 +199,7 @@ func TestSmokeScanRespectsMinAge(t *testing.T) {
 		return []string{src}, nil
 	}
 
-	if _, err := runScanDir(filepath.Join(tmp, "Desktop")); err != nil {
+	if _, err := runScanDir(context.Background(), filepath.Join(tmp, "Desktop")); err != nil {
 		t.Fatal(err)
 	}
 	if len(db.(*state.FakeRepo).Records()) != 0 {
@@ -379,7 +380,7 @@ func TestSmokeEndToEnd(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, err := processPaths([]string{src}); err != nil {
+	if _, err := processPaths(context.Background(), []string{src}); err != nil {
 		t.Fatalf("process failed: %v", err)
 	}
 
@@ -389,7 +390,7 @@ func TestSmokeEndToEnd(t *testing.T) {
 	scanGetFiles = func(dir string) ([]string, error) {
 		return []string{}, nil
 	}
-	if _, err := runScanDir(filepath.Join(tmp, "Desktop")); err != nil {
+	if _, err := runScanDir(context.Background(), filepath.Join(tmp, "Desktop")); err != nil {
 		t.Fatalf("scan failed: %v", err)
 	}
 

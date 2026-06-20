@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 // Config holds the filemaid configuration.
@@ -23,6 +24,7 @@ type Config struct {
 	Comments            bool                     `json:"comments"`
 	SubcategorizeImages bool                     `json:"subcategorize_images"`
 	MinAgeHours         int                      `json:"min_age_hours"`
+	RequestTimeout      time.Duration            `json:"request_timeout"`
 	Categories          map[string]string        `json:"categories"`
 	SafeDeletePatterns  []string                 `json:"safe_delete_patterns"`
 	AgeRules            []AgeRule                `json:"age_rules"`
@@ -66,6 +68,7 @@ func Defaults() *Config {
 		Comments:            true,
 		SubcategorizeImages: true,
 		MinAgeHours:         0,
+		RequestTimeout:      120 * time.Second,
 		Categories: map[string]string{
 			"Screenshots": "~/Documents/Archive/Screenshots",
 			"Documents":   "~/Documents/Archive/Documents",

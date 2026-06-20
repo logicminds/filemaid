@@ -47,7 +47,7 @@ func NewDecision() Decision {
 // Classifier turns a file path into a classification Decision.
 type Classifier interface {
 	// Classify classifies a single file and returns a Decision.
-	Classify(path string, fileHash string, cfg *config.Config) (Decision, error)
+	Classify(ctx context.Context, path string, fileHash string, cfg *config.Config) (Decision, error)
 	// Validate checks that the configured Ollama model is reachable and can
 	// generate a response. Commands that depend on classification should call
 	// Validate before touching any files.
@@ -73,18 +73,26 @@ type Client struct {
 	cache     DecisionCache
 
 	mu      sync.Mutex
-	checked struct {
-		url      string
-		model    string
-		resolved string
-		err      error
-	}
+	checked map[modelKey]checkResult
+}
+
+type modelKey struct {
+	url   string
+	model string
+}
+
+type checkResult struct {
+	resolved string
+	err      error
 }
 
 // NewClient creates a classifier. If transport is nil, the default HTTP
 // transport is used.
 func NewClient(transport HTTPTransport) *Client {
-	return &Client{transport: transport}
+	return &Client{
+		transport: transport,
+		checked:   make(map[modelKey]checkResult),
+	}
 }
 
 // SetDecisionCache attaches a decision cache to the client. When set, Classify
@@ -95,14 +103,14 @@ func (c *Client) SetDecisionCache(cache DecisionCache) {
 }
 
 // Classify classifies a single file using Ollama.
-func (c *Client) Classify(path string, fileHash string, cfg *config.Config) (Decision, error) {
+func (c *Client) Classify(ctx context.Context, path string, fileHash string, cfg *config.Config) (Decision, error) {
 	if fileHash != "" && c.cache != nil {
 		if d, ok, err := c.cache.FindDecisionByHash(fileHash); err == nil && ok {
 			return d, nil
 		}
 	}
 
-	resolvedModel, err := c.checkModel(cfg.OllamaURL, cfg.Model)
+	resolvedModel, err := c.checkModel(ctx, cfg.OllamaURL, cfg.Model)
 	if err != nil {
 		return Decision{}, err
 	}
@@ -119,14 +127,14 @@ func (c *Client) Classify(path string, fileHash string, cfg *config.Config) (Dec
 	model := resolvedModel
 
 	tryChat := func(imgs []string) (Decision, error) {
-		data, err := c.requestChat(ollamaURL, model, prompt, imgs, categories)
+		resp, err := c.requestChat(ctx, ollamaURL, model, prompt, imgs, categories, cfg.RequestTimeout)
 		if err != nil {
 			return Decision{}, err
 		}
-		if errMsg, ok := data["error"].(string); ok && errMsg != "" {
-			return Decision{}, errors.New(errMsg)
+		if resp.Error != "" {
+			return Decision{}, errors.New(resp.Error)
 		}
-		if decision, ok := parseResponse(data, categories); ok {
+		if decision, ok := parseResponse(resp, categories); ok {
 			return decision, nil
 		}
 		return Decision{}, errors.New("could not parse model response")
@@ -175,22 +183,18 @@ func isImageRelatedError(err error) bool {
 // warn the user and exit instead of retrying unknown models and crashing.
 // Results are cached per (url, model) on the Client so repeated checks do not
 // contact Ollama again.
-func (c *Client) checkModel(ollamaURL, model string) (string, error) {
+func (c *Client) checkModel(ctx context.Context, ollamaURL, model string) (string, error) {
 	c.mu.Lock()
-	if c.checked.url == ollamaURL && c.checked.model == model {
-		resolved, err := c.checked.resolved, c.checked.err
-		c.mu.Unlock()
-		return resolved, err
-	}
+	res, ok := c.checked[modelKey{url: ollamaURL, model: model}]
 	c.mu.Unlock()
+	if ok {
+		return res.resolved, res.err
+	}
 
-	resolved, err := c.fetchCheckModel(ollamaURL, model)
+	resolved, err := c.fetchCheckModel(ctx, ollamaURL, model)
 
 	c.mu.Lock()
-	c.checked.url = ollamaURL
-	c.checked.model = model
-	c.checked.resolved = resolved
-	c.checked.err = err
+	c.checked[modelKey{url: ollamaURL, model: model}] = checkResult{resolved: resolved, err: err}
 	c.mu.Unlock()
 	return resolved, err
 }
@@ -198,14 +202,14 @@ func (c *Client) checkModel(ollamaURL, model string) (string, error) {
 // fetchCheckModel performs the actual Ollama /api/tags request and returns
 // the exact model name to use, which may include a tag when the configured
 // model name lacks one.
-func (c *Client) fetchCheckModel(ollamaURL, model string) (string, error) {
+func (c *Client) fetchCheckModel(ctx context.Context, ollamaURL, model string) (string, error) {
 	url := strings.TrimRight(ollamaURL, "/") + "/api/tags"
 	transport := c.transport
 	if transport == nil {
 		transport = http.DefaultTransport
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
@@ -273,7 +277,7 @@ func modelMatch(want, have string) bool {
 func (c *Client) Validate(cfg *config.Config) error {
 	ollamaURL := strings.TrimRight(cfg.OllamaURL, "/")
 
-	resolvedModel, err := c.checkModel(ollamaURL, cfg.Model)
+	resolvedModel, err := c.checkModel(context.Background(), ollamaURL, cfg.Model)
 	if err != nil {
 		return err
 	}
@@ -282,11 +286,15 @@ func (c *Client) Validate(cfg *config.Config) error {
 		if model == "" {
 			continue
 		}
-		if _, err := c.checkModel(ollamaURL, model); err != nil {
+		if _, err := c.checkModel(context.Background(), ollamaURL, model); err != nil {
 			return err
 		}
 	}
 
+	timeout := cfg.RequestTimeout
+	if timeout <= 0 {
+		timeout = 60 * time.Second
+	}
 	body := map[string]any{
 		"model":  resolvedModel,
 		"prompt": "Reply with the single word OK.",
@@ -298,12 +306,15 @@ func (c *Client) Validate(cfg *config.Config) error {
 		},
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
-	_, err = c.postJSON(ctx, ollamaURL+"/api/generate", body, 60*time.Second)
-	if err != nil {
+	var resp generateResponse
+	if err := c.postJSON(ctx, ollamaURL+"/api/generate", body, timeout, &resp); err != nil {
 		return fmt.Errorf("model %q validation failed: %w", cfg.Model, err)
+	}
+	if resp.Error != "" {
+		return fmt.Errorf("model %q validation failed: %s", cfg.Model, resp.Error)
 	}
 	return nil
 }
@@ -357,13 +368,9 @@ var textExts = map[string]bool{
 	".sql":   true,
 }
 
-const promptTemplate = `You are a macOS file classifier. Pick exactly one category from: %s. Suggest 1-3 concise Finder tags. Decide the action.
-
-Actions:
-- move: the file clearly belongs to a category.
-- delete: only obvious trash, installers, or duplicates.
-- review: ambiguous, sensitive, or cannot classify.
+const promptTemplate = `Classify this file into exactly one category from: %s.
 %s
+
 File:
 - path: %s
 - name: %s
@@ -375,8 +382,8 @@ File:
 Return a single compact JSON object and nothing else. Leave destination empty.
 {"category": "...", "subcategory": "...", "tags": ["..."], "action": "...", "destination": "", "reason": "..."}`
 
-const subcategoryInstructions = `
-For image files, also provide a concise subcategory describing the main subject or scene (e.g., cat, dog, baby, kid, woman, wedding, car, nature, food, selfie, document-photo). For screenshots, describe the app or context (e.g., Safari, Terminal, Slack, VS Code, browser, lock-screen, menu-bar). The subcategory will be added as a Finder tag.`
+const subcategoryInstructions = `For image files, also provide a concise subcategory describing the main subject or scene (e.g., cat, dog, baby, kid, woman, wedding, car, nature, food, selfie, document-photo). For screenshots, describe the app or context (e.g., Safari, Terminal, Slack, VS Code, browser, lock-screen, menu-bar). The subcategory will be added as a Finder tag.`
+
 const maxImageDimension = 1024
 
 // encodeImageToJPEG re-encodes img as a JPEG with the given quality.
@@ -583,7 +590,8 @@ func categorySet(categories map[string]string) map[string]bool {
 	return set
 }
 
-func (c *Client) requestGenerate(ollamaURL, model, prompt string, images []string) (map[string]any, error) {
+func (c *Client) requestGenerate(ctx context.Context, ollamaURL, model, prompt string, images []string, timeout time.Duration) (generateResponse, error) {
+	var resp generateResponse
 	body := map[string]any{
 		"model":      model,
 		"prompt":     prompt,
@@ -597,10 +605,21 @@ func (c *Client) requestGenerate(ollamaURL, model, prompt string, images []strin
 			"num_ctx":     4096,
 		},
 	}
-	return c.postJSON(context.Background(), ollamaURL+"/api/generate", body, 120*time.Second)
+	if timeout <= 0 {
+		timeout = 120 * time.Second
+	}
+	if err := c.postJSON(ctx, ollamaURL+"/api/generate", body, timeout, &resp); err != nil {
+		return generateResponse{}, err
+	}
+	return resp, nil
 }
 
-func (c *Client) requestChat(ollamaURL, model, prompt string, images []string, categories map[string]bool) (map[string]any, error) {
+func (c *Client) requestChat(ctx context.Context, ollamaURL, model, prompt string, images []string, categories map[string]bool, timeout time.Duration) (chatResponse, error) {
+	var resp chatResponse
+	// requestChat intentionally sends only a user message. The model's
+	// Modelfile supplies the full classifier SYSTEM prompt, and a request-level
+	// system message would override it. The user message carries dynamic data:
+	// the configured category list, per-file metadata, and optional snippet/image.
 	catList := make([]string, 0, len(categories))
 	for k := range categories {
 		catList = append(catList, k)
@@ -625,7 +644,13 @@ func (c *Client) requestChat(ollamaURL, model, prompt string, images []string, c
 			"num_ctx":     4096,
 		},
 	}
-	return c.postJSON(context.Background(), ollamaURL+"/api/chat", body, 120*time.Second)
+	if timeout <= 0 {
+		timeout = 120 * time.Second
+	}
+	if err := c.postJSON(ctx, ollamaURL+"/api/chat", body, timeout, &resp); err != nil {
+		return chatResponse{}, err
+	}
+	return resp, nil
 }
 
 func toolSchema(categories []string) map[string]any {
@@ -661,10 +686,10 @@ func toolSchema(categories []string) map[string]any {
 	}
 }
 
-func (c *Client) postJSON(ctx context.Context, url string, body any, timeout time.Duration) (map[string]any, error) {
+func (c *Client) postJSON(ctx context.Context, url string, body any, timeout time.Duration, out any) error {
 	data, err := json.Marshal(body)
 	if err != nil {
-		return nil, err
+		return err
 	}
 
 	ctx, cancel := context.WithTimeout(ctx, timeout)
@@ -672,7 +697,7 @@ func (c *Client) postJSON(ctx context.Context, url string, body any, timeout tim
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(data))
 	if err != nil {
-		return nil, err
+		return err
 	}
 	req.Header.Set("Content-Type", "application/json")
 
@@ -683,90 +708,111 @@ func (c *Client) postJSON(ctx context.Context, url string, body any, timeout tim
 
 	resp, err := transport.RoundTrip(req)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	defer resp.Body.Close()
 
 	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	if resp.StatusCode >= http.StatusBadRequest {
-		return nil, fmt.Errorf("ollama returned %d: %s", resp.StatusCode, string(respBody))
+		return fmt.Errorf("ollama returned %d: %s", resp.StatusCode, string(respBody))
 	}
 
-	var result map[string]any
-	if err := json.Unmarshal(respBody, &result); err != nil {
-		return nil, err
+	if err := json.Unmarshal(respBody, out); err != nil {
+		return err
 	}
-	return result, nil
+	return nil
 }
 
-func parseResponse(data map[string]any, categories map[string]bool) (Decision, bool) {
-	if msgRaw, ok := data["message"]; ok {
-		if msg, ok := msgRaw.(map[string]any); ok {
-			if tcRaw, ok := msg["tool_calls"]; ok {
-				if tcList, ok := tcRaw.([]any); ok && len(tcList) > 0 {
-					if tc, ok := tcList[0].(map[string]any); ok {
-						if fnRaw, ok := tc["function"]; ok {
-							if fn, ok := fnRaw.(map[string]any); ok {
-								if argsRaw, ok := fn["arguments"]; ok {
-									args, ok := argsRaw.(map[string]any)
-									if !ok {
-										if s, ok := argsRaw.(string); ok {
-											var parsed map[string]any
-											if err := json.Unmarshal([]byte(s), &parsed); err == nil {
-												args = parsed
-											}
-										}
-									}
-									if args != nil {
-										return buildDecision(args, categories, ""), true
-									}
-								}
-							}
-						}
-					}
-				}
-			}
+// chatMessage is a single message in an Ollama /api/chat response.
+type chatMessage struct {
+	Role      string     `json:"role"`
+	Content   string     `json:"content"`
+	ToolCalls []toolCall `json:"tool_calls"`
+	Thinking  string     `json:"thinking"`
+}
 
-			// Some models return raw JSON in the assistant message content
-			// instead of using tool_calls. Try to extract JSON from there as a
-			// fallback before falling back to the legacy /api/generate response.
-			if contentRaw, ok := msg["content"]; ok {
-				if content, ok := contentRaw.(string); ok && strings.TrimSpace(content) != "" {
-					if parsed, ok := extractJSON(content); ok {
-						dest, _ := stringField(parsed, "destination")
-						return buildDecision(parsed, categories, dest), true
-					}
-				}
-			}
+// chatResponse is the response body from Ollama's /api/chat endpoint.
+type chatResponse struct {
+	Error    string      `json:"error"`
+	Response string      `json:"response"`
+	Message  chatMessage `json:"message"`
+}
 
-			// Models with a visible reasoning/thinking field may embed the final
-			// JSON decision inside that field. Use it as a last resort for chat
-			// responses before giving up on the chat endpoint.
-			if thinkingRaw, ok := msg["thinking"]; ok {
-				if thinking, ok := thinkingRaw.(string); ok && strings.TrimSpace(thinking) != "" {
-					if parsed, ok := extractJSON(thinking); ok {
-						dest, _ := stringField(parsed, "destination")
-						return buildDecision(parsed, categories, dest), true
-					}
-				}
-			}
+func parseResponse(resp chatResponse, categories map[string]bool) (Decision, bool) {
+	msg := resp.Message
+	for _, tc := range msg.ToolCalls {
+		args, ok := parseArguments(tc.Function.Arguments)
+		if ok {
+			return buildDecision(args, categories, ""), true
+		}
+	}
+
+	// Some models return raw JSON in the assistant message content
+	// instead of using tool_calls. Try to extract JSON from there as a
+	// fallback before falling back to the legacy /api/generate response.
+	if content := strings.TrimSpace(msg.Content); content != "" {
+		if parsed, ok := extractJSON(content); ok {
+			dest, _ := stringField(parsed, "destination")
+			return buildDecision(parsed, categories, dest), true
+		}
+	}
+
+	// Models with a visible reasoning/thinking field may embed the final
+	// JSON decision inside that field. Use it as a last resort for chat
+	// responses before giving up on the chat endpoint.
+	if thinking := strings.TrimSpace(msg.Thinking); thinking != "" {
+		if parsed, ok := extractJSON(thinking); ok {
+			dest, _ := stringField(parsed, "destination")
+			return buildDecision(parsed, categories, dest), true
 		}
 	}
 
 	// Legacy /api/generate response path.
-	if respRaw, ok := data["response"]; ok {
-		if resp, ok := respRaw.(string); ok {
-			if parsed, ok := extractJSON(resp); ok {
-				dest, _ := stringField(parsed, "destination")
-				return buildDecision(parsed, categories, dest), true
-			}
+	if resp := strings.TrimSpace(resp.Response); resp != "" {
+		if parsed, ok := extractJSON(resp); ok {
+			dest, _ := stringField(parsed, "destination")
+			return buildDecision(parsed, categories, dest), true
 		}
 	}
 
 	return Decision{}, false
+}
+
+// toolCall is a tool invocation returned by a model in /api/chat.
+type toolCall struct {
+	Function functionCall `json:"function"`
+}
+
+// functionCall carries the name and arguments of a tool call.
+type functionCall struct {
+	Name      string          `json:"name"`
+	Arguments json.RawMessage `json:"arguments"`
+}
+
+// generateResponse is the response body from Ollama's /api/generate endpoint.
+type generateResponse struct {
+	Error    string `json:"error"`
+	Response string `json:"response"`
+}
+
+// parseArguments handles tool-call arguments that may be a JSON object or a
+// JSON string containing an object.
+func parseArguments(raw json.RawMessage) (map[string]any, bool) {
+	var obj map[string]any
+	if err := json.Unmarshal(raw, &obj); err == nil {
+		return obj, true
+	}
+	var s string
+	if err := json.Unmarshal(raw, &s); err != nil {
+		return nil, false
+	}
+	if err := json.Unmarshal([]byte(s), &obj); err != nil {
+		return nil, false
+	}
+	return obj, true
 }
 
 func extractJSON(raw string) (map[string]any, bool) {

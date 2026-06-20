@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -98,7 +99,7 @@ func TestProcessPathsSkipsNonexistent(t *testing.T) {
 	processFS = actions.NewOSFS()
 
 	buf := captureSlog(t)
-	processPaths([]string{filepath.Join(t.TempDir(), "nope.txt")})
+	processPaths(context.Background(), []string{filepath.Join(t.TempDir(), "nope.txt")})
 
 	if !bytes.Contains(buf.Bytes(), []byte("path does not exist")) {
 		t.Errorf("expected 'path does not exist' warning, got %q", buf.String())
@@ -116,7 +117,7 @@ func TestProcessPathsSkipsHidden(t *testing.T) {
 	os.WriteFile(hidden, []byte("secret"), 0644)
 
 	buf := captureSlog(t)
-	processPaths([]string{hidden})
+	processPaths(context.Background(), []string{hidden})
 
 	if !bytes.Contains(buf.Bytes(), []byte("skipping hidden file")) {
 		t.Errorf("expected 'skipping hidden file' log, got %q", buf.String())
@@ -133,7 +134,7 @@ func TestProcessPathsSkipsOutsideAllowed(t *testing.T) {
 	os.WriteFile(outside, []byte("outside"), 0644)
 
 	buf := captureSlog(t)
-	processPaths([]string{outside})
+	processPaths(context.Background(), []string{outside})
 
 	if !bytes.Contains(buf.Bytes(), []byte("outside allowed dirs")) {
 		t.Errorf("expected 'outside allowed dirs' warning, got %q", buf.String())
@@ -156,7 +157,7 @@ func TestProcessPathsClassifiesAndApplies(t *testing.T) {
 	os.MkdirAll(filepath.Dir(src), 0755)
 	os.WriteFile(src, []byte("hello"), 0644)
 
-	if _, err := processPaths([]string{src}); err != nil {
+	if _, err := processPaths(context.Background(), []string{src}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -189,7 +190,7 @@ func TestProcessPathsDuplicateForcesReview(t *testing.T) {
 	os.WriteFile(src1, []byte("same"), 0644)
 	os.WriteFile(src2, []byte("same"), 0644)
 
-	if _, err := processPaths([]string{src1, src2}); err != nil {
+	if _, err := processPaths(context.Background(), []string{src1, src2}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -225,7 +226,7 @@ type fakeClassifier struct {
 	validated bool
 }
 
-func (f *fakeClassifier) Classify(path string, fileHash string, cfg *config.Config) (llm.Decision, error) {
+func (f *fakeClassifier) Classify(ctx context.Context, path string, fileHash string, cfg *config.Config) (llm.Decision, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.calls = append(f.calls, path)
@@ -308,7 +309,7 @@ func TestProcessPathsFallsBackToReviewOnClassifyError(t *testing.T) {
 	os.MkdirAll(filepath.Dir(src), 0755)
 	os.WriteFile(src, []byte("hello"), 0644)
 
-	if _, err := processPaths([]string{src}); err != nil {
+	if _, err := processPaths(context.Background(), []string{src}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -336,7 +337,7 @@ func TestProcessPathsLogsApplyError(t *testing.T) {
 	os.WriteFile(src, []byte("hello"), 0644)
 
 	buf := captureSlog(t)
-	processPaths([]string{src})
+	processPaths(context.Background(), []string{src})
 
 	if !bytes.Contains(buf.Bytes(), []byte("apply failed")) {
 		t.Errorf("expected 'apply failed' log, got %q", buf.String())
@@ -363,7 +364,7 @@ func TestProcessPathsResultsInInputOrder(t *testing.T) {
 		paths[i] = p
 	}
 
-	results, err := processPaths(paths)
+	results, err := processPaths(context.Background(), paths)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -394,7 +395,7 @@ func newBlockingClassifier() *blockingClassifier {
 	return b
 }
 
-func (b *blockingClassifier) Classify(path string, fileHash string, cfg *config.Config) (llm.Decision, error) {
+func (b *blockingClassifier) Classify(ctx context.Context, path string, fileHash string, cfg *config.Config) (llm.Decision, error) {
 	b.mu.Lock()
 	b.active++
 	if b.active > b.maxActive {
@@ -405,7 +406,7 @@ func (b *blockingClassifier) Classify(path string, fileHash string, cfg *config.
 	}
 	b.active--
 	b.mu.Unlock()
-	return b.fakeClassifier.Classify(path, fileHash, cfg)
+	return b.fakeClassifier.Classify(ctx, path, fileHash, cfg)
 }
 
 func (b *blockingClassifier) release() {
@@ -436,7 +437,7 @@ func TestProcessPathsProcessesConcurrently(t *testing.T) {
 
 	done := make(chan []processResult)
 	go func() {
-		res, err := processPaths(paths)
+		res, err := processPaths(context.Background(), paths)
 		if err != nil {
 			t.Error(err)
 		}
@@ -673,7 +674,7 @@ func TestProcessPathsGroupsByModel(t *testing.T) {
 		os.WriteFile(f, []byte(f), 0644)
 	}
 
-	if _, err := processPaths(files); err != nil {
+	if _, err := processPaths(context.Background(), files); err != nil {
 		t.Fatalf("processPaths failed: %v", err)
 	}
 
@@ -726,7 +727,7 @@ func TestProcessPathsFallsBackToModel(t *testing.T) {
 		os.WriteFile(f, []byte(f), 0644)
 	}
 
-	if _, err := processPaths(files); err != nil {
+	if _, err := processPaths(context.Background(), files); err != nil {
 		t.Fatalf("processPaths failed: %v", err)
 	}
 

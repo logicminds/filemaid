@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"fmt"
 	"log/slog"
 	"os"
@@ -35,13 +36,18 @@ var scanCmd = &cobra.Command{
 			return fmt.Errorf("model validation failed: %w", err)
 		}
 
+		ctx := context.Background()
+		if cmd != nil {
+			ctx = cmd.Context()
+		}
+
 		var allResults []processResult
 		var err error
 		if scanDir != "" {
-			allResults, err = runScanDir(scanDir)
+			allResults, err = runScanDir(ctx, scanDir)
 		} else {
 			for _, d := range cfg.WatchDirs {
-				results, runErr := runScanDir(d)
+				results, runErr := runScanDir(ctx, d)
 				if runErr != nil {
 					return runErr
 				}
@@ -70,7 +76,7 @@ var scanCmd = &cobra.Command{
 
 // runScanDir scans a single directory for files older than min_age_hours and
 // processes them. It mirrors the Python scan_dir behaviour.
-func runScanDir(directory string) ([]processResult, error) {
+func runScanDir(ctx context.Context, directory string) ([]processResult, error) {
 	root, err := filepath.Abs(directory)
 	if err != nil {
 		return nil, fmt.Errorf("resolve scan directory: %w", err)
@@ -115,7 +121,7 @@ func runScanDir(directory string) ([]processResult, error) {
 		return nil, nil
 	}
 
-	return processPaths(toProcess)
+	return processPaths(ctx, toProcess)
 }
 
 // defaultScanGetFiles lists regular files directly inside dir.

@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -114,7 +115,11 @@ var processCmd = &cobra.Command{
 		if c, ok := classifier.(*llm.Client); ok {
 			c.SetDecisionCache(db)
 		}
-		results, err := processPaths(args)
+		ctx := context.Background()
+		if cmd != nil {
+			ctx = cmd.Context()
+		}
+		results, err := processPaths(ctx, args)
 		if err != nil {
 			return err
 		}
@@ -178,7 +183,7 @@ func formatProcessTable(results []processResult) string {
 // Python process_paths behaviour: skip non-existent, non-file, hidden, and
 // out-of-allowed files; honour age rules; detect duplicates; coerce unsafe
 // deletes to review; log the result; and return a displayable result per file.
-func processPaths(paths []string) ([]processResult, error) {
+func processPaths(ctx context.Context, paths []string) ([]processResult, error) {
 	// Preprocess sequentially so skipping, hash/duplicate detection, age-rule
 	// matching and their logs remain deterministic and ordered.
 	items := make([]processItem, 0, len(paths))
@@ -257,9 +262,8 @@ func processPaths(paths []string) ([]processResult, error) {
 
 				decision := item.ageDecision
 				if !item.ageMatched {
-					fmt.Fprintf(os.Stderr, "Classifying %s...\n", collapseHome(item.src))
 					var err error
-					decision, err = classifier.Classify(item.src, item.fileHash, cfg)
+					decision, err = classifier.Classify(ctx, item.src, item.fileHash, cfg)
 					if err != nil {
 						slog.Warn("classification failed", "path", item.src, "error", err)
 						decision = llm.NewDecision()

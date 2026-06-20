@@ -2,6 +2,7 @@ package llm
 
 import (
 	"bytes"
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -18,6 +19,46 @@ import (
 
 	"github.com/logicminds/filemaid/internal/config"
 )
+
+// toChatResponse converts the map[string]any test fixtures used by older tests
+// into the concrete chatResponse type expected by parseResponse.
+func toChatResponse(m map[string]any) chatResponse {
+	var resp chatResponse
+	if respRaw, ok := m["response"].(string); ok {
+		resp.Response = respRaw
+	}
+	if msgRaw, ok := m["message"].(map[string]any); ok {
+		if role, ok := msgRaw["role"].(string); ok {
+			resp.Message.Role = role
+		}
+		if content, ok := msgRaw["content"].(string); ok {
+			resp.Message.Content = content
+		}
+		if thinking, ok := msgRaw["thinking"].(string); ok {
+			resp.Message.Thinking = thinking
+		}
+		if tcRaw, ok := msgRaw["tool_calls"].([]any); ok {
+			for _, tc := range tcRaw {
+				if tcMap, ok := tc.(map[string]any); ok {
+					var call toolCall
+					if fnRaw, ok := tcMap["function"].(map[string]any); ok {
+						if name, ok := fnRaw["name"].(string); ok {
+							call.Function.Name = name
+						}
+						if args, ok := fnRaw["arguments"].(string); ok {
+							call.Function.Arguments = json.RawMessage(args)
+						} else if argsMap, ok := fnRaw["arguments"].(map[string]any); ok {
+							b, _ := json.Marshal(argsMap)
+							call.Function.Arguments = b
+						}
+					}
+					resp.Message.ToolCalls = append(resp.Message.ToolCalls, call)
+				}
+			}
+		}
+	}
+	return resp
+}
 
 func baseConfig(t *testing.T, tmp string) *config.Config {
 	t.Helper()
@@ -83,7 +124,7 @@ func TestParseResponseGenerateStyle(t *testing.T) {
 	data := map[string]any{
 		"response": `{"category": "Images", "tags": ["a"], "action": "move", "reason": "x"}`,
 	}
-	decision, ok := parseResponse(data, categorySet(cfg.Categories))
+	decision, ok := parseResponse(toChatResponse(data), categorySet(cfg.Categories))
 	if !ok {
 		t.Fatal("expected ok")
 	}
@@ -116,7 +157,7 @@ func TestParseResponseToolCallStyle(t *testing.T) {
 			},
 		},
 	}
-	decision, ok := parseResponse(data, categorySet(cfg.Categories))
+	decision, ok := parseResponse(toChatResponse(data), categorySet(cfg.Categories))
 	if !ok {
 		t.Fatal("expected ok")
 	}
@@ -141,7 +182,7 @@ func TestParseResponseToolCallArgumentsAsString(t *testing.T) {
 			},
 		},
 	}
-	decision, ok := parseResponse(data, categorySet(cfg.Categories))
+	decision, ok := parseResponse(toChatResponse(data), categorySet(cfg.Categories))
 	if !ok {
 		t.Fatal("expected ok")
 	}
@@ -156,7 +197,7 @@ func TestParseResponseMessageContentJSON(t *testing.T) {
 			"content": `{"category": "Images", "subcategory": "cat", "tags": ["photo"], "action": "move", "destination": "", "reason": "photo"}`,
 		},
 	}
-	decision, ok := parseResponse(data, categorySet(cfg.Categories))
+	decision, ok := parseResponse(toChatResponse(data), categorySet(cfg.Categories))
 	if !ok {
 		t.Fatal("expected ok")
 	}
@@ -178,7 +219,7 @@ func TestParseResponseMessageThinkingJSON(t *testing.T) {
 			"thinking": `Some reasoning here... {"category": "Screenshots", "subcategory": "browser", "tags": ["web"], "action": "move", "destination": "", "reason": "webpage screenshot"}`,
 		},
 	}
-	decision, ok := parseResponse(data, categorySet(cfg.Categories))
+	decision, ok := parseResponse(toChatResponse(data), categorySet(cfg.Categories))
 	if !ok {
 		t.Fatal("expected ok")
 	}
@@ -197,7 +238,7 @@ func TestParseResponseMessageContentFencedJSON(t *testing.T) {
 			"content": "```json\n{\"category\": \"Documents\", \"tags\": [\" fenced\"], \"action\": \"move\", \"reason\": \"x\"}\n```",
 		},
 	}
-	decision, ok := parseResponse(data, categorySet(cfg.Categories))
+	decision, ok := parseResponse(toChatResponse(data), categorySet(cfg.Categories))
 	if !ok {
 		t.Fatal("expected ok")
 	}
@@ -211,7 +252,7 @@ func TestParseResponseUnknownCategoryCoerced(t *testing.T) {
 	data := map[string]any{
 		"response": `{"category": "Banana", "tags": [], "action": "move", "reason": "x"}`,
 	}
-	decision, ok := parseResponse(data, categorySet(cfg.Categories))
+	decision, ok := parseResponse(toChatResponse(data), categorySet(cfg.Categories))
 	if !ok {
 		t.Fatal("expected ok")
 	}
@@ -225,7 +266,7 @@ func TestParseResponseInvalidActionCoerced(t *testing.T) {
 	data := map[string]any{
 		"response": `{"category": "Images", "tags": [], "action": "explode", "reason": "x"}`,
 	}
-	decision, ok := parseResponse(data, categorySet(cfg.Categories))
+	decision, ok := parseResponse(toChatResponse(data), categorySet(cfg.Categories))
 	if !ok {
 		t.Fatal("expected ok")
 	}
@@ -239,7 +280,7 @@ func TestParseResponseSubcategory(t *testing.T) {
 	data := map[string]any{
 		"response": `{"category": "Images", "subcategory": "cat", "tags": ["photo"], "action": "move", "reason": "x"}`,
 	}
-	decision, ok := parseResponse(data, categorySet(cfg.Categories))
+	decision, ok := parseResponse(toChatResponse(data), categorySet(cfg.Categories))
 	if !ok {
 		t.Fatal("expected ok")
 	}
@@ -423,7 +464,7 @@ func TestClassifyUsesChatEndpoint(t *testing.T) {
 	}
 
 	client := NewClient(transport)
-	decision, err := client.Classify(textFile, "", cfg)
+	decision, err := client.Classify(context.Background(), textFile, "", cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -457,7 +498,7 @@ func TestClassifyDoesNotFallbackToGenerate(t *testing.T) {
 	}
 
 	client := NewClient(transport)
-	decision, err := client.Classify(textFile, "", cfg)
+	decision, err := client.Classify(context.Background(), textFile, "", cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -491,7 +532,7 @@ func TestClassifyFallsBackOnError(t *testing.T) {
 	}
 
 	client := NewClient(transport)
-	decision, err := client.Classify(textFile, "", cfg)
+	decision, err := client.Classify(context.Background(), textFile, "", cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -547,7 +588,7 @@ func TestClassifyRetriesWithoutImagesOnFailure(t *testing.T) {
 	}
 
 	client := NewClient(transport)
-	decision, err := client.Classify(img, "", cfg)
+	decision, err := client.Classify(context.Background(), img, "", cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -586,7 +627,7 @@ func TestClassifyDoesNotRetryWithoutImagesOnGenericError(t *testing.T) {
 	}
 
 	client := NewClient(transport)
-	decision, err := client.Classify(img, "", cfg)
+	decision, err := client.Classify(context.Background(), img, "", cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -622,7 +663,7 @@ func TestClassifySkipsHiddenFilesNoSpecialHandling(t *testing.T) {
 	}
 
 	client := NewClient(transport)
-	decision, err := client.Classify(textFile, "", cfg)
+	decision, err := client.Classify(context.Background(), textFile, "", cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -828,7 +869,7 @@ func TestClassifierInterface(t *testing.T) {
 	}
 
 	var classifier Classifier = NewClient(transport)
-	decision, err := classifier.Classify(textFile, "", cfg)
+	decision, err := classifier.Classify(context.Background(), textFile, "", cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -860,7 +901,7 @@ func TestParseResponseMissingFieldsUsesDefaults(t *testing.T) {
 	data := map[string]any{
 		"response": `{}`,
 	}
-	decision, ok := parseResponse(data, categorySet(cfg.Categories))
+	decision, ok := parseResponse(toChatResponse(data), categorySet(cfg.Categories))
 	if !ok {
 		t.Fatal("expected ok")
 	}
@@ -887,7 +928,7 @@ func TestCheckModelMissingModel(t *testing.T) {
 
 	client := NewClient(transport)
 	cfg := baseConfig(t, t.TempDir())
-	_, err := client.Classify("", "", cfg)
+	_, err := client.Classify(context.Background(), "", "", cfg)
 	if err == nil {
 		t.Fatal("expected error for missing model")
 	}
@@ -1125,10 +1166,10 @@ func TestCheckModelCached(t *testing.T) {
 	}
 
 	client := NewClient(transport)
-	if _, err := client.Classify(textFile, "", cfg); err != nil {
+	if _, err := client.Classify(context.Background(), textFile, "", cfg); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := client.Classify(textFile, "", cfg); err != nil {
+	if _, err := client.Classify(context.Background(), textFile, "", cfg); err != nil {
 		t.Fatal(err)
 	}
 	if tagsCalls != 1 {
@@ -1159,12 +1200,12 @@ func TestCheckModelCacheInvalidatedOnModelChange(t *testing.T) {
 	}
 
 	client := NewClient(transport)
-	if _, err := client.Classify(textFile, "", cfg); err != nil {
+	if _, err := client.Classify(context.Background(), textFile, "", cfg); err != nil {
 		t.Fatal(err)
 	}
 
 	cfg.Model = "other-model"
-	if _, err := client.Classify(textFile, "", cfg); err != nil {
+	if _, err := client.Classify(context.Background(), textFile, "", cfg); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1207,7 +1248,7 @@ func TestClassifyHashCache(t *testing.T) {
 	client := NewClient(transport)
 	client.SetDecisionCache(cache)
 
-	decision, err := client.Classify(textFile, "hash1", cfg)
+	decision, err := client.Classify(context.Background(), textFile, "hash1", cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1259,7 +1300,7 @@ func TestClassifyRecordsDecisionInCache(t *testing.T) {
 	client := NewClient(transport)
 	client.SetDecisionCache(cache)
 
-	if _, err := client.Classify(textFile, "hash1", cfg); err != nil {
+	if _, err := client.Classify(context.Background(), textFile, "hash1", cfg); err != nil {
 		t.Fatal(err)
 	}
 
