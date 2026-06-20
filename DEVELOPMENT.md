@@ -113,5 +113,7 @@ Key points:
 | View review queue | `~/.local/bin/filemaid review` |
 | Show resolved config | `~/.local/bin/filemaid config` |
 | Tail logs | `~/.local/bin/filemaid logs --tail 50` |
-| Install/reinstall agents | `filemaid setup` |
-| Uninstall agents | `filemaid uninstall` |
+| Install/reinstall binary, config, and optional agents | `filemaid setup` |
+| Install background launchd agents | `filemaid setup --agents` |
+| Output Shortcuts automation steps | `filemaid setup --shortcuts` |
+| Uninstall agents and wrapper | `filemaid uninstall` |

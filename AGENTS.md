@@ -6,9 +6,9 @@
 
 Two triggers are supported:
 
-- **macOS Shortcuts folder automations** — instant per-file processing, no Full Disk Access required.
-- **`biz.logicminds.filemaid.scan` LaunchAgent** — optional periodic scan every 15 minutes. Disable during setup with `filemaid setup --no-scan`.
-- **`biz.logicminds.filemaid.cleanup` LaunchAgent** — cleanup at 06:00, 12:00, 18:00, and 23:00.
+- **macOS Shortcuts folder automations** — instant per-file processing, no Full Disk Access required. This is the default trigger; run `filemaid setup --shortcuts` to see the steps.
+- **`biz.logicminds.filemaid.scan` LaunchAgent** — optional periodic scan every 15 minutes. Enable during setup with `filemaid setup --agents`; skip the scan agent with `filemaid setup --agents --no-scan`.
+- **`biz.logicminds.filemaid.cleanup` LaunchAgent** — optional cleanup at 06:00, 12:00, 18:00, and 23:00. Enable during setup with `filemaid setup --agents`.
 
 ## Architecture & Data Flow
 
@@ -67,7 +67,9 @@ type Decision struct {
 | Run tests with coverage | `make coverage` |
 | Format code | `go fmt ./...` or `make fmt` |
 | Run linter | `go vet ./...` or `make lint` |
-| Install/reinstall agents and wrapper | `filemaid setup` |
+| Install/reinstall binary, config, and optional agents | `filemaid setup` |
+| Install background launchd agents | `filemaid setup --agents` |
+| Output Shortcuts automation steps | `filemaid setup --shortcuts` |
 | Uninstall agents and wrapper | `filemaid uninstall` |
 | Process files manually | `~/.local/bin/filemaid process ~/Desktop/foo.png ~/Downloads/bar.pdf` |
 | Scan watch dirs | `~/.local/bin/filemaid scan` or `~/.local/bin/filemaid scan --dir ~/Downloads` |
@@ -122,9 +124,9 @@ type Decision struct {
 - **Runtime:** Go 1.23+ (recommended: install the latest with `brew install go`).
 - **Platform:** macOS only (uses `launchctl`, `osascript`, `xattr`, `mdimport`, Finder tags).
 - **External dependency:** A running Ollama server at `http://localhost:11434` with the model configured in `~/.config/filemaid/config.json` (default `filemaid-gemma4-26b`).
-- **LaunchAgent management:** Uses `launchctl bootstrap gui/$(id -u)` / `launchctl bootout gui/$(id -u)`. Plists are generated at setup time and written to `~/Library/LaunchAgents/`.
+- **LaunchAgent management:** Uses `launchctl bootstrap gui/$(id -u)` / `launchctl bootout gui/$(id -u)`. Plists are generated at setup time and written to `~/Library/LaunchAgents/` only when `filemaid setup --agents` is used.
 - **Path assumptions:** The binary is installed to `~/.local/bin/filemaid`; runtime data goes to `~/.local/share/filemaid/`; config to `~/.config/filemaid/`; review queue to `~/.filemaid/review/`.
-- **TCC note:** The background scan agent may be denied read access to `~/Desktop`/`~/Downloads` until the `filemaid` binary is granted Full Disk Access in System Settings → Privacy & Security → Full Disk Access. The Shortcuts folder-automation path does not need this.
+- **TCC note:** The background scan agent (only installed with `filemaid setup --agents`) may be denied read access to `~/Desktop`/`~/Downloads` until the `filemaid` binary is granted Full Disk Access in System Settings → Privacy & Security → Full Disk Access. The Shortcuts folder-automation path does not need this.
 
 ## Testing & QA
 
@@ -132,7 +134,7 @@ type Decision struct {
 - **Coverage gate:** `make coverage` enforces an 80% overall coverage floor.
 - **Lint/format:** `go vet ./...` and `gofmt -l .` must be clean.
 - **Manual QA workflow:**
-  1. `go build -o bin/filemaid ./cmd/filemaid && ./bin/filemaid setup`
+  1. `go build -o bin/filemaid ./cmd/filemaid && ./bin/filemaid setup` (add `--agents` to install background agents, or use `setup --shortcuts` for the Shortcuts trigger).
   2. Drop a test file on `~/Desktop` or run `filemaid process <path>`.
   3. Verify expected archive folder and Finder tags with `ls -R ~/Documents/Archive` and `mdls -name kMDItemUserTags <path>`.
   4. Run `filemaid cleanup --dry-run` and inspect output/log.

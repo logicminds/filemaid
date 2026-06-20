@@ -61,10 +61,22 @@ To skip the configuration interview and use the shipped defaults, pass `--no-int
 ./bin/filemaid setup --no-interactive
 ```
 
-To skip installing the scheduled scan agent and run `filemaid scan` manually:
+To install the background launchd agents (disabled by default):
 
 ```zsh
-./bin/filemaid setup --no-scan
+./bin/filemaid setup --agents
+```
+
+To skip the scheduled scan agent when using `--agents`:
+
+```zsh
+./bin/filemaid setup --agents --no-scan
+```
+
+To see the macOS Shortcuts folder-automation steps:
+
+```zsh
+./bin/filemaid setup --shortcuts
 ```
 
 Or install the latest release directly with `go install`:
@@ -81,8 +93,10 @@ After setup you will have:
 - `~/.config/filemaid/config.json` — user configuration
 - `~/.local/share/filemaid/` — logs and SQLite database
 - `~/.filemaid/review/` — quarantine folder
-- `~/Library/LaunchAgents/biz.logicminds.filemaid.*.plist` — background agents
+- `~/Library/LaunchAgents/biz.logicminds.filemaid.*.plist` — background agents (only when `setup --agents` is used)
 - Custom Ollama models (`filemaid-gemma4-26b`, `filemaid-gemma4-12b`, `filemaid-metadata`) — created automatically if Ollama is installed
+
+For instant per-file processing without background agents, use the Shortcuts folder automation. Run `filemaid setup --shortcuts` to see the steps.
 
 ## Usage
 
@@ -116,11 +130,25 @@ After setup you will have:
 
 # Show resolved configuration
 ./bin/filemaid config
+
+# Install background launchd agents
+./bin/filemaid setup --agents
+
+# Output macOS Shortcuts folder-automation steps
+./bin/filemaid setup --shortcuts
 ```
 
 If you installed via `go install`, use `filemaid` instead of `./bin/filemaid`.
 
 ## Shortcuts Setup
+
+Shortcuts folder automations are the recommended trigger: they run instantly when a file lands in a folder, do not require Full Disk Access, and avoid leaving a background agent running.
+
+Run the following command to print the exact steps for your binary path:
+
+```zsh
+filemaid setup --shortcuts
+```
 
 For instant per-file processing, add a Shortcuts folder automation:
 
@@ -290,12 +318,18 @@ filemaid process <paths>
 
 ## Scheduling
 
+Background agents are **disabled by default**. To install them, run setup with `--agents`:
+
+```zsh
+filemaid setup --agents
+```
+
 | Agent | Schedule | Logs |
 |-------|----------|------|
 | `biz.logicminds.filemaid.scan` | Every 15 minutes (optional) | `~/.local/share/filemaid/scan.log` |
 | `biz.logicminds.filemaid.cleanup` | 06:00, 12:00, 18:00, 23:00 | `~/.local/share/filemaid/cleanup.log` |
 
-The scan agent is optional. If you choose not to install it, run `filemaid scan` manually or use the Shortcuts folder automations above.
+Use `--no-scan` with `--agents` to install only the cleanup agent. If you do not install agents, run `filemaid scan` and `filemaid cleanup` manually, or use the Shortcuts folder automations above for instant per-file processing.
 
 ## Uninstall
 

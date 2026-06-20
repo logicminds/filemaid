@@ -2,6 +2,7 @@ package setup
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -252,7 +253,7 @@ func TestInstallFull(t *testing.T) {
 		latestModel("filemaid-metadata") + "\n",
 	}
 
-	if err := inst.Install(InstallOptions{ModelName: "filemaid-gemma4-12b"}); err != nil {
+	if err := inst.Install(InstallOptions{Agents: true, ModelName: "filemaid-gemma4-12b"}); err != nil {
 		t.Fatalf("install failed: %v", err)
 	}
 
@@ -572,7 +573,7 @@ func TestInstallNoScan(t *testing.T) {
 	scanPlist := filepath.Join(launchdDir, "biz.logicminds.filemaid.scan.plist")
 	writeFile(t, scanPlist, []byte("old"), 0o644)
 
-	if err := inst.Install(InstallOptions{NoScan: true, ModelName: "filemaid-gemma4-12b"}); err != nil {
+	if err := inst.Install(InstallOptions{Agents: true, NoScan: true, ModelName: "filemaid-gemma4-12b"}); err != nil {
 		t.Fatalf("install failed: %v", err)
 	}
 
@@ -589,6 +590,69 @@ func TestInstallNoScan(t *testing.T) {
 	for _, call := range runner.calls {
 		if strings.Contains(call, "scan.plist") {
 			t.Errorf("unexpected scan-related call: %s", call)
+		}
+	}
+}
+
+func TestInstallNoAgents(t *testing.T) {
+	dir := t.TempDir()
+	xe := prepareExecutable(t, dir)
+	inst, runner, home := newTestInstaller(t, xe)
+	runner.lookPath["ollama"] = "/usr/local/bin/ollama"
+	runner.outputs["ollama list"] = latestModel("filemaid-gemma4-12b") + "\n" + latestModel("filemaid-metadata") + "\n"
+
+	if err := inst.Install(InstallOptions{ModelName: "filemaid-gemma4-12b"}); err != nil {
+		t.Fatalf("install failed: %v", err)
+	}
+
+	scanPlist := filepath.Join(home, "Library", "LaunchAgents", "biz.logicminds.filemaid.scan.plist")
+	cleanupPlist := filepath.Join(home, "Library", "LaunchAgents", "biz.logicminds.filemaid.cleanup.plist")
+	if _, err := os.Stat(scanPlist); !os.IsNotExist(err) {
+		t.Errorf("scan plist should not be written")
+	}
+	if _, err := os.Stat(cleanupPlist); !os.IsNotExist(err) {
+		t.Errorf("cleanup plist should not be written")
+	}
+
+	for _, call := range runner.calls {
+		if strings.Contains(call, "launchctl bootstrap") {
+			t.Errorf("unexpected launchctl bootstrap call: %s", call)
+		}
+	}
+}
+
+func TestInstallNoAgentsRemovesExistingPlists(t *testing.T) {
+	dir := t.TempDir()
+	xe := prepareExecutable(t, dir)
+	inst, runner, home := newTestInstaller(t, xe)
+	runner.lookPath["ollama"] = "/usr/local/bin/ollama"
+	runner.outputs["ollama list"] = latestModel("filemaid-gemma4-12b") + "\n" + latestModel("filemaid-metadata") + "\n"
+
+	launchdDir := filepath.Join(home, "Library", "LaunchAgents")
+	mkdir(t, launchdDir)
+	scanPlist := filepath.Join(launchdDir, "biz.logicminds.filemaid.scan.plist")
+	cleanupPlist := filepath.Join(launchdDir, "biz.logicminds.filemaid.cleanup.plist")
+	writeFile(t, scanPlist, []byte("old"), 0o644)
+	writeFile(t, cleanupPlist, []byte("old"), 0o644)
+
+	if err := inst.Install(InstallOptions{ModelName: "filemaid-gemma4-12b"}); err != nil {
+		t.Fatalf("install failed: %v", err)
+	}
+
+	if _, err := os.Stat(scanPlist); !os.IsNotExist(err) {
+		t.Errorf("stale scan plist should have been removed")
+	}
+	if _, err := os.Stat(cleanupPlist); !os.IsNotExist(err) {
+		t.Errorf("stale cleanup plist should have been removed")
+	}
+
+	for _, label := range []string{scanLabel, cleanupLabel} {
+		assertCall(t, runner.calls, fmt.Sprintf("launchctl bootout gui/501/%s", label))
+	}
+
+	for _, call := range runner.calls {
+		if strings.Contains(call, "launchctl bootstrap") {
+			t.Errorf("unexpected launchctl bootstrap call: %s", call)
 		}
 	}
 }
@@ -700,6 +764,7 @@ func TestInstallCustomDirs(t *testing.T) {
 	writeStoredModelHashes(t, filepath.Join(home, ".local", "share", "filemaid"), nil)
 
 	opts := InstallOptions{
+		Agents:    true,
 		BinDir:    filepath.Join(home, "bin"),
 		ConfigDir: filepath.Join(home, "etc", "filemaid"),
 		DataDir:   filepath.Join(home, "var", "filemaid"),
@@ -778,6 +843,22 @@ func TestRenderPlists(t *testing.T) {
 			if out, err := cmd.CombinedOutput(); err != nil {
 				t.Errorf("plutil -lint %s: %v\n%s", p, err, out)
 			}
+		}
+	}
+}
+
+func TestPrintShortcutsInstructions(t *testing.T) {
+	var buf bytes.Buffer
+	PrintShortcutsInstructions(&buf, "/usr/local/bin/filemaid")
+	out := buf.String()
+
+	for _, want := range []string{
+		"macOS Shortcuts folder automation",
+		"/usr/local/bin/filemaid process",
+		"Shortcuts runs in your user session",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("shortcuts instructions missing %q: %s", want, out)
 		}
 	}
 }
@@ -861,8 +942,7 @@ func TestInstallBootstrapFailure(t *testing.T) {
 	runner.lookPath["ollama"] = "/usr/local/bin/ollama"
 	runner.outputs["ollama list"] = latestModel("filemaid-gemma4-12b") + "\n"
 	runner.runErr = fmt.Errorf("launchctl failed")
-
-	if err := inst.Install(InstallOptions{ModelName: "filemaid-gemma4-12b"}); err == nil {
+	if err := inst.Install(InstallOptions{Agents: true, ModelName: "filemaid-gemma4-12b"}); err == nil {
 		t.Fatal("expected error when bootstrap fails")
 	}
 }

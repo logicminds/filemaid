@@ -26,6 +26,11 @@ import (
 
 // InstallOptions controls the setup command.
 type InstallOptions struct {
+	// Agents installs and bootstraps the launchd scan and cleanup agents.
+	// When false (the default), any existing agents are removed and no plists
+	// are written.
+	Agents bool
+	// NoScan skips the scan agent when Agents is true.
 	NoScan    bool
 	BinDir    string
 	ConfigDir string
@@ -573,45 +578,52 @@ func (i *Installer) Install(opts InstallOptions) error {
 	scanPlistPath := filepath.Join(launchdDir, scanLabel+".plist")
 	cleanupPlistPath := filepath.Join(launchdDir, cleanupLabel+".plist")
 
-	if opts.NoScan {
-		if err := i.FS.Remove(scanPlistPath); err != nil && !os.IsNotExist(err) {
-			slog.Debug("remove stale scan plist", "error", err)
-		}
-	} else {
-		scanPlist, err := RenderScanPlist(binDir, dataDir)
-		if err != nil {
-			return fmt.Errorf("render scan plist: %w", err)
-		}
-		if err := i.FS.WriteFile(scanPlistPath, []byte(scanPlist), 0o644); err != nil {
-			return fmt.Errorf("write scan plist: %w", err)
-		}
-	}
-
-	cleanupPlist, err := RenderCleanupPlist(binDir, dataDir)
-	if err != nil {
-		return fmt.Errorf("render cleanup plist: %w", err)
-	}
-	if err := i.FS.WriteFile(cleanupPlistPath, []byte(cleanupPlist), 0o644); err != nil {
-		return fmt.Errorf("write cleanup plist: %w", err)
-	}
-
-	// Boot-out any previous agents. This is expected to fail on first install,
-	// so use a quiet runner so the user does not see a benign "No such process"
-	// error that looks like a failure.
-	quiet := quietRunner{}
+	// Always tear down any previously-running agents so a reinstall or a switch
+	// to agent-less mode leaves the system in a clean state.
 	for _, label := range []string{scanLabel, cleanupLabel} {
 		target := fmt.Sprintf("gui/%d/%s", i.UID, label)
-		if err := quiet.Run("launchctl", "bootout", target); err != nil {
+		if err := i.QuietRunner.Run("launchctl", "bootout", target); err != nil {
 			slog.Debug("bootout existing agent", "target", target, "error", err)
 		}
 	}
 
-	if err := i.Runner.Run("launchctl", "bootstrap", fmt.Sprintf("gui/%d", i.UID), cleanupPlistPath); err != nil {
-		return fmt.Errorf("bootstrap cleanup agent: %w", err)
-	}
-	if !opts.NoScan {
-		if err := i.Runner.Run("launchctl", "bootstrap", fmt.Sprintf("gui/%d", i.UID), scanPlistPath); err != nil {
-			return fmt.Errorf("bootstrap scan agent: %w", err)
+	if opts.Agents {
+		if opts.NoScan {
+			if err := i.FS.Remove(scanPlistPath); err != nil && !os.IsNotExist(err) {
+				slog.Debug("remove stale scan plist", "error", err)
+			}
+		} else {
+			scanPlist, err := RenderScanPlist(binDir, dataDir)
+			if err != nil {
+				return fmt.Errorf("render scan plist: %w", err)
+			}
+			if err := i.FS.WriteFile(scanPlistPath, []byte(scanPlist), 0o644); err != nil {
+				return fmt.Errorf("write scan plist: %w", err)
+			}
+		}
+
+		cleanupPlist, err := RenderCleanupPlist(binDir, dataDir)
+		if err != nil {
+			return fmt.Errorf("render cleanup plist: %w", err)
+		}
+		if err := i.FS.WriteFile(cleanupPlistPath, []byte(cleanupPlist), 0o644); err != nil {
+			return fmt.Errorf("write cleanup plist: %w", err)
+		}
+
+		if err := i.Runner.Run("launchctl", "bootstrap", fmt.Sprintf("gui/%d", i.UID), cleanupPlistPath); err != nil {
+			return fmt.Errorf("bootstrap cleanup agent: %w", err)
+		}
+		if !opts.NoScan {
+			if err := i.Runner.Run("launchctl", "bootstrap", fmt.Sprintf("gui/%d", i.UID), scanPlistPath); err != nil {
+				return fmt.Errorf("bootstrap scan agent: %w", err)
+			}
+		}
+	} else {
+		if err := i.FS.Remove(scanPlistPath); err != nil && !os.IsNotExist(err) {
+			slog.Debug("remove stale scan plist", "error", err)
+		}
+		if err := i.FS.Remove(cleanupPlistPath); err != nil && !os.IsNotExist(err) {
+			slog.Debug("remove stale cleanup plist", "error", err)
 		}
 	}
 
@@ -645,10 +657,13 @@ func (i *Installer) Install(opts InstallOptions) error {
 
 	fmt.Fprintf(os.Stderr, "\nfilemaid setup complete. Binary: %s\n", binaryPath)
 	fmt.Fprintf(os.Stderr, "Run `filemaid process <path>` to classify files.\n")
-	if opts.NoScan {
-		fmt.Fprintf(os.Stderr, "Scan agent disabled; run `filemaid scan` manually.\n")
-	} else {
+	switch {
+	case opts.Agents && opts.NoScan:
+		fmt.Fprintf(os.Stderr, "Cleanup agent loaded; scan agent disabled. Run `filemaid scan` manually.\n")
+	case opts.Agents:
 		fmt.Fprintf(os.Stderr, "Scan and cleanup agents are loaded.\n")
+	default:
+		fmt.Fprintf(os.Stderr, "Background agents disabled. Use `--agents` to install them, or run `filemaid setup --shortcuts` for Shortcuts instructions.\n")
 	}
 
 	return nil
@@ -1096,6 +1111,30 @@ func RenderCleanupPlist(binDir, dataDir string) (string, error) {
 		return "", err
 	}
 	return buf.String(), nil
+}
+
+// PrintShortcutsInstructions writes the macOS Shortcuts folder-automation
+// setup steps to w. binaryPath is the path to the filemaid executable shown in
+// the shell script.
+func PrintShortcutsInstructions(w io.Writer, binaryPath string) {
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, "macOS Shortcuts folder automation")
+	fmt.Fprintln(w, "=================================")
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, "For instant per-file processing without background agents:")
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, "1. Open Shortcuts → Automations → Personal Automation → + → Folder.")
+	fmt.Fprintln(w, "2. Select Desktop, choose Run immediately.")
+	fmt.Fprintln(w, "3. Add Run Shell Script:")
+	fmt.Fprintln(w, "      Shell: /bin/zsh")
+	fmt.Fprintln(w, "      Pass input: As arguments")
+	fmt.Fprintln(w, "      Command:")
+	fmt.Fprintf(w, "        export PATH=\"$(go env GOPATH)/bin:/usr/local/bin:/opt/homebrew/bin:$PATH\"\n")
+	fmt.Fprintf(w, "        %s process \"$@\"\n", binaryPath)
+	fmt.Fprintln(w, "4. Repeat for Downloads.")
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, "Shortcuts runs in your user session and does not require Full Disk Access.")
+	fmt.Fprintln(w)
 }
 
 func interviewConfig(reader *bufio.Reader, base map[string]any) (map[string]any, error) {
