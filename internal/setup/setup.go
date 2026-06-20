@@ -44,12 +44,17 @@ type systemInfo struct {
 	OllamaRunning   bool
 	TotalMemoryGB   int
 	Recommended     string
+	VisionChoices   []string
 	Choices         []string
 }
 
 // checkRequirements inspects the host and returns a systemInfo summary.
 func checkRequirements(runner Runner) (*systemInfo, error) {
 	info := &systemInfo{
+		VisionChoices: []string{
+			"filemaid-gemma4-26b",
+			"filemaid-gemma4-12b",
+		},
 		Choices: []string{
 			"filemaid-gemma4-26b",
 			"filemaid-gemma4-12b",
@@ -140,12 +145,6 @@ func formatBytes(b uint64) string {
 	}
 }
 
-// selectModel picks the vision model to use for image classification.
-// filemaid-metadata is always used for text and documents.
-// If opts.ModelName is set, it is validated and used.
-// If opts.Interactive is false and no model is set, the RAM-based
-// recommendation is used without prompting.
-// Otherwise the user is prompted with the RAM-based recommendation.
 func selectModel(opts InstallOptions, info *systemInfo, reader *bufio.Reader) (string, error) {
 	if opts.ModelName != "" {
 		for _, c := range info.Choices {
@@ -159,20 +158,41 @@ func selectModel(opts InstallOptions, info *systemInfo, reader *bufio.Reader) (s
 		return info.Recommended, nil
 	}
 
+	// Metadata-only mode is selected automatically on low-memory machines.
+	if info.Recommended == "filemaid-metadata" {
+		fmt.Fprintf(os.Stderr, "\nDetected %d GB of memory.\n", info.TotalMemoryGB)
+		fmt.Fprintf(os.Stderr, "filemaid will use filemaid-metadata for all files.\n")
+		fmt.Fprintf(os.Stderr, "No vision model will be installed.\n")
+		fmt.Fprintln(os.Stderr, "Press Enter to continue, or type 'vision' to install a vision model anyway: ")
+		line, err := reader.ReadString('\n')
+		if err != nil {
+			return "", fmt.Errorf("read choice: %w", err)
+		}
+		if strings.TrimSpace(strings.ToLower(line)) == "vision" {
+			return selectVisionModel(info, reader)
+		}
+		return "filemaid-metadata", nil
+	}
+
+	return selectVisionModel(info, reader)
+}
+
+// selectVisionModel prompts the user to choose a vision model for image classification.
+func selectVisionModel(info *systemInfo, reader *bufio.Reader) (string, error) {
 	fmt.Fprintf(os.Stderr, "\nDetected %d GB of memory.\n", info.TotalMemoryGB)
 	fmt.Fprintf(os.Stderr, "filemaid uses two Ollama models:\n")
 	fmt.Fprintf(os.Stderr, "  • Text/documents model: filemaid-metadata (always installed)\n")
 	fmt.Fprintf(os.Stderr, "  • Image/vision model: your choice below\n")
 	fmt.Fprintf(os.Stderr, "Recommended vision model: %s\n", info.Recommended)
 	fmt.Fprintln(os.Stderr, "Available vision models:")
-	for i, c := range info.Choices {
+	for i, c := range info.VisionChoices {
 		marker := " "
 		if c == info.Recommended {
 			marker = "*"
 		}
 		fmt.Fprintf(os.Stderr, "  %s %d) %s\n", marker, i+1, c)
 	}
-	fmt.Fprintf(os.Stderr, "Press Enter to use %s for images, or type 1-%d to choose another vision model: ", info.Recommended, len(info.Choices))
+	fmt.Fprintf(os.Stderr, "Press Enter to use %s for images, or type 1-%d to choose another vision model: ", info.Recommended, len(info.VisionChoices))
 
 	line, err := reader.ReadString('\n')
 	if err != nil {
@@ -182,12 +202,11 @@ func selectModel(opts InstallOptions, info *systemInfo, reader *bufio.Reader) (s
 	if line == "" {
 		return info.Recommended, nil
 	}
-
 	n, err := strconv.Atoi(line)
-	if err != nil || n < 1 || n > len(info.Choices) {
-		return "", fmt.Errorf("invalid choice %q; expected 1-%d", line, len(info.Choices))
+	if err != nil || n < 1 || n > len(info.VisionChoices) {
+		return "", fmt.Errorf("invalid choice %q; expected 1-%d", line, len(info.VisionChoices))
 	}
-	return info.Choices[n-1], nil
+	return info.VisionChoices[n-1], nil
 }
 
 func printOllamaInstructions() {

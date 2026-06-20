@@ -202,6 +202,7 @@ func TestSelectModel(t *testing.T) {
 	info := &systemInfo{
 		TotalMemoryGB: 24,
 		Recommended:   "filemaid-gemma4-26b",
+		VisionChoices: []string{"filemaid-gemma4-26b", "filemaid-gemma4-12b"},
 		Choices:       []string{"filemaid-gemma4-26b", "filemaid-gemma4-12b", "filemaid-metadata"},
 	}
 
