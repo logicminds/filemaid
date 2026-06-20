@@ -853,28 +853,19 @@ func (i *Installer) createOllamaModels(configDir string, models []string) error 
 		fmt.Fprintln(os.Stderr, "Do not interrupt the download.")
 		fmt.Fprintln(os.Stderr)
 
-		// Build a deterministic, short tag from the modelfile hash so recreated
-		// models are versioned and the previous latest can be removed.
-		tag := "v" + hash[:12]
-		versionedModel := model + ":" + tag
+		// Create the model with the latest tag so config references without a tag
+		// resolve correctly. Ollama overwrites an existing latest tag on changes.
+		taggedModel := model + ":latest"
 
-		if err := i.Runner.Run("ollama", "create", versionedModel, "-f", path); err != nil {
-			return fmt.Errorf("create model %s: %w", versionedModel, err)
+		if err := i.Runner.Run("ollama", "create", taggedModel, "-f", path); err != nil {
+			return fmt.Errorf("create model %s: %w", taggedModel, err)
 		}
 
-		if err := i.waitForModel(versionedModel); err != nil {
-			return fmt.Errorf("model %s did not appear in ollama list after create: %w", versionedModel, err)
+		if err := i.waitForModel(taggedModel); err != nil {
+			return fmt.Errorf("model %s did not appear in ollama list after create: %w", taggedModel, err)
 		}
 
-		// Maintain an untagged alias so config can reference the model without a tag.
-		if err := i.Runner.Run("ollama", "cp", versionedModel, model); err != nil {
-			return fmt.Errorf("create alias %s: %w", model, err)
-		}
-
-		// Keep only the current version and the untagged alias for this model family.
-		i.removeOllamaModels(existingModels, model, tag)
-
-		fmt.Fprintf(os.Stderr, "Model %q is ready.\n", versionedModel)
+		fmt.Fprintf(os.Stderr, "Model %q is ready.\n", taggedModel)
 	}
 
 	return nil
@@ -961,34 +952,6 @@ func parseOllamaModelList(output string) []string {
 		names = append(names, fields[0])
 	}
 	return names
-}
-
-// modelFamily returns the model name without its tag.
-func modelFamily(name string) string {
-	if i := strings.LastIndex(name, ":"); i >= 0 {
-		return name[:i]
-	}
-	return name
-}
-
-// removeOllamaModels deletes models returned by `ollama list` whose family
-// matches the given model name and whose tag differs from keepTag. It keeps
-// the untagged alias (name == family) and the current hash tag. It logs
-// failures but does not abort the install.
-func (i *Installer) removeOllamaModels(models []string, family, keepTag string) {
-	for _, name := range models {
-		if modelFamily(name) != family {
-			continue
-		}
-		// Keep the untagged alias and the current hash tag.
-		if name == family || strings.HasSuffix(name, ":"+keepTag) {
-			continue
-		}
-		slog.Debug("removing stale ollama model", "model", name)
-		if err := i.Runner.Run("ollama", "rm", name); err != nil {
-			slog.Warn("failed to remove stale model", "model", name, "error", err)
-		}
-	}
 }
 
 // runOutput runs a command quietly and returns its stdout as a string.
