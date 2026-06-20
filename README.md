@@ -27,8 +27,7 @@ A local, AI-powered file organizer for macOS. It watches your `Desktop` and `Dow
   ```zsh
   /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
   ```
-- Go 1.23+ (recommended: install the latest with `brew install go`)
-- [Ollama](https://ollama.com/) running locally with a vision-capable model (install with `brew install ollama`)
+- [Ollama](https://ollama.com/) running locally with a vision-capable model (install with `brew install ollama`) 0.30.0+
 
 ## Quick Start
 
