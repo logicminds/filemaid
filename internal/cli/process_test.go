@@ -329,9 +329,7 @@ func TestProcessPathsLogsApplyError(t *testing.T) {
 	cfg = testConfig(tmp)
 	db = state.NewFake()
 	classifier = &fakeClassifier{decision: llm.Decision{Category: "Documents", Action: "move", Reason: "text"}}
-	applyDecision = func(llm.Decision, string, string, *config.Config, state.Repo, bool, actions.FS, string, llm.Metrics) (string, error) {
-		return "", errors.New("move failed")
-	}
+	applyDecision = func(llm.Decision, string, string, *config.Config, state.Repo, bool, actions.FS, string, llm.Metrics, bool) (string, error) { return "", errors.New("move failed") }
 	t.Cleanup(func() { applyDecision = actions.Apply })
 
 	src := filepath.Join(tmp, "Desktop", "note.txt")
@@ -544,18 +542,22 @@ func newBlockingApplier() *blockingApplier {
 	return b
 }
 
-func (b *blockingApplier) Apply(decision llm.Decision, src string, fileHash string, cfg *config.Config, db state.Repo, isDuplicate bool, fs actions.FS, runID string, metrics llm.Metrics) (string, error) {
+func (b *blockingApplier) Apply(decision llm.Decision, src string, fileHash string, cfg *config.Config, db state.Repo, isDuplicate bool, fs actions.FS, runID string, metrics llm.Metrics, force bool) (string, error) {
 	b.mu.Lock()
 	b.active++
 	if b.active > b.maxActive {
 		b.maxActive = b.active
 	}
+	b.mu.Unlock()
+
+	b.mu.Lock()
 	for !b.proceed {
 		b.cond.Wait()
 	}
 	b.active--
 	b.mu.Unlock()
-	return src + "_moved", nil
+
+	return "", nil
 }
 
 func (b *blockingApplier) release() {

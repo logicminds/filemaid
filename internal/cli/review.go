@@ -166,7 +166,7 @@ func reviewApprovePath(reviewDir, rel string) error {
 		NewName:     rec.NewName,
 		NameQuality: nameQuality,
 	}
-	_, err = actions.Apply(decision, rec.FinalPath, rec.SHA256, cfg, db, false, reviewFS, "", llm.Metrics{})
+	_, err = actions.Apply(decision, rec.FinalPath, rec.SHA256, cfg, db, false, reviewFS, "", llm.Metrics{}, false)
 	if err != nil {
 		return fmt.Errorf("approve failed: %w", err)
 	}

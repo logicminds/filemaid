@@ -29,6 +29,7 @@ func init() {
 	scanCmd.Flags().BoolVar(&processQuiet, "quiet", false, "suppress log output to stderr")
 	scanCmd.Flags().StringVar(&renameFlag, "rename", "", "rename files using the LLM; optionally set minimum quality threshold 1-5 (e.g. --rename=3); 1=most aggressive, 5=most conservative, default is 2")
 	scanCmd.Flags().Lookup("rename").NoOptDefVal = "default"
+	scanCmd.Flags().BoolVar(&processForce, "force", false, "force processing even if the file is a duplicate or similar to existing history")
 	scanCmd.Flags().BoolVar(&processDryRun, "dry-run", false, "preview changes without moving files")
 	rootCmd.AddCommand(scanCmd)
 }
@@ -38,6 +39,7 @@ var scanCmd = &cobra.Command{
 	Short: "Scan watch directories for stale files",
 	RunE: func(cmd *cobra.Command, args []string) error {
 		applyRenameFlags(cmd)
+		applyForceFlags(cmd)
 		if err := classifier.Validate(cfg); err != nil {
 			return fmt.Errorf("model validation failed: %w", err)
 		}

@@ -119,12 +119,12 @@ var (
 	processJSON   bool
 	processQuiet  bool
 	renameFlag    string
-	renameLevel   int
 	processDryRun bool
+	processForce  bool
 )
 
 // applierFunc matches the signature of actions.Apply so it can be swapped in tests.
-type applierFunc func(decision llm.Decision, src string, fileHash string, cfg *config.Config, db state.Repo, isDuplicate bool, fs actions.FS, runID string, metrics llm.Metrics) (string, error)
+type applierFunc func(decision llm.Decision, src string, fileHash string, cfg *config.Config, db state.Repo, isDuplicate bool, fs actions.FS, runID string, metrics llm.Metrics, force bool) (string, error)
 
 func init() {
 	processCmd.Flags().StringVar(&processFormat, "format", "table", "output format (table|human|json)")
@@ -132,8 +132,24 @@ func init() {
 	processCmd.Flags().BoolVar(&processQuiet, "quiet", false, "suppress log output to stderr")
 	processCmd.Flags().StringVar(&renameFlag, "rename", "", "rename files using the LLM; optionally set minimum quality threshold 1-5 (e.g. --rename=3); 1=most aggressive, 5=most conservative, default is 2")
 	processCmd.Flags().Lookup("rename").NoOptDefVal = "default"
+	processCmd.Flags().BoolVar(&processForce, "force", false, "force processing even if the file is a duplicate or similar to existing history")
 	processCmd.Flags().BoolVar(&processDryRun, "dry-run", false, "preview changes without moving files")
 	rootCmd.AddCommand(processCmd)
+}
+
+// applyForceFlags copies CLI flag overrides for force settings into cfg when
+// the user explicitly provided them. It keeps config-file defaults intact for
+// flags that were not set.
+// applyForceFlags copies CLI flag overrides for force settings into cfg when
+// the user explicitly provided them. It keeps config-file defaults intact for
+// flags that were not set.
+func applyForceFlags(cmd *cobra.Command) {
+	if cmd == nil {
+		return
+	}
+	if cmd.Flags().Changed("force") {
+		cfg.Force = processForce
+	}
 }
 
 // applyRenameFlags copies CLI flag overrides for rename settings into cfg when
@@ -170,16 +186,19 @@ var processCmd = &cobra.Command{
 	Args:  cobra.MinimumNArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		applyRenameFlags(cmd)
+		applyForceFlags(cmd)
 		if err := classifier.Validate(cfg); err != nil {
 			return fmt.Errorf("model validation failed: %w", err)
 		}
 		if c, ok := classifier.(*llm.Client); ok {
 			c.SetDecisionCache(db)
 		}
+
 		ctx := context.Background()
 		if cmd != nil {
 			ctx = cmd.Context()
 		}
+
 
 		format := processFormat
 		if processJSON {
@@ -642,7 +661,7 @@ func coerceDuplicateDecision(decision llm.Decision, src string, cfg *config.Conf
 
 // applyFile applies a decision to a single file and builds a processResult.
 func applyFile(src, fileHash string, isDuplicate bool, decision llm.Decision, metrics llm.Metrics, runID string) processResult {
-	result, err := applyDecision(decision, src, fileHash, cfg, db, isDuplicate, processFS, runID, metrics)
+	result, err := applyDecision(decision, src, fileHash, cfg, db, isDuplicate, processFS, runID, metrics, cfg.Force)
 	originalName := filepath.Base(src)
 	if err != nil {
 		slog.Error("apply failed", "path", src, "error", err)

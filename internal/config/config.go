@@ -74,9 +74,10 @@ type Config struct {
 	RenameImageSimilarityThreshold float64                  `json:"rename_image_similarity_threshold"`
 	RenameAVSimilarityThreshold    float64                  `json:"rename_av_similarity_threshold"`
 	RenameUseFFmpeg                bool                     `json:"rename_use_ffmpeg"`
-	ExternalTools                  ExternalTools            `json:"external_tools"`
+	Force                          bool                     `json:"force"`
 	ProcessWorkers                 int                      `json:"process_workers"`
 	MaxImageDimension              int                      `json:"max_image_dimension"`
+	ExternalTools                  ExternalTools            `json:"external_tools"`
 }
 
 // AgeRule describes a pattern-based automatic action.
@@ -154,6 +155,7 @@ func Defaults() *Config {
 		RenameImageSimilarityThreshold: 0.95,
 		RenameAVSimilarityThreshold:    0.90,
 		RenameUseFFmpeg:                false,
+		Force:                          false,
 		ProcessWorkers:                 4,
 		MaxImageDimension:              1024,
 		ExternalTools:                  ExternalTools{FFmpeg: "ffmpeg"},

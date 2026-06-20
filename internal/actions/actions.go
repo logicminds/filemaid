@@ -111,7 +111,7 @@ func UniqueDest(dest string, fs FS) string {
 //   - Destinations outside cfg.AllowedDirs redirect to the dated review queue.
 //   - If the source file is no longer present (moved by a concurrent process),
 //     Apply returns a "skipped" result without error.
-func Apply(decision llm.Decision, src string, fileHash string, cfg *config.Config, db state.Repo, isDuplicate bool, fs FS, runID string, metrics llm.Metrics) (string, error) {
+func Apply(decision llm.Decision, src string, fileHash string, cfg *config.Config, db state.Repo, isDuplicate bool, fs FS, runID string, metrics llm.Metrics, force bool) (string, error) {
 	if len(cfg.AllowedDirs) > 0 && !WithinAllowed(src, cfg.AllowedDirs) {
 		return fmt.Sprintf("skipped (not allowed): %s", src), nil
 	}
@@ -132,7 +132,7 @@ func Apply(decision llm.Decision, src string, fileHash string, cfg *config.Confi
 		similar, _ = db.FindSimilarByFingerprints(fp.PerceptualHash, fp.AVSignature, fp.TextSignature)
 	}
 
-	if cfg.Rename && decision.Action != "review" && fpErr == nil {
+	if cfg.Rename && decision.Action != "review" && fpErr == nil && !force {
 		if len(duplicates) > 0 {
 			decision.Action = "review"
 			decision.Reason = fmt.Sprintf("duplicate content detected; original reason: %s", decision.Reason)
