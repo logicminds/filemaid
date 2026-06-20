@@ -171,6 +171,9 @@ func Apply(decision llm.Decision, src string, fileHash string, cfg *config.Confi
 	if decision.Subcategory != "" && !stringSliceContains(tags, decision.Subcategory) {
 		tags = append([]string{decision.Subcategory}, tags...)
 	}
+	if decision.Category != "" && !stringSliceContains(tags, decision.Category) {
+		tags = append([]string{decision.Category}, tags...)
+	}
 	if cfg.Tags {
 		fs.SetTags(dest, tags)
 	}

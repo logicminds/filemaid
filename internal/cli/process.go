@@ -317,19 +317,26 @@ func processPaths(paths []string) ([]processResult, error) {
 }
 
 // processTags returns the tags to display for a decision, including the
-// subcategory when present.
+// category and subcategory when present and not already in the LLM tags.
 func processTags(d llm.Decision) []string {
 	tags := make([]string, len(d.Tags))
 	copy(tags, d.Tags)
-	if d.Subcategory == "" {
-		return tags
+	if d.Subcategory != "" && !stringSliceContains(tags, d.Subcategory) {
+		tags = append([]string{d.Subcategory}, tags...)
 	}
-	for _, t := range tags {
-		if t == d.Subcategory {
-			return tags
+	if d.Category != "" && !stringSliceContains(tags, d.Category) {
+		tags = append([]string{d.Category}, tags...)
+	}
+	return tags
+}
+
+func stringSliceContains(ss []string, s string) bool {
+	for _, item := range ss {
+		if item == s {
+			return true
 		}
 	}
-	return append([]string{d.Subcategory}, tags...)
+	return false
 }
 
 // checkAgeRule returns a review Decision when a file matches a configured age

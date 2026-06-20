@@ -139,9 +139,9 @@ func encodeStringArrayPlist(items []string) []byte {
 		offsets = append(offsets, buf.Len())
 		data := []byte(s)
 		if len(data) < 15 {
-			buf.WriteByte(0x60 | byte(len(data)))
+			buf.WriteByte(0x50 | byte(len(data)))
 		} else {
-			buf.WriteByte(0x6F)
+			buf.WriteByte(0x5F)
 			writeInt(buf, int64(len(data)))
 		}
 		buf.Write(data)

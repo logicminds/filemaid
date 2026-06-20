@@ -1,11 +1,14 @@
 package actions
 
 import (
+	"encoding/binary"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf16"
 
 	"github.com/logicminds/filemaid/internal/config"
 	"github.com/logicminds/filemaid/internal/llm"
@@ -423,8 +426,8 @@ func TestApplySetsTags(t *testing.T) {
 	if len(fs.Tags) != 1 {
 		t.Fatalf("tagged %d times, want 1", len(fs.Tags))
 	}
-	if !stringSliceEqual(fs.Tags[0].Tags, []string{"image", "desktop"}) {
-		t.Errorf("tags = %v, want [image desktop]", fs.Tags[0].Tags)
+	if !stringSliceEqual(fs.Tags[0].Tags, []string{"Images", "image", "desktop"}) {
+		t.Errorf("tags = %v, want [Images image desktop]", fs.Tags[0].Tags)
 	}
 }
 
@@ -450,7 +453,7 @@ func TestApplyAddsSubcategoryAsTag(t *testing.T) {
 	if len(fs.Tags) != 1 {
 		t.Fatalf("tagged %d times, want 1", len(fs.Tags))
 	}
-	want := []string{"cat", "photo"}
+	want := []string{"Images", "cat", "photo"}
 	if !stringSliceEqual(fs.Tags[0].Tags, want) {
 		t.Errorf("tags = %v, want %v", fs.Tags[0].Tags, want)
 	}
@@ -478,7 +481,34 @@ func TestApplyDoesNotDuplicateSubcategoryTag(t *testing.T) {
 	if len(fs.Tags) != 1 {
 		t.Fatalf("tagged %d times, want 1", len(fs.Tags))
 	}
-	want := []string{"cat", "photo"}
+	want := []string{"Images", "cat", "photo"}
+	if !stringSliceEqual(fs.Tags[0].Tags, want) {
+		t.Errorf("tags = %v, want %v", fs.Tags[0].Tags, want)
+	}
+}
+func TestApplyDoesNotDuplicateCategoryTag(t *testing.T) {
+	tmp := t.TempDir()
+	cfg := testConfig(t, tmp)
+	cfg.Tags = true
+	db := state.NewFake()
+	fs := NewRecordingFS()
+
+	src := filepath.Join(tmp, "Desktop", "cat.png")
+	if err := os.MkdirAll(filepath.Dir(src), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(src, []byte("image"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	decision := llm.Decision{Category: "Images", Tags: []string{"Images", "photo"}, Action: "move", Reason: "png"}
+	if _, err := Apply(decision, src, mustHash(t, src), cfg, db, false, fs); err != nil {
+		t.Fatal(err)
+	}
+	if len(fs.Tags) != 1 {
+		t.Fatalf("tagged %d times, want 1", len(fs.Tags))
+	}
+	want := []string{"Images", "photo"}
 	if !stringSliceEqual(fs.Tags[0].Tags, want) {
 		t.Errorf("tags = %v, want %v", fs.Tags[0].Tags, want)
 	}
@@ -760,6 +790,15 @@ func TestEncodeStringArrayPlist(t *testing.T) {
 	if string(plist[:8]) != "bplist00" {
 		t.Errorf("bad header: %q", plist[:8])
 	}
+	// Verify the generated plist round-trips to the original strings.
+	got, err := parseStringArrayPlist(plist)
+	if err != nil {
+		t.Fatalf("parse generated plist: %v", err)
+	}
+	want := []string{"red", "blue"}
+	if !stringSliceEqual(got, want) {
+		t.Errorf("parsed tags = %v, want %v", got, want)
+	}
 }
 
 // mustHash computes the SHA-256 hash of path or fatals the test if the file
@@ -783,6 +822,132 @@ func stringSliceEqual(a, b []string) bool {
 		}
 	}
 	return true
+}
+
+// parseStringArrayPlist is a minimal binary plist parser sufficient to verify
+// that encodeStringArrayPlist emits a valid array of ASCII strings.
+func parseStringArrayPlist(data []byte) ([]string, error) {
+	if len(data) < 32 || string(data[:8]) != "bplist00" {
+		return nil, fmt.Errorf("invalid bplist header")
+	}
+
+	trailer := data[len(data)-32:]
+	offsetIntSize := int(trailer[6])
+	objectRefSize := int(trailer[7])
+	numObjects := int(binary.BigEndian.Uint64(trailer[8:16]))
+	topObject := int(binary.BigEndian.Uint64(trailer[16:24]))
+	offsetTableOffset := int(binary.BigEndian.Uint64(trailer[24:32]))
+
+	if offsetIntSize != 1 || objectRefSize != 1 {
+		return nil, fmt.Errorf("unsupported offset/ref size: %d/%d", offsetIntSize, objectRefSize)
+	}
+	if numObjects < 1 || topObject >= numObjects {
+		return nil, fmt.Errorf("invalid object count or top object")
+	}
+
+	offsetTable := make([]int, numObjects)
+	for i := 0; i < numObjects; i++ {
+		off := offsetTableOffset + i*offsetIntSize
+		if off < 0 || off >= len(data) {
+			return nil, fmt.Errorf("offset table entry %d out of range", i)
+		}
+		offsetTable[i] = int(data[off])
+	}
+
+	var parseObject func(int) ([]string, error)
+	parseObject = func(idx int) ([]string, error) {
+		if idx < 0 || idx >= numObjects {
+			return nil, fmt.Errorf("object index out of range: %d", idx)
+		}
+		off := offsetTable[idx]
+		if off < 0 || off >= len(data) {
+			return nil, fmt.Errorf("object offset out of range: %d", off)
+		}
+		marker := data[off]
+		switch {
+		case marker&0xF0 == 0xA0:
+			count := int(marker & 0x0F)
+			if count == 0x0F {
+				return nil, fmt.Errorf("extended array count not supported")
+			}
+			var result []string
+			for i := 0; i < count; i++ {
+				refOff := off + 1 + i*objectRefSize
+				if refOff >= len(data) {
+					return nil, fmt.Errorf("array ref %d out of range", i)
+				}
+				ref := int(data[refOff])
+				items, err := parseObject(ref)
+				if err != nil {
+					return nil, err
+				}
+				result = append(result, items...)
+			}
+			return result, nil
+		case marker&0xF0 == 0x50:
+			length := int(marker & 0x0F)
+			if length == 0x0F {
+				return nil, fmt.Errorf("extended string count not supported")
+			}
+			start := off + 1
+			end := start + length
+			if end > len(data) {
+				return nil, fmt.Errorf("string extends past data")
+			}
+			return []string{string(data[start:end])}, nil
+		case marker&0xF0 == 0x60:
+			length := int(marker & 0x0F)
+			start := off + 1
+			if length == 0x0F {
+				var n int64
+				switch data[off+1] {
+				case 0x10:
+					n = int64(data[off+2])
+					start = off + 3
+				case 0x11:
+					n = int64(binary.BigEndian.Uint16(data[off+2 : off+4]))
+					start = off + 4
+				case 0x12:
+					n = int64(binary.BigEndian.Uint32(data[off+2 : off+6]))
+					start = off + 6
+				case 0x13:
+					n = int64(binary.BigEndian.Uint64(data[off+2 : off+10]))
+					start = off + 10
+				default:
+					return nil, fmt.Errorf("unsupported unicode string length int marker: 0x%02X", data[off+1])
+				}
+				length = int(n)
+			}
+			end := start + length*2
+			if end > len(data) {
+				return nil, fmt.Errorf("unicode string extends past data")
+			}
+			utf16Bytes := data[start:end]
+			runes := make([]uint16, length)
+			for i := 0; i < length; i++ {
+				runes[i] = binary.BigEndian.Uint16(utf16Bytes[i*2 : (i+1)*2])
+			}
+			s := string(utf16.Decode(runes))
+			return []string{s}, nil
+		default:
+			return nil, fmt.Errorf("unexpected object marker: 0x%02X", marker)
+		}
+	}
+
+	return parseObject(topObject)
+}
+
+// parseStringPlist parses a minimal binary plist containing a single Unicode
+// string. It is sufficient to verify encodeStringPlist output.
+func parseStringPlist(data []byte) (string, error) {
+	items, err := parseStringArrayPlist(data)
+	if err != nil {
+		return "", err
+	}
+	if len(items) != 1 {
+		return "", fmt.Errorf("expected 1 object, got %d", len(items))
+	}
+	return items[0], nil
 }
 func TestExpandTilde(t *testing.T) {
 	tmp := t.TempDir()
@@ -861,16 +1026,32 @@ func TestOSFSSetFinderComment(t *testing.T) {
 }
 
 func TestEncodeStringPlist(t *testing.T) {
-	plist := encodeStringPlist("hello world")
+	want := "hello world"
+	plist := encodeStringPlist(want)
 	if string(plist[:8]) != "bplist00" {
 		t.Errorf("bad header: %q", plist[:8])
+	}
+	got, err := parseStringPlist(plist)
+	if err != nil {
+		t.Fatalf("parse generated plist: %v", err)
+	}
+	if got != want {
+		t.Errorf("parsed comment = %q, want %q", got, want)
 	}
 }
 
 func TestEncodeStringPlistLarge(t *testing.T) {
-	plist := encodeStringPlist("this is a very long comment that exceeds fifteen bytes")
+	want := "this is a very long comment that exceeds fifteen bytes"
+	plist := encodeStringPlist(want)
 	if string(plist[:8]) != "bplist00" {
 		t.Errorf("bad header: %q", plist[:8])
+	}
+	got, err := parseStringPlist(plist)
+	if err != nil {
+		t.Fatalf("parse generated plist: %v", err)
+	}
+	if got != want {
+		t.Errorf("parsed comment = %q, want %q", got, want)
 	}
 }
 
