@@ -30,6 +30,7 @@
   "comments": true,
   "subcategorize_images": true,
   "min_age_hours": 0,
+  "request_timeout": "120s",
   "categories": {
     "Screenshots": "~/Documents/Archive/Screenshots",
     "Documents": "~/Documents/Archive/Documents",
