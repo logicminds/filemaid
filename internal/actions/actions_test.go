@@ -1,16 +1,15 @@
 package actions
 
 import (
-	"encoding/binary"
-	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"sync"
 	"testing"
 	"time"
-	"unicode/utf16"
 
 	"github.com/logicminds/filemaid/internal/config"
 	"github.com/logicminds/filemaid/internal/llm"
@@ -1279,131 +1278,6 @@ func stringSliceEqual(a, b []string) bool {
 	return true
 }
 
-// parseStringArrayPlist is a minimal binary plist parser sufficient to verify
-// that encodeStringArrayPlist emits a valid array of ASCII strings.
-func parseStringArrayPlist(data []byte) ([]string, error) {
-	if len(data) < 32 || string(data[:8]) != "bplist00" {
-		return nil, fmt.Errorf("invalid bplist header")
-	}
-
-	trailer := data[len(data)-32:]
-	offsetIntSize := int(trailer[6])
-	objectRefSize := int(trailer[7])
-	numObjects := int(binary.BigEndian.Uint64(trailer[8:16]))
-	topObject := int(binary.BigEndian.Uint64(trailer[16:24]))
-	offsetTableOffset := int(binary.BigEndian.Uint64(trailer[24:32]))
-
-	if offsetIntSize != 1 || objectRefSize != 1 {
-		return nil, fmt.Errorf("unsupported offset/ref size: %d/%d", offsetIntSize, objectRefSize)
-	}
-	if numObjects < 1 || topObject >= numObjects {
-		return nil, fmt.Errorf("invalid object count or top object")
-	}
-
-	offsetTable := make([]int, numObjects)
-	for i := 0; i < numObjects; i++ {
-		off := offsetTableOffset + i*offsetIntSize
-		if off < 0 || off >= len(data) {
-			return nil, fmt.Errorf("offset table entry %d out of range", i)
-		}
-		offsetTable[i] = int(data[off])
-	}
-
-	var parseObject func(int) ([]string, error)
-	parseObject = func(idx int) ([]string, error) {
-		if idx < 0 || idx >= numObjects {
-			return nil, fmt.Errorf("object index out of range: %d", idx)
-		}
-		off := offsetTable[idx]
-		if off < 0 || off >= len(data) {
-			return nil, fmt.Errorf("object offset out of range: %d", off)
-		}
-		marker := data[off]
-		switch {
-		case marker&0xF0 == 0xA0:
-			count := int(marker & 0x0F)
-			if count == 0x0F {
-				return nil, fmt.Errorf("extended array count not supported")
-			}
-			var result []string
-			for i := 0; i < count; i++ {
-				refOff := off + 1 + i*objectRefSize
-				if refOff >= len(data) {
-					return nil, fmt.Errorf("array ref %d out of range", i)
-				}
-				ref := int(data[refOff])
-				items, err := parseObject(ref)
-				if err != nil {
-					return nil, err
-				}
-				result = append(result, items...)
-			}
-			return result, nil
-		case marker&0xF0 == 0x50:
-			length := int(marker & 0x0F)
-			if length == 0x0F {
-				return nil, fmt.Errorf("extended string count not supported")
-			}
-			start := off + 1
-			end := start + length
-			if end > len(data) {
-				return nil, fmt.Errorf("string extends past data")
-			}
-			return []string{string(data[start:end])}, nil
-		case marker&0xF0 == 0x60:
-			length := int(marker & 0x0F)
-			start := off + 1
-			if length == 0x0F {
-				var n int64
-				switch data[off+1] {
-				case 0x10:
-					n = int64(data[off+2])
-					start = off + 3
-				case 0x11:
-					n = int64(binary.BigEndian.Uint16(data[off+2 : off+4]))
-					start = off + 4
-				case 0x12:
-					n = int64(binary.BigEndian.Uint32(data[off+2 : off+6]))
-					start = off + 6
-				case 0x13:
-					n = int64(binary.BigEndian.Uint64(data[off+2 : off+10]))
-					start = off + 10
-				default:
-					return nil, fmt.Errorf("unsupported unicode string length int marker: 0x%02X", data[off+1])
-				}
-				length = int(n)
-			}
-			end := start + length*2
-			if end > len(data) {
-				return nil, fmt.Errorf("unicode string extends past data")
-			}
-			utf16Bytes := data[start:end]
-			runes := make([]uint16, length)
-			for i := 0; i < length; i++ {
-				runes[i] = binary.BigEndian.Uint16(utf16Bytes[i*2 : (i+1)*2])
-			}
-			s := string(utf16.Decode(runes))
-			return []string{s}, nil
-		default:
-			return nil, fmt.Errorf("unexpected object marker: 0x%02X", marker)
-		}
-	}
-
-	return parseObject(topObject)
-}
-
-// parseStringPlist parses a minimal binary plist containing a single Unicode
-// string. It is sufficient to verify encodeStringPlist output.
-func parseStringPlist(data []byte) (string, error) {
-	items, err := parseStringArrayPlist(data)
-	if err != nil {
-		return "", err
-	}
-	if len(items) != 1 {
-		return "", fmt.Errorf("expected 1 object, got %d", len(items))
-	}
-	return items[0], nil
-}
 func TestExpandTilde(t *testing.T) {
 	tmp := t.TempDir()
 	t.Setenv("HOME", tmp)
@@ -1641,5 +1515,272 @@ func TestOSFSBatchesMDImportPerDistinctDirectories(t *testing.T) {
 	sort.Strings(calls)
 	if calls[0] != dirA || calls[1] != dirB {
 		t.Errorf("unexpected calls: %v", calls)
+	}
+}
+func TestMergeTags(t *testing.T) {
+	cases := []struct {
+		name     string
+		existing []string
+		new      []string
+		want     []string
+	}{
+		{
+			name:     "empty existing writes new tags",
+			existing: nil,
+			new:      []string{"red", "blue"},
+			want:     []string{"red", "blue"},
+		},
+		{
+			name:     "merges without duplicates",
+			existing: []string{"red", "green"},
+			new:      []string{"blue", "yellow"},
+			want:     []string{"red", "green", "blue", "yellow"},
+		},
+		{
+			name:     "case insensitive dedup prefers new casing",
+			existing: []string{"images", "photo"},
+			new:      []string{"Images", "new"},
+			want:     []string{"Images", "photo", "new"},
+		},
+		{
+			name:     "new tag earlier in list updates casing of existing",
+			existing: []string{"documents", "work"},
+			new:      []string{"Documents", "work"},
+			want:     []string{"Documents", "work"},
+		},
+		{
+			name:     "exact duplicates removed",
+			existing: []string{"a", "b"},
+			new:      []string{"a", "c"},
+			want:     []string{"a", "b", "c"},
+		},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := mergeTags(c.existing, c.new)
+			if !stringSliceEqual(got, c.want) {
+				t.Errorf("mergeTags(%v, %v) = %v, want %v", c.existing, c.new, got, c.want)
+			}
+		})
+	}
+}
+
+func TestMergeFinderComment(t *testing.T) {
+	cases := []struct {
+		name     string
+		existing string
+		reason   string
+		want     string
+	}{
+		{
+			name:     "empty existing writes reason",
+			existing: "",
+			reason:   "classified as document",
+			want:     "classified as document",
+		},
+		{
+			name:     "appends with separator",
+			existing: "classified as document",
+			reason:   "moved to Documents",
+			want:     "classified as document; moved to Documents",
+		},
+		{
+			name:     "skips exact duplicate",
+			existing: "classified as document",
+			reason:   "classified as document",
+			want:     "classified as document",
+		},
+		{
+			name:     "skips case insensitive duplicate",
+			existing: "Classified as Document",
+			reason:   "classified as document",
+			want:     "Classified as Document",
+		},
+		{
+			name:     "skips when reason is substring",
+			existing: "classified as document; moved to Documents",
+			reason:   "document",
+			want:     "classified as document; moved to Documents",
+		},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := mergeFinderComment(c.existing, c.reason)
+			if got != c.want {
+				t.Errorf("mergeFinderComment(%q, %q) = %q, want %q", c.existing, c.reason, got, c.want)
+			}
+		})
+	}
+}
+
+func requireXattr(t *testing.T) {
+	t.Helper()
+	if runtime.GOOS != "darwin" {
+		t.Skip("xattr tests require macOS")
+	}
+	if _, err := exec.LookPath("xattr"); err != nil {
+		t.Skip("xattr binary not found")
+	}
+}
+
+func TestReadFinderTagsRoundTrip(t *testing.T) {
+	requireXattr(t)
+	tmp := t.TempDir()
+	path := filepath.Join(tmp, "tagged.txt")
+	if err := os.WriteFile(path, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	fs := NewOSFS()
+	fs.SetTags(path, []string{"red", "blue"})
+
+	got, err := readFinderTags(path)
+	if err != nil {
+		t.Fatalf("readFinderTags: %v", err)
+	}
+	want := []string{"red", "blue"}
+	if !stringSliceEqual(got, want) {
+		t.Errorf("tags = %v, want %v", got, want)
+	}
+}
+
+func TestReadFinderCommentRoundTrip(t *testing.T) {
+	requireXattr(t)
+	tmp := t.TempDir()
+	path := filepath.Join(tmp, "commented.txt")
+	if err := os.WriteFile(path, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	fs := NewOSFS()
+	fs.SetFinderComment(path, "classified as document")
+
+	got, err := readFinderComment(path)
+	if err != nil {
+		t.Fatalf("readFinderComment: %v", err)
+	}
+	want := "classified as document"
+	if got != want {
+		t.Errorf("comment = %q, want %q", got, want)
+	}
+}
+
+func TestOSFSSetTagsMergesWithExisting(t *testing.T) {
+	requireXattr(t)
+	tmp := t.TempDir()
+	path := filepath.Join(tmp, "tagged.txt")
+	if err := os.WriteFile(path, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	fs := NewOSFS()
+	fs.SetTags(path, []string{"images", "photo"})
+	fs.SetTags(path, []string{"Images", "new"})
+
+	got, err := readFinderTags(path)
+	if err != nil {
+		t.Fatalf("readFinderTags: %v", err)
+	}
+	want := []string{"Images", "photo", "new"}
+	if !stringSliceEqual(got, want) {
+		t.Errorf("merged tags = %v, want %v", got, want)
+	}
+}
+
+func TestOSFSSetFinderCommentAppends(t *testing.T) {
+	requireXattr(t)
+	tmp := t.TempDir()
+	path := filepath.Join(tmp, "commented.txt")
+	if err := os.WriteFile(path, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	fs := NewOSFS()
+	fs.SetFinderComment(path, "classified as document")
+	fs.SetFinderComment(path, "moved to Documents")
+
+	got, err := readFinderComment(path)
+	if err != nil {
+		t.Fatalf("readFinderComment: %v", err)
+	}
+	want := "classified as document; moved to Documents"
+	if got != want {
+		t.Errorf("merged comment = %q, want %q", got, want)
+	}
+}
+
+func TestOSFSSetFinderCommentSkipsDuplicate(t *testing.T) {
+	requireXattr(t)
+	tmp := t.TempDir()
+	path := filepath.Join(tmp, "commented.txt")
+	if err := os.WriteFile(path, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	fs := NewOSFS()
+	fs.SetFinderComment(path, "classified as document")
+	fs.SetFinderComment(path, "classified as document")
+
+	got, err := readFinderComment(path)
+	if err != nil {
+		t.Fatalf("readFinderComment: %v", err)
+	}
+	want := "classified as document"
+	if got != want {
+		t.Errorf("comment = %q, want %q", got, want)
+	}
+}
+
+func TestOSFSSetTagsFallbackOnInvalidExisting(t *testing.T) {
+	requireXattr(t)
+	tmp := t.TempDir()
+	path := filepath.Join(tmp, "tagged.txt")
+	if err := os.WriteFile(path, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Write an invalid xattr value that readFinderTags cannot parse.
+	if err := exec.Command("xattr", "-w", "-x", "com.apple.metadata:_kMDItemUserTags", "deadbeef", path).Run(); err != nil {
+		t.Fatalf("write invalid xattr: %v", err)
+	}
+
+	fs := NewOSFS()
+	fs.SetTags(path, []string{"red", "blue"})
+
+	got, err := readFinderTags(path)
+	if err != nil {
+		t.Fatalf("readFinderTags after fallback write: %v", err)
+	}
+	want := []string{"red", "blue"}
+	if !stringSliceEqual(got, want) {
+		t.Errorf("tags after fallback = %v, want %v", got, want)
+	}
+}
+
+func TestOSFSSetFinderCommentFallbackOnInvalidExisting(t *testing.T) {
+	requireXattr(t)
+	tmp := t.TempDir()
+	path := filepath.Join(tmp, "commented.txt")
+	if err := os.WriteFile(path, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Write an invalid xattr value that readFinderComment cannot parse.
+	if err := exec.Command("xattr", "-w", "-x", "com.apple.metadata:kMDItemFinderComment", "deadbeef", path).Run(); err != nil {
+		t.Fatalf("write invalid xattr: %v", err)
+	}
+
+	fs := NewOSFS()
+	fs.SetFinderComment(path, "classified as document")
+
+	got, err := readFinderComment(path)
+	if err != nil {
+		t.Fatalf("readFinderComment after fallback write: %v", err)
+	}
+	want := "classified as document"
+	if got != want {
+		t.Errorf("comment after fallback = %q, want %q", got, want)
 	}
 }
