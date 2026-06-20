@@ -303,6 +303,7 @@ func readRequestBody(req *http.Request) map[string]any {
 	_ = json.Unmarshal(data, &body)
 	return body
 }
+
 // chatImageCount returns the number of image payloads attached to the user
 // message in an /api/chat request body.
 func chatImageCount(body map[string]any) int {
@@ -800,7 +801,6 @@ func TestBuildPromptNonImageUnchanged(t *testing.T) {
 	}
 }
 
-
 func TestClassifierInterface(t *testing.T) {
 	tmp := t.TempDir()
 	cfg := baseConfig(t, tmp)
@@ -934,6 +934,31 @@ func TestValidateFailsWhenModelMissing(t *testing.T) {
 	cfg.Model = "filemaid-test"
 	if err := client.Validate(cfg); err == nil {
 		t.Fatal("expected error when model is missing")
+	}
+}
+
+func TestValidateFailsWhenImageModelMissing(t *testing.T) {
+	transport := &fakeTransport{
+		handler: func(req *http.Request) (*http.Response, error) {
+			if strings.HasSuffix(req.URL.String(), "/api/tags") {
+				return jsonResponse(map[string]any{
+					"models": []any{
+						map[string]any{"name": "filemaid-test"},
+						map[string]any{"name": "filemaid-metadata"},
+					},
+				}), nil
+			}
+			return jsonResponse(map[string]any{}), nil
+		},
+	}
+
+	client := NewClient(transport)
+	cfg := baseConfig(t, t.TempDir())
+	cfg.Model = "filemaid-test"
+	cfg.ImageModel = "filemaid-vision"
+	cfg.TextModel = "filemaid-metadata"
+	if err := client.Validate(cfg); err == nil {
+		t.Fatal("expected error when image model is missing")
 	}
 }
 

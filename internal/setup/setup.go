@@ -409,28 +409,34 @@ func (i *Installer) Install(opts InstallOptions) error {
 		}
 	}
 
-	var exists bool
+	preInstallModels := dedupeStrings([]string{candidate, "filemaid-metadata"})
+
+	var allExist bool
 	var free, required uint64
 	var diskErr error
 	if info.OllamaRunning {
-		exists, err = i.modelExists(candidate)
+		missing, err := i.missingModels(preInstallModels)
 		if err != nil {
 			return fmt.Errorf("list ollama models: %w", err)
 		}
-		if !exists {
-			free, required, diskErr = i.ollamaFreeSpace(candidate)
+		allExist = len(missing) == 0
+		if !allExist {
+			free, required, diskErr = i.ollamaFreeSpace(missing)
 			if diskErr != nil {
 				return diskErr
 			}
 		}
 	} else {
-		required = modelSpaceRequirements[candidate]
-		if required == 0 {
-			required = modelSpaceRequirements["filemaid-gemma4-26b"]
+		for _, m := range preInstallModels {
+			r := modelSpaceRequirements[m]
+			if r == 0 {
+				r = modelSpaceRequirements["filemaid-gemma4-26b"]
+			}
+			required += r
 		}
 	}
 
-	ok := printRequirementsCheck(info, candidate, exists, free, required)
+	ok := printRequirementsCheck(info, preInstallModels, allExist, free, required)
 	if !info.OllamaInstalled {
 		printOllamaInstructions()
 		return fmt.Errorf("ollama not found")
@@ -444,7 +450,7 @@ func (i *Installer) Install(opts InstallOptions) error {
 		return fmt.Errorf("ollama not running")
 	}
 	if !ok {
-		return fmt.Errorf("not enough disk space to download model %s", candidate)
+		return fmt.Errorf("not enough disk space to download models")
 	}
 
 	binDir := opts.BinDir
@@ -494,7 +500,14 @@ func (i *Installer) Install(opts InstallOptions) error {
 	}
 
 	dstConfig := filepath.Join(configDir, "config.json")
-	overrides := map[string]any{"model": modelName}
+	overrides := map[string]any{
+		"model":       "filemaid-metadata",
+		"image_model": modelName,
+		"text_model":  "filemaid-metadata",
+	}
+	if modelName == "filemaid-metadata" {
+		overrides["image_model"] = "filemaid-metadata"
+	}
 	if opts.Interactive {
 		overrides, err = interviewConfig(reader, overrides)
 		if err != nil {
@@ -504,6 +517,8 @@ func (i *Installer) Install(opts InstallOptions) error {
 	if err := i.copyDefaultConfig(dstConfig, overrides); err != nil {
 		return fmt.Errorf("copy config: %w", err)
 	}
+
+	models := dedupeStrings([]string{modelName, "filemaid-metadata"})
 
 	dstModelfiles := filepath.Join(configDir, "modelfiles")
 	if err := i.copyModelfiles(dstModelfiles); err != nil {
@@ -555,7 +570,7 @@ func (i *Installer) Install(opts InstallOptions) error {
 		}
 	}
 
-	if err := i.createOllamaModels(configDir, modelName); err != nil {
+	if err := i.createOllamaModels(configDir, models); err != nil {
 		return fmt.Errorf("create ollama models: %w", err)
 	}
 
@@ -639,11 +654,15 @@ func (i *Installer) copyDefaultConfig(dst string, overrides map[string]any) erro
 }
 
 // ollamaFreeSpace returns the free bytes available for Ollama models and the
-// approximate bytes required to download and create the named model.
-func (i *Installer) ollamaFreeSpace(model string) (uint64, uint64, error) {
-	required, ok := modelSpaceRequirements[model]
-	if !ok {
-		required = modelSpaceRequirements["filemaid-gemma4-26b"]
+// approximate bytes required to download and create the named models.
+func (i *Installer) ollamaFreeSpace(models []string) (uint64, uint64, error) {
+	var required uint64
+	for _, m := range models {
+		r, ok := modelSpaceRequirements[m]
+		if !ok {
+			r = modelSpaceRequirements["filemaid-gemma4-26b"]
+		}
+		required += r
 	}
 
 	dir := ollamaModelsDir(i.Home)
@@ -667,22 +686,22 @@ func (i *Installer) ollamaFreeSpace(model string) (uint64, uint64, error) {
 }
 
 // checkDiskSpace returns an error if there is not enough free disk space to
-// download and create the selected model. It should only be called when the
-// model is missing from Ollama; existing models do not need extra space.
-func (i *Installer) checkDiskSpace(model string) error {
-	free, required, err := i.ollamaFreeSpace(model)
+// download and create the named models. It should only be called when at least
+// one model is missing from Ollama; existing models do not need extra space.
+func (i *Installer) checkDiskSpace(models []string) error {
+	free, required, err := i.ollamaFreeSpace(models)
 	if err != nil {
 		return err
 	}
 	if free < required {
-		return fmt.Errorf("not enough disk space to download model %s: %s available, %s required", model, formatBytes(free), formatBytes(required))
+		return fmt.Errorf("not enough disk space to download models: %s available, %s required", formatBytes(free), formatBytes(required))
 	}
 	return nil
 }
 
 // printRequirementsCheck prints a checklist of host requirements with emoji
 // checkmarks or crosses. It returns true when every hard requirement passes.
-func printRequirementsCheck(info *systemInfo, model string, modelExists bool, free, required uint64) bool {
+func printRequirementsCheck(info *systemInfo, models []string, allExist bool, free, required uint64) bool {
 	ok := true
 	fmt.Fprintln(os.Stderr)
 	fmt.Fprintln(os.Stderr, "Requirements check:")
@@ -694,98 +713,107 @@ func printRequirementsCheck(info *systemInfo, model string, modelExists bool, fr
 		return "❌"
 	}
 
+	primary := ""
+	if len(models) > 0 {
+		primary = models[0]
+	}
+
 	fmt.Fprintf(os.Stderr, "  %s Ollama installed\n", mark(info.OllamaInstalled))
 	fmt.Fprintf(os.Stderr, "  %s Ollama running\n", mark(info.OllamaRunning))
 	fmt.Fprintf(os.Stderr, "  %s Memory: %d GB\n", mark(info.TotalMemoryGB > 0), info.TotalMemoryGB)
-	fmt.Fprintf(os.Stderr, "  %s Selected model: %s", mark(true), model)
-	if modelExists {
+	fmt.Fprintf(os.Stderr, "  %s Selected model: %s", mark(true), primary)
+	if allExist {
 		fmt.Fprintln(os.Stderr, " (already downloaded)")
 	} else {
 		fmt.Fprintln(os.Stderr)
 	}
+	if len(models) > 1 {
+		fmt.Fprintf(os.Stderr, "  %s Metadata model %s will also be installed\n", mark(true), models[1])
+	}
 
-	if modelExists {
-		fmt.Fprintf(os.Stderr, "  %s Disk space for new model: not needed (model already present)\n", mark(true))
+	if allExist {
+		fmt.Fprintf(os.Stderr, "  %s Disk space for new models: not needed (models already present)\n", mark(true))
 	} else {
 		hasSpace := free >= required
 		if !hasSpace {
 			ok = false
 		}
-		fmt.Fprintf(os.Stderr, "  %s Disk space for %s: %s available, %s required\n", mark(hasSpace), model, formatBytes(free), formatBytes(required))
+		fmt.Fprintf(os.Stderr, "  %s Disk space for models: %s available, %s required\n", mark(hasSpace), formatBytes(free), formatBytes(required))
 	}
 
 	fmt.Fprintln(os.Stderr)
 	return ok
 }
 
-// createOllamaModels creates or recreates the selected Ollama model only when
-// the embedded Modelfile has changed since the last setup. Modelfiles for all
-// variants are copied to disk so users can switch models by editing config.json
-// and running `ollama create` manually.
-// createOllamaModels creates or recreates the selected Ollama model when it is
-// missing from `ollama list` or when the embedded Modelfile has changed since
-// the last setup. Modelfiles for all variants are copied to disk so users can
-// switch models by editing config.json and running `ollama create` manually.
-func (i *Installer) createOllamaModels(configDir, selectedModel string) error {
+// createOllamaModels creates or recreates each Ollama model in models when it
+// is missing from `ollama list` or when the embedded Modelfile has changed
+// since the last setup. Modelfiles for all variants are copied to disk so users
+// can switch models by editing config.json and running `ollama create` manually.
+func (i *Installer) createOllamaModels(configDir string, models []string) error {
 	if _, err := i.Runner.LookPath("ollama"); err != nil {
 		return err
 	}
-	data, err := assets.ReadModelfile("Modelfile." + selectedModel)
-	if err != nil {
-		return fmt.Errorf("read embedded modelfile %s: %w", selectedModel, err)
-	}
-	hash := hashBytes(data)
-	models, err := i.listOllamaModels()
+
+	existingModels, err := i.listOllamaModels()
 	if err != nil {
 		return fmt.Errorf("list ollama models: %w", err)
 	}
-	exists := false
-	for _, name := range models {
-		if name == selectedModel || strings.HasPrefix(name, selectedModel+":") {
-			exists = true
-			break
+
+	var missing []string
+	for _, m := range models {
+		if !modelExistsInList(existingModels, m) {
+			missing = append(missing, m)
 		}
 	}
-
-	if !exists {
-		if err := i.checkDiskSpace(selectedModel); err != nil {
+	if len(missing) > 0 {
+		if err := i.checkDiskSpace(missing); err != nil {
 			return err
 		}
 	}
 
-	if previous, ok := i.readStoredModelHash(selectedModel); ok && previous == hash && exists {
-		slog.Debug("ollama model up to date", "model", selectedModel, "hash", hash)
-		return nil
+	for _, model := range models {
+		data, err := assets.ReadModelfile("Modelfile." + model)
+		if err != nil {
+			return fmt.Errorf("read embedded modelfile %s: %w", model, err)
+		}
+		hash := hashBytes(data)
+		exists := modelExistsInList(existingModels, model)
+
+		if previous, ok := i.readStoredModelHash(model); ok && previous == hash && exists {
+			slog.Debug("ollama model up to date", "model", model, "hash", hash)
+			continue
+		}
+
+		path := filepath.Join(configDir, "modelfiles", "Modelfile."+model)
+
+		fmt.Fprintln(os.Stderr)
+		if exists {
+			fmt.Fprintf(os.Stderr, "Modelfile for %q changed; recreating the Ollama model.\n", model)
+		} else {
+			fmt.Fprintf(os.Stderr, "Creating Ollama model %q. This may download several gigabytes and take a few minutes.\n", model)
+		}
+		fmt.Fprintln(os.Stderr, "Do not interrupt the download.")
+		fmt.Fprintln(os.Stderr)
+
+		// Build a deterministic, short tag from the modelfile hash so recreated
+		// models are versioned and the previous latest can be removed.
+		tag := "v" + hash[:12]
+		versionedModel := model + ":" + tag
+
+		if err := i.Runner.Run("ollama", "create", versionedModel, "-f", path); err != nil {
+			return fmt.Errorf("create model %s: %w", versionedModel, err)
+		}
+
+		if err := i.waitForModel(versionedModel); err != nil {
+			return fmt.Errorf("model %s did not appear in ollama list after create: %w", versionedModel, err)
+		}
+
+		// Keep only the current version for this model family.
+		i.removeOllamaModels(existingModels, model, tag)
+
+		fmt.Fprintf(os.Stderr, "Model %q is ready.\n", versionedModel)
 	}
 
-	path := filepath.Join(configDir, "modelfiles", "Modelfile."+selectedModel)
-
-	fmt.Fprintln(os.Stderr)
-	if exists {
-		fmt.Fprintf(os.Stderr, "Modelfile for %q changed; recreating the Ollama model.\n", selectedModel)
-	} else {
-		fmt.Fprintf(os.Stderr, "Creating Ollama model %q. This may download several gigabytes and take a few minutes.\n", selectedModel)
-	}
-	fmt.Fprintln(os.Stderr, "Do not interrupt the download.")
-	fmt.Fprintln(os.Stderr)
-
-	// Build a deterministic, short tag from the modelfile hash so recreated
-	// models are versioned and the previous latest can be removed.
-	tag := "v" + hash[:12]
-	versionedModel := selectedModel + ":" + tag
-
-	if err := i.Runner.Run("ollama", "create", versionedModel, "-f", path); err != nil {
-		return fmt.Errorf("create model %s: %w", versionedModel, err)
-	}
-
-	if err := i.waitForModel(versionedModel); err != nil {
-		return fmt.Errorf("model %s did not appear in ollama list after create: %w", versionedModel, err)
-	}
-
-	// Keep only the current version for this model family.
-	i.removeOllamaModels(models, selectedModel, tag)
-
-	fmt.Fprintf(os.Stderr, "Model %q is ready.\n", versionedModel)
 	return nil
 }
 
@@ -814,6 +842,32 @@ func (i *Installer) modelExists(model string) (bool, error) {
 		return false, err
 	}
 	return modelExistsInOutput(output, model), nil
+}
+
+// missingModels returns the subset of models that are not present in Ollama.
+func (i *Installer) missingModels(models []string) ([]string, error) {
+	existing, err := i.listOllamaModels()
+	if err != nil {
+		return nil, err
+	}
+	var missing []string
+	for _, m := range models {
+		if !modelExistsInList(existing, m) {
+			missing = append(missing, m)
+		}
+	}
+	return missing, nil
+}
+
+// modelExistsInList reports whether want appears in models, with or without a
+// tag suffix.
+func modelExistsInList(models []string, want string) bool {
+	for _, name := range models {
+		if name == want || strings.HasPrefix(name, want+":") {
+			return true
+		}
+	}
+	return false
 }
 
 // listOllamaModels returns the parsed model names from `ollama list` output.

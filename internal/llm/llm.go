@@ -11,8 +11,8 @@ import (
 	"image"
 	"image/color"
 	_ "image/gif"
-	_ "image/png"
 	"image/jpeg"
+	_ "image/png"
 	"io"
 	"math"
 	"net/http"
@@ -43,6 +43,7 @@ func NewDecision() Decision {
 		Action:   "review",
 	}
 }
+
 // Classifier turns a file path into a classification Decision.
 type Classifier interface {
 	// Classify classifies a single file and returns a Decision.
@@ -252,16 +253,22 @@ func modelMatch(want, have string) bool {
 	return false
 }
 
-// Validate checks that Ollama is reachable and that the configured model can
-// generate a response. It returns an error if the model is missing, Ollama is
+// Validate checks that Ollama is reachable and that the configured models can
+// generate a response. It returns an error if a model is missing, Ollama is
 // unreachable, or the model fails to generate. Commands should call Validate
 // before performing any file operations that depend on classification.
 func (c *Client) Validate(cfg *config.Config) error {
-	if err := c.checkModel(cfg.OllamaURL, cfg.Model); err != nil {
-		return err
+	ollamaURL := strings.TrimRight(cfg.OllamaURL, "/")
+
+	for _, model := range []string{cfg.Model, cfg.ImageModel, cfg.TextModel} {
+		if model == "" {
+			continue
+		}
+		if err := c.checkModel(ollamaURL, model); err != nil {
+			return err
+		}
 	}
 
-	ollamaURL := strings.TrimRight(cfg.OllamaURL, "/")
 	body := map[string]any{
 		"model":  cfg.Model,
 		"prompt": "Reply with the single word OK.",
@@ -292,7 +299,6 @@ var imageExts = map[string]bool{
 	".heic": true,
 }
 
-
 // IsImageFile reports whether path has an extension treated as an image for
 // classification purposes. It is used by callers to route files to the
 // configured image model.
@@ -300,6 +306,7 @@ func IsImageFile(path string) bool {
 	ext := strings.ToLower(filepath.Ext(path))
 	return imageExts[ext]
 }
+
 var textExts = map[string]bool{
 	".txt":   true,
 	".md":    true,
@@ -483,7 +490,6 @@ func lerp(a, b uint32, t float64) uint32 {
 	return uint32(float64(a)*(1.0-t) + float64(b)*t)
 }
 
-
 func buildPrompt(path string, cfg *config.Config) (string, []string, error) {
 	stat, err := os.Stat(path)
 	if err != nil {
@@ -565,9 +571,9 @@ func (c *Client) requestGenerate(ollamaURL, model, prompt string, images []strin
 		"system": ("You classify files for a macOS file manager. " +
 			"Output valid JSON only with keys category, subcategory, tags, action, destination, reason. " +
 			"No markdown, no code fences, no extra text."),
-		"prompt": prompt,
-		"images": images,
-		"stream": false,
+		"prompt":     prompt,
+		"images":     images,
+		"stream":     false,
 		"keep_alive": "5m",
 		"options": map[string]any{
 			"temperature": 0.2,
@@ -600,8 +606,8 @@ func (c *Client) requestChat(ollamaURL, model, prompt string, images []string, c
 				"images":  images,
 			},
 		},
-		"tools":  []map[string]any{toolSchema(catList)},
-		"stream": false,
+		"tools":      []map[string]any{toolSchema(catList)},
+		"stream":     false,
 		"keep_alive": "5m",
 		"options": map[string]any{
 			"temperature": 0.2,
