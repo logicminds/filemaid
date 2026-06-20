@@ -140,7 +140,8 @@ func formatBytes(b uint64) string {
 	}
 }
 
-// selectModel picks the model to install.
+// selectModel picks the vision model to use for image classification.
+// filemaid-metadata is always used for text and documents.
 // If opts.ModelName is set, it is validated and used.
 // If opts.Interactive is false and no model is set, the RAM-based
 // recommendation is used without prompting.
@@ -159,8 +160,11 @@ func selectModel(opts InstallOptions, info *systemInfo, reader *bufio.Reader) (s
 	}
 
 	fmt.Fprintf(os.Stderr, "\nDetected %d GB of memory.\n", info.TotalMemoryGB)
-	fmt.Fprintf(os.Stderr, "Recommended model: %s\n", info.Recommended)
-	fmt.Fprintln(os.Stderr, "Available models:")
+	fmt.Fprintf(os.Stderr, "filemaid uses two Ollama models:\n")
+	fmt.Fprintf(os.Stderr, "  • Text/documents model: filemaid-metadata (always installed)\n")
+	fmt.Fprintf(os.Stderr, "  • Image/vision model: your choice below\n")
+	fmt.Fprintf(os.Stderr, "Recommended vision model: %s\n", info.Recommended)
+	fmt.Fprintln(os.Stderr, "Available vision models:")
 	for i, c := range info.Choices {
 		marker := " "
 		if c == info.Recommended {
@@ -168,7 +172,7 @@ func selectModel(opts InstallOptions, info *systemInfo, reader *bufio.Reader) (s
 		}
 		fmt.Fprintf(os.Stderr, "  %s %d) %s\n", marker, i+1, c)
 	}
-	fmt.Fprintf(os.Stderr, "Press Enter to use %s, or type 1-%d to choose another: ", info.Recommended, len(info.Choices))
+	fmt.Fprintf(os.Stderr, "Press Enter to use %s for images, or type 1-%d to choose another vision model: ", info.Recommended, len(info.Choices))
 
 	line, err := reader.ReadString('\n')
 	if err != nil {
@@ -483,7 +487,12 @@ func (i *Installer) Install(opts InstallOptions) error {
 		return err
 	}
 
-	fmt.Fprintf(os.Stderr, "\nUsing model: %s\n\n", modelName)
+	if modelName == "filemaid-metadata" {
+		fmt.Fprintf(os.Stderr, "\nUsing filemaid-metadata for both text and images.\n\n")
+	} else {
+		fmt.Fprintf(os.Stderr, "\nUsing %s for images.\n", modelName)
+		fmt.Fprintf(os.Stderr, "Using filemaid-metadata for text and documents.\n\n")
+	}
 
 	exe := i.ExecutablePath
 	if exe == "" {
@@ -717,18 +726,31 @@ func printRequirementsCheck(info *systemInfo, models []string, allExist bool, fr
 	if len(models) > 0 {
 		primary = models[0]
 	}
+	visionModel := primary
+	textModel := "filemaid-metadata"
+	if len(models) > 1 {
+		textModel = models[1]
+	}
 
 	fmt.Fprintf(os.Stderr, "  %s Ollama installed\n", mark(info.OllamaInstalled))
 	fmt.Fprintf(os.Stderr, "  %s Ollama running\n", mark(info.OllamaRunning))
 	fmt.Fprintf(os.Stderr, "  %s Memory: %d GB\n", mark(info.TotalMemoryGB > 0), info.TotalMemoryGB)
-	fmt.Fprintf(os.Stderr, "  %s Selected model: %s", mark(true), primary)
-	if allExist {
-		fmt.Fprintln(os.Stderr, " (already downloaded)")
+
+	if visionModel == textModel {
+		fmt.Fprintf(os.Stderr, "  %s Model for all files: %s", mark(true), visionModel)
+		if allExist {
+			fmt.Fprintln(os.Stderr, " (already downloaded)")
+		} else {
+			fmt.Fprintln(os.Stderr)
+		}
 	} else {
-		fmt.Fprintln(os.Stderr)
-	}
-	if len(models) > 1 {
-		fmt.Fprintf(os.Stderr, "  %s Metadata model %s will also be installed\n", mark(true), models[1])
+		fmt.Fprintf(os.Stderr, "  %s Vision model for images: %s", mark(true), visionModel)
+		if allExist {
+			fmt.Fprintln(os.Stderr, " (already downloaded)")
+		} else {
+			fmt.Fprintln(os.Stderr)
+		}
+		fmt.Fprintf(os.Stderr, "  %s Text model for documents: %s (always installed)\n", mark(true), textModel)
 	}
 
 	if allExist {
