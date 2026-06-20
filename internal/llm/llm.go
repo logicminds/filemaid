@@ -74,9 +74,10 @@ type Client struct {
 
 	mu      sync.Mutex
 	checked struct {
-		url   string
-		model string
-		err   error
+		url      string
+		model    string
+		resolved string
+		err      error
 	}
 }
 
@@ -101,7 +102,8 @@ func (c *Client) Classify(path string, fileHash string, cfg *config.Config) (Dec
 		}
 	}
 
-	if err := c.checkModel(cfg.OllamaURL, cfg.Model); err != nil {
+	resolvedModel, err := c.checkModel(cfg.OllamaURL, cfg.Model)
+	if err != nil {
 		return Decision{}, err
 	}
 
@@ -114,7 +116,7 @@ func (c *Client) Classify(path string, fileHash string, cfg *config.Config) (Dec
 
 	categories := categorySet(cfg.Categories)
 	ollamaURL := strings.TrimRight(cfg.OllamaURL, "/")
-	model := cfg.Model
+	model := resolvedModel
 
 	tryChat := func(imgs []string) (Decision, error) {
 		data, err := c.requestChat(ollamaURL, model, prompt, imgs, categories)
@@ -167,31 +169,36 @@ func isImageRelatedError(err error) bool {
 	return false
 }
 
-// checkModel asks Ollama whether the configured model exists locally. It
-// returns a clear error so callers can warn the user and exit instead of
-// retrying unknown models and crashing. Results are cached per (url, model)
-// on the Client so repeated checks do not contact Ollama again.
-func (c *Client) checkModel(ollamaURL, model string) error {
+// checkModel asks Ollama whether the configured model exists locally and
+// returns the actual tag name to use (e.g. filemaid-gemma4-26b:vhash when the
+// configured name has no :latest tag). It returns a clear error so callers can
+// warn the user and exit instead of retrying unknown models and crashing.
+// Results are cached per (url, model) on the Client so repeated checks do not
+// contact Ollama again.
+func (c *Client) checkModel(ollamaURL, model string) (string, error) {
 	c.mu.Lock()
 	if c.checked.url == ollamaURL && c.checked.model == model {
-		err := c.checked.err
+		resolved, err := c.checked.resolved, c.checked.err
 		c.mu.Unlock()
-		return err
+		return resolved, err
 	}
 	c.mu.Unlock()
 
-	err := c.fetchCheckModel(ollamaURL, model)
+	resolved, err := c.fetchCheckModel(ollamaURL, model)
 
 	c.mu.Lock()
 	c.checked.url = ollamaURL
 	c.checked.model = model
+	c.checked.resolved = resolved
 	c.checked.err = err
 	c.mu.Unlock()
-	return err
+	return resolved, err
 }
 
-// fetchCheckModel performs the actual Ollama /api/tags request.
-func (c *Client) fetchCheckModel(ollamaURL, model string) error {
+// fetchCheckModel performs the actual Ollama /api/tags request and returns
+// the exact model name to use, which may include a tag when the configured
+// model name lacks one.
+func (c *Client) fetchCheckModel(ollamaURL, model string) (string, error) {
 	url := strings.TrimRight(ollamaURL, "/") + "/api/tags"
 	transport := c.transport
 	if transport == nil {
@@ -203,23 +210,23 @@ func (c *Client) fetchCheckModel(ollamaURL, model string) error {
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
-		return err
+		return "", err
 	}
 
 	resp, err := transport.RoundTrip(req)
 	if err != nil {
-		return fmt.Errorf("could not reach Ollama at %s: %w", ollamaURL, err)
+		return "", fmt.Errorf("could not reach Ollama at %s: %w", ollamaURL, err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("ollama returned %d listing models: %s", resp.StatusCode, string(body))
+		return "", fmt.Errorf("ollama returned %d listing models: %s", resp.StatusCode, string(body))
 	}
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return fmt.Errorf("reading ollama model list: %w", err)
+		return "", fmt.Errorf("reading ollama model list: %w", err)
 	}
 
 	var list struct {
@@ -228,15 +235,21 @@ func (c *Client) fetchCheckModel(ollamaURL, model string) error {
 		} `json:"models"`
 	}
 	if err := json.Unmarshal(body, &list); err != nil {
-		return fmt.Errorf("parsing ollama model list: %w", err)
+		return "", fmt.Errorf("parsing ollama model list: %w", err)
 	}
 
 	for _, m := range list.Models {
 		if modelMatch(model, m.Name) {
-			return nil
+			// Prefer an exact match (including latest) when available; otherwise
+			// return the first matching tagged name so a missing :latest tag does
+			// not break existing installs.
+			if m.Name == model || m.Name == model+":latest" {
+				return m.Name, nil
+			}
+			return m.Name, nil
 		}
 	}
-	return fmt.Errorf("model %q not found in Ollama; run `filemaid setup` or `ollama pull %s`", model, model)
+	return "", fmt.Errorf("model %q not found in Ollama; run `filemaid setup` or `ollama pull %s`", model, model)
 }
 
 // modelMatch reports whether the configured model name want matches the name
@@ -260,17 +273,22 @@ func modelMatch(want, have string) bool {
 func (c *Client) Validate(cfg *config.Config) error {
 	ollamaURL := strings.TrimRight(cfg.OllamaURL, "/")
 
-	for _, model := range []string{cfg.Model, cfg.ImageModel, cfg.TextModel} {
+	resolvedModel, err := c.checkModel(ollamaURL, cfg.Model)
+	if err != nil {
+		return err
+	}
+
+	for _, model := range []string{cfg.ImageModel, cfg.TextModel} {
 		if model == "" {
 			continue
 		}
-		if err := c.checkModel(ollamaURL, model); err != nil {
+		if _, err := c.checkModel(ollamaURL, model); err != nil {
 			return err
 		}
 	}
 
 	body := map[string]any{
-		"model":  cfg.Model,
+		"model":  resolvedModel,
 		"prompt": "Reply with the single word OK.",
 		"stream": false,
 		"options": map[string]any{
@@ -283,7 +301,7 @@ func (c *Client) Validate(cfg *config.Config) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
-	_, err := c.postJSON(ctx, ollamaURL+"/api/generate", body, 60*time.Second)
+	_, err = c.postJSON(ctx, ollamaURL+"/api/generate", body, 60*time.Second)
 	if err != nil {
 		return fmt.Errorf("model %q validation failed: %w", cfg.Model, err)
 	}
