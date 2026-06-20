@@ -3,18 +3,24 @@ package state
 
 import (
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 
+	"github.com/logicminds/filemaid/internal/llm"
+
 	_ "modernc.org/sqlite"
 )
 
-// Repo persists and queries file processing history.
+// Repo persists and queries file processing history and cached classification
+// decisions.
 type Repo interface {
 	Record(original, final, sha256, category string, tags []string, action, reason string) error
 	FindByHash(sha256 string) (*Record, error)
+	FindDecisionByHash(sha256 string) (llm.Decision, bool, error)
+	RecordDecision(sha256 string, decision llm.Decision) error
 	Close() error
 }
 
@@ -49,6 +55,11 @@ CREATE TABLE IF NOT EXISTS history (
     created_at TEXT DEFAULT CURRENT_TIMESTAMP
 );
 CREATE INDEX IF NOT EXISTS idx_sha256 ON history(sha256);
+CREATE TABLE IF NOT EXISTS decisions (
+    sha256 TEXT PRIMARY KEY,
+    decision TEXT NOT NULL,
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP
+);
 `
 
 // Open creates the parent directories for path, opens the SQLite database, and
@@ -114,6 +125,47 @@ func (s *State) FindByHash(sha256 string) (*Record, error) {
 	r.Action = action.String
 	r.Reason = reason.String
 	return &r, nil
+}
+
+// FindDecisionByHash returns a cached decision for sha256, if one exists.
+func (s *State) FindDecisionByHash(sha256 string) (llm.Decision, bool, error) {
+	row := s.db.QueryRow(
+		`SELECT decision FROM decisions WHERE sha256 = ?`,
+		sha256,
+	)
+
+	var raw string
+	err := row.Scan(&raw)
+	if err == sql.ErrNoRows {
+		return llm.Decision{}, false, nil
+	}
+	if err != nil {
+		return llm.Decision{}, false, fmt.Errorf("find decision by hash: %w", err)
+	}
+
+	var d llm.Decision
+	if err := json.Unmarshal([]byte(raw), &d); err != nil {
+		return llm.Decision{}, false, fmt.Errorf("parse cached decision: %w", err)
+	}
+	return d, true, nil
+}
+
+// RecordDecision stores a decision keyed by sha256, replacing any existing
+// entry for the same hash.
+func (s *State) RecordDecision(sha256 string, decision llm.Decision) error {
+	raw, err := json.Marshal(decision)
+	if err != nil {
+		return fmt.Errorf("marshal decision: %w", err)
+	}
+	_, err = s.db.Exec(
+		`INSERT INTO decisions (sha256, decision) VALUES (?, ?)
+		 ON CONFLICT(sha256) DO UPDATE SET decision = excluded.decision, created_at = CURRENT_TIMESTAMP`,
+		sha256, string(raw),
+	)
+	if err != nil {
+		return fmt.Errorf("record decision: %w", err)
+	}
+	return nil
 }
 
 // Close closes the underlying database connection.

@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/logicminds/filemaid/internal/llm"
 	"github.com/logicminds/filemaid/internal/state"
 
 	_ "modernc.org/sqlite"
@@ -282,5 +283,143 @@ func TestOpen_CreatesIndex(t *testing.T) {
 	}
 	if name != "idx_sha256" {
 		t.Fatalf("unexpected index name: %q", name)
+	}
+}
+
+func TestRecordAndFindDecisionByHash(t *testing.T) {
+	repo, err := state.Open(filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+	defer repo.Close()
+
+	decision := llm.Decision{
+		Category:    "Documents",
+		Subcategory: "report",
+		Tags:        []string{"work", "2024"},
+		Action:      "move",
+		Destination: "/docs",
+		Reason:      "text file",
+	}
+
+	if err := repo.RecordDecision("abc123", decision); err != nil {
+		t.Fatalf("RecordDecision failed: %v", err)
+	}
+
+	got, ok, err := repo.FindDecisionByHash("abc123")
+	if err != nil {
+		t.Fatalf("FindDecisionByHash failed: %v", err)
+	}
+	if !ok {
+		t.Fatal("expected decision to be found")
+	}
+	if got.Category != decision.Category {
+		t.Errorf("Category = %q, want %q", got.Category, decision.Category)
+	}
+	if got.Subcategory != decision.Subcategory {
+		t.Errorf("Subcategory = %q, want %q", got.Subcategory, decision.Subcategory)
+	}
+	if len(got.Tags) != len(decision.Tags) || got.Tags[0] != decision.Tags[0] || got.Tags[1] != decision.Tags[1] {
+		t.Errorf("Tags = %v, want %v", got.Tags, decision.Tags)
+	}
+	if got.Action != decision.Action {
+		t.Errorf("Action = %q, want %q", got.Action, decision.Action)
+	}
+	if got.Destination != decision.Destination {
+		t.Errorf("Destination = %q, want %q", got.Destination, decision.Destination)
+	}
+	if got.Reason != decision.Reason {
+		t.Errorf("Reason = %q, want %q", got.Reason, decision.Reason)
+	}
+}
+
+func TestFindDecisionByHash_NotFound(t *testing.T) {
+	repo, err := state.Open(filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+	defer repo.Close()
+
+	_, ok, err := repo.FindDecisionByHash("missing")
+	if err != nil {
+		t.Fatalf("FindDecisionByHash failed: %v", err)
+	}
+	if ok {
+		t.Error("expected no decision for unknown hash")
+	}
+}
+
+func TestRecordDecision_OverwritesExisting(t *testing.T) {
+	repo, err := state.Open(filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+	defer repo.Close()
+
+	if err := repo.RecordDecision("h1", llm.Decision{Category: "A", Action: "move"}); err != nil {
+		t.Fatalf("RecordDecision failed: %v", err)
+	}
+	if err := repo.RecordDecision("h1", llm.Decision{Category: "B", Action: "review"}); err != nil {
+		t.Fatalf("RecordDecision overwrite failed: %v", err)
+	}
+
+	got, ok, err := repo.FindDecisionByHash("h1")
+	if err != nil {
+		t.Fatalf("FindDecisionByHash failed: %v", err)
+	}
+	if !ok {
+		t.Fatal("expected decision to be found")
+	}
+	if got.Category != "B" {
+		t.Errorf("Category = %q, want B", got.Category)
+	}
+	if got.Action != "review" {
+		t.Errorf("Action = %q, want review", got.Action)
+	}
+}
+
+func TestFakeRepoDecisionCache(t *testing.T) {
+	repo := state.NewFake()
+
+	decision := llm.Decision{Category: "Images", Action: "move", Reason: "cached"}
+	if err := repo.RecordDecision("h1", decision); err != nil {
+		t.Fatalf("RecordDecision failed: %v", err)
+	}
+
+	got, ok, err := repo.FindDecisionByHash("h1")
+	if err != nil {
+		t.Fatalf("FindDecisionByHash failed: %v", err)
+	}
+	if !ok {
+		t.Fatal("expected decision to be found")
+	}
+	if got.Category != decision.Category {
+		t.Errorf("Category = %q, want %q", got.Category, decision.Category)
+	}
+}
+
+func TestOpen_CreatesDecisionsTable(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "filemaid.db")
+
+	repo, err := state.Open(dbPath)
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+	repo.Close()
+
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("open db for inspection: %v", err)
+	}
+	defer db.Close()
+
+	var name string
+	err = db.QueryRow("SELECT name FROM sqlite_master WHERE type='table' AND name='decisions'").Scan(&name)
+	if err != nil {
+		t.Fatalf("decisions table not found: %v", err)
+	}
+	if name != "decisions" {
+		t.Fatalf("unexpected table name: %q", name)
 	}
 }

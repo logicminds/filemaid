@@ -6,13 +6,21 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"image"
+	"image/color"
+	_ "image/gif"
+	"image/jpeg"
+	_ "image/png"
 	"io"
+	"math"
 	"net/http"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/logicminds/filemaid/internal/config"
@@ -39,11 +47,18 @@ func NewDecision() Decision {
 // Classifier turns a file path into a classification Decision.
 type Classifier interface {
 	// Classify classifies a single file and returns a Decision.
-	Classify(path string, cfg *config.Config) (Decision, error)
+	Classify(path string, fileHash string, cfg *config.Config) (Decision, error)
 	// Validate checks that the configured Ollama model is reachable and can
 	// generate a response. Commands that depend on classification should call
 	// Validate before touching any files.
 	Validate(cfg *config.Config) error
+}
+
+// DecisionCache stores and retrieves classification decisions keyed by content
+// hash so repeated identical files can skip LLM calls.
+type DecisionCache interface {
+	FindDecisionByHash(sha256 string) (Decision, bool, error)
+	RecordDecision(sha256 string, decision Decision) error
 }
 
 // HTTPTransport abstracts the HTTP layer so tests can fake Ollama responses.
@@ -55,6 +70,15 @@ type HTTPTransport interface {
 // Client is an Ollama-backed Classifier.
 type Client struct {
 	transport HTTPTransport
+	cache     DecisionCache
+
+	mu      sync.Mutex
+	checked struct {
+		url      string
+		model    string
+		resolved string
+		err      error
+	}
 }
 
 // NewClient creates a classifier. If transport is nil, the default HTTP
@@ -63,9 +87,23 @@ func NewClient(transport HTTPTransport) *Client {
 	return &Client{transport: transport}
 }
 
+// SetDecisionCache attaches a decision cache to the client. When set, Classify
+// checks the cache by file hash before calling Ollama and records the result
+// after a successful classification.
+func (c *Client) SetDecisionCache(cache DecisionCache) {
+	c.cache = cache
+}
+
 // Classify classifies a single file using Ollama.
-func (c *Client) Classify(path string, cfg *config.Config) (Decision, error) {
-	if err := c.checkModel(cfg.OllamaURL, cfg.Model); err != nil {
+func (c *Client) Classify(path string, fileHash string, cfg *config.Config) (Decision, error) {
+	if fileHash != "" && c.cache != nil {
+		if d, ok, err := c.cache.FindDecisionByHash(fileHash); err == nil && ok {
+			return d, nil
+		}
+	}
+
+	resolvedModel, err := c.checkModel(cfg.OllamaURL, cfg.Model)
+	if err != nil {
 		return Decision{}, err
 	}
 
@@ -77,67 +115,90 @@ func (c *Client) Classify(path string, cfg *config.Config) (Decision, error) {
 	}
 
 	categories := categorySet(cfg.Categories)
-	endpoint := "auto"
-
 	ollamaURL := strings.TrimRight(cfg.OllamaURL, "/")
-	model := cfg.Model
+	model := resolvedModel
 
-	var lastErr string
-
-	tryGenerate := func(useImages bool) (map[string]any, error) {
-		localImages := images
-		if !useImages {
-			localImages = nil
+	tryChat := func(imgs []string) (Decision, error) {
+		data, err := c.requestChat(ollamaURL, model, prompt, imgs, categories)
+		if err != nil {
+			return Decision{}, err
 		}
-		return c.requestGenerate(ollamaURL, model, prompt, localImages)
-	}
-
-	tryChat := func(useImages bool) (map[string]any, error) {
-		localImages := images
-		if !useImages {
-			localImages = nil
+		if errMsg, ok := data["error"].(string); ok && errMsg != "" {
+			return Decision{}, errors.New(errMsg)
 		}
-		return c.requestChat(ollamaURL, model, prompt, localImages, categories)
-	}
-
-	strategies := []func(bool) (map[string]any, error){}
-	if endpoint == "auto" || endpoint == "chat" {
-		strategies = append(strategies, tryChat)
-	}
-	if endpoint == "auto" || endpoint == "generate" {
-		strategies = append(strategies, tryGenerate)
-	}
-
-	for _, strategy := range strategies {
-		for _, useImages := range []bool{true, false} {
-			if useImages && len(images) == 0 {
-				continue
-			}
-			data, err := strategy(useImages)
-			if err != nil {
-				lastErr = err.Error()
-				continue
-			}
-			decision, ok := parseResponse(data, categories)
-			if ok {
-				return decision, nil
-			}
+		if decision, ok := parseResponse(data, categories); ok {
+			return decision, nil
 		}
+		return Decision{}, errors.New("could not parse model response")
+	}
+
+	decision, err := tryChat(images)
+	if err != nil && len(images) > 0 && isImageRelatedError(err) {
+		decision, err = tryChat(nil)
+	}
+
+	if err == nil {
+		if fileHash != "" && c.cache != nil {
+			_ = c.cache.RecordDecision(fileHash, decision)
+		}
+		return decision, nil
 	}
 
 	d := NewDecision()
-	if lastErr != "" {
-		d.Reason = fmt.Sprintf("ollama error: %s", lastErr)
-	} else {
-		d.Reason = "could not parse model response"
+	d.Reason = fmt.Sprintf("ollama error: %s", err.Error())
+	if fileHash != "" && c.cache != nil {
+		_ = c.cache.RecordDecision(fileHash, d)
 	}
 	return d, nil
 }
 
-// checkModel asks Ollama whether the configured model exists locally. It
-// returns a clear error so callers can warn the user and exit instead of
-// retrying unknown models and crashing.
-func (c *Client) checkModel(ollamaURL, model string) error {
+// isImageRelatedError reports whether an error from Ollama is likely caused
+// by the attached image (for example, the model does not support vision or
+// the image payload could not be decoded). These errors trigger a single
+// retry without images.
+func isImageRelatedError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	for _, term := range []string{"image", "images", "vision", "visual", "base64", "decode", "encoding", "multimodal"} {
+		if strings.Contains(msg, term) {
+			return true
+		}
+	}
+	return false
+}
+
+// checkModel asks Ollama whether the configured model exists locally and
+// returns the actual tag name to use (e.g. filemaid-gemma4-26b:vhash when the
+// configured name has no :latest tag). It returns a clear error so callers can
+// warn the user and exit instead of retrying unknown models and crashing.
+// Results are cached per (url, model) on the Client so repeated checks do not
+// contact Ollama again.
+func (c *Client) checkModel(ollamaURL, model string) (string, error) {
+	c.mu.Lock()
+	if c.checked.url == ollamaURL && c.checked.model == model {
+		resolved, err := c.checked.resolved, c.checked.err
+		c.mu.Unlock()
+		return resolved, err
+	}
+	c.mu.Unlock()
+
+	resolved, err := c.fetchCheckModel(ollamaURL, model)
+
+	c.mu.Lock()
+	c.checked.url = ollamaURL
+	c.checked.model = model
+	c.checked.resolved = resolved
+	c.checked.err = err
+	c.mu.Unlock()
+	return resolved, err
+}
+
+// fetchCheckModel performs the actual Ollama /api/tags request and returns
+// the exact model name to use, which may include a tag when the configured
+// model name lacks one.
+func (c *Client) fetchCheckModel(ollamaURL, model string) (string, error) {
 	url := strings.TrimRight(ollamaURL, "/") + "/api/tags"
 	transport := c.transport
 	if transport == nil {
@@ -149,23 +210,23 @@ func (c *Client) checkModel(ollamaURL, model string) error {
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
-		return err
+		return "", err
 	}
 
 	resp, err := transport.RoundTrip(req)
 	if err != nil {
-		return fmt.Errorf("could not reach Ollama at %s: %w", ollamaURL, err)
+		return "", fmt.Errorf("could not reach Ollama at %s: %w", ollamaURL, err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("ollama returned %d listing models: %s", resp.StatusCode, string(body))
+		return "", fmt.Errorf("ollama returned %d listing models: %s", resp.StatusCode, string(body))
 	}
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return fmt.Errorf("reading ollama model list: %w", err)
+		return "", fmt.Errorf("reading ollama model list: %w", err)
 	}
 
 	var list struct {
@@ -174,15 +235,21 @@ func (c *Client) checkModel(ollamaURL, model string) error {
 		} `json:"models"`
 	}
 	if err := json.Unmarshal(body, &list); err != nil {
-		return fmt.Errorf("parsing ollama model list: %w", err)
+		return "", fmt.Errorf("parsing ollama model list: %w", err)
 	}
 
 	for _, m := range list.Models {
 		if modelMatch(model, m.Name) {
-			return nil
+			// Prefer an exact match (including latest) when available; otherwise
+			// return the first matching tagged name so a missing :latest tag does
+			// not break existing installs.
+			if m.Name == model || m.Name == model+":latest" {
+				return m.Name, nil
+			}
+			return m.Name, nil
 		}
 	}
-	return fmt.Errorf("model %q not found in Ollama; run `filemaid setup` or `ollama pull %s`", model, model)
+	return "", fmt.Errorf("model %q not found in Ollama; run `filemaid setup` or `ollama pull %s`", model, model)
 }
 
 // modelMatch reports whether the configured model name want matches the name
@@ -199,18 +266,29 @@ func modelMatch(want, have string) bool {
 	return false
 }
 
-// Validate checks that Ollama is reachable and that the configured model can
-// generate a response. It returns an error if the model is missing, Ollama is
+// Validate checks that Ollama is reachable and that the configured models can
+// generate a response. It returns an error if a model is missing, Ollama is
 // unreachable, or the model fails to generate. Commands should call Validate
 // before performing any file operations that depend on classification.
 func (c *Client) Validate(cfg *config.Config) error {
-	if err := c.checkModel(cfg.OllamaURL, cfg.Model); err != nil {
+	ollamaURL := strings.TrimRight(cfg.OllamaURL, "/")
+
+	resolvedModel, err := c.checkModel(ollamaURL, cfg.Model)
+	if err != nil {
 		return err
 	}
 
-	ollamaURL := strings.TrimRight(cfg.OllamaURL, "/")
+	for _, model := range []string{cfg.ImageModel, cfg.TextModel} {
+		if model == "" {
+			continue
+		}
+		if _, err := c.checkModel(ollamaURL, model); err != nil {
+			return err
+		}
+	}
+
 	body := map[string]any{
-		"model":  cfg.Model,
+		"model":  resolvedModel,
 		"prompt": "Reply with the single word OK.",
 		"stream": false,
 		"options": map[string]any{
@@ -223,7 +301,7 @@ func (c *Client) Validate(cfg *config.Config) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
-	_, err := c.postJSON(ctx, ollamaURL+"/api/generate", body, 60*time.Second)
+	_, err = c.postJSON(ctx, ollamaURL+"/api/generate", body, 60*time.Second)
 	if err != nil {
 		return fmt.Errorf("model %q validation failed: %w", cfg.Model, err)
 	}
@@ -237,6 +315,14 @@ var imageExts = map[string]bool{
 	".gif":  true,
 	".webp": true,
 	".heic": true,
+}
+
+// IsImageFile reports whether path has an extension treated as an image for
+// classification purposes. It is used by callers to route files to the
+// configured image model.
+func IsImageFile(path string) bool {
+	ext := strings.ToLower(filepath.Ext(path))
+	return imageExts[ext]
 }
 
 var textExts = map[string]bool{
@@ -291,6 +377,136 @@ Return a single compact JSON object and nothing else. Leave destination empty.
 
 const subcategoryInstructions = `
 For image files, also provide a concise subcategory describing the main subject or scene (e.g., cat, dog, baby, kid, woman, wedding, car, nature, food, selfie, document-photo). For screenshots, describe the app or context (e.g., Safari, Terminal, Slack, VS Code, browser, lock-screen, menu-bar). The subcategory will be added as a Finder tag.`
+const maxImageDimension = 1024
+
+// encodeImageToJPEG re-encodes img as a JPEG with the given quality.
+func encodeImageToJPEG(img image.Image, quality int) ([]byte, error) {
+	var buf bytes.Buffer
+	if err := jpeg.Encode(&buf, img, &jpeg.Options{Quality: quality}); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
+}
+
+// resizeImage scales img down so that its largest dimension is at most maxDim.
+// Images already within the limit are returned unchanged.
+func resizeImage(img image.Image, maxDim int) image.Image {
+	bounds := img.Bounds()
+	w, h := bounds.Dx(), bounds.Dy()
+	if w <= maxDim && h <= maxDim {
+		return img
+	}
+
+	var newW, newH int
+	if w > h {
+		newW = maxDim
+		newH = int(float64(h) * float64(maxDim) / float64(w))
+	} else {
+		newH = maxDim
+		newW = int(float64(w) * float64(maxDim) / float64(h))
+	}
+	if newW < 1 {
+		newW = 1
+	}
+	if newH < 1 {
+		newH = 1
+	}
+	return bilinearResize(img, newW, newH)
+}
+
+// resizeImageBytes decodes b, resizes it, and re-encodes the result as JPEG.
+func resizeImageBytes(b []byte, maxDim int) ([]byte, error) {
+	img, _, err := image.Decode(bytes.NewReader(b))
+	if err != nil {
+		return nil, err
+	}
+	resized := resizeImage(img, maxDim)
+	return encodeImageToJPEG(resized, 85)
+}
+
+// bilinearResize returns a new RGBA image scaled to dstW x dstH using bilinear
+// interpolation.
+func bilinearResize(src image.Image, dstW, dstH int) image.Image {
+	bounds := src.Bounds()
+	srcW, srcH := bounds.Dx(), bounds.Dy()
+	dst := image.NewRGBA(image.Rect(0, 0, dstW, dstH))
+	xRatio := float64(srcW) / float64(dstW)
+	yRatio := float64(srcH) / float64(dstH)
+
+	for y := 0; y < dstH; y++ {
+		for x := 0; x < dstW; x++ {
+			sx := (float64(x)+0.5)*xRatio - 0.5 + float64(bounds.Min.X)
+			sy := (float64(y)+0.5)*yRatio - 0.5 + float64(bounds.Min.Y)
+			dst.Set(x, y, bilinearSample(src, sx, sy))
+		}
+	}
+	return dst
+}
+
+// bilinearSample samples src at (x, y) using bilinear interpolation.
+func bilinearSample(src image.Image, x, y float64) color.Color {
+	bounds := src.Bounds()
+	x0 := int(math.Floor(x))
+	y0 := int(math.Floor(y))
+	x1 := x0 + 1
+	y1 := y0 + 1
+
+	if x0 < bounds.Min.X {
+		x0 = bounds.Min.X
+	}
+	if y0 < bounds.Min.Y {
+		y0 = bounds.Min.Y
+	}
+	if x1 >= bounds.Max.X {
+		x1 = bounds.Max.X - 1
+	}
+	if y1 >= bounds.Max.Y {
+		y1 = bounds.Max.Y - 1
+	}
+	if x1 < x0 {
+		x1 = x0
+	}
+	if y1 < y0 {
+		y1 = y0
+	}
+
+	fx := x - float64(x0)
+	fy := y - float64(y0)
+	if fx < 0 {
+		fx = 0
+	}
+	if fx > 1 {
+		fx = 1
+	}
+	if fy < 0 {
+		fy = 0
+	}
+	if fy > 1 {
+		fy = 1
+	}
+
+	c00 := src.At(x0, y0)
+	c10 := src.At(x1, y0)
+	c01 := src.At(x0, y1)
+	c11 := src.At(x1, y1)
+
+	r00, g00, b00, a00 := c00.RGBA()
+	r10, g10, b10, a10 := c10.RGBA()
+	r01, g01, b01, a01 := c01.RGBA()
+	r11, g11, b11, a11 := c11.RGBA()
+
+	r := lerp(lerp(r00, r10, fx), lerp(r01, r11, fx), fy)
+	g := lerp(lerp(g00, g10, fx), lerp(g01, g11, fx), fy)
+	b := lerp(lerp(b00, b10, fx), lerp(b01, b11, fx), fy)
+	a := lerp(lerp(a00, a10, fx), lerp(a01, a11, fx), fy)
+
+	return color.RGBA64{uint16(r), uint16(g), uint16(b), uint16(a)}
+}
+
+// lerp linearly interpolates between a and b by t (0..1).
+func lerp(a, b uint32, t float64) uint32 {
+	return uint32(float64(a)*(1.0-t) + float64(b)*t)
+}
 
 func buildPrompt(path string, cfg *config.Config) (string, []string, error) {
 	stat, err := os.Stat(path)
@@ -318,7 +534,12 @@ func buildPrompt(path string, cfg *config.Config) (string, []string, error) {
 		}
 		b, err := os.ReadFile(path)
 		if err == nil {
-			images = append(images, base64.StdEncoding.EncodeToString(b))
+			resized, resizeErr := resizeImageBytes(b, maxImageDimension)
+			if resizeErr == nil {
+				images = append(images, base64.StdEncoding.EncodeToString(resized))
+			} else {
+				images = append(images, base64.StdEncoding.EncodeToString(b))
+			}
 		}
 	} else if textExts[ext] {
 		snippet := readTextSnippet(path, 2048)
@@ -368,13 +589,14 @@ func (c *Client) requestGenerate(ollamaURL, model, prompt string, images []strin
 		"system": ("You classify files for a macOS file manager. " +
 			"Output valid JSON only with keys category, subcategory, tags, action, destination, reason. " +
 			"No markdown, no code fences, no extra text."),
-		"prompt": prompt,
-		"images": images,
-		"stream": false,
+		"prompt":     prompt,
+		"images":     images,
+		"stream":     false,
+		"keep_alive": "5m",
 		"options": map[string]any{
 			"temperature": 0.2,
-			"num_predict": 2048,
-			"num_ctx":     8192,
+			"num_predict": 512,
+			"num_ctx":     4096,
 		},
 	}
 	return c.postJSON(context.Background(), ollamaURL+"/api/generate", body, 120*time.Second)
@@ -402,12 +624,13 @@ func (c *Client) requestChat(ollamaURL, model, prompt string, images []string, c
 				"images":  images,
 			},
 		},
-		"tools":  []map[string]any{toolSchema(catList)},
-		"stream": false,
+		"tools":      []map[string]any{toolSchema(catList)},
+		"stream":     false,
+		"keep_alive": "5m",
 		"options": map[string]any{
 			"temperature": 0.2,
-			"num_predict": 2048,
-			"num_ctx":     8192,
+			"num_predict": 512,
+			"num_ctx":     4096,
 		},
 	}
 	return c.postJSON(context.Background(), ollamaURL+"/api/chat", body, 120*time.Second)

@@ -1,11 +1,16 @@
 package state
 
-import "sync"
+import (
+	"sync"
+
+	"github.com/logicminds/filemaid/internal/llm"
+)
 
 // FakeRepo is an in-memory implementation of Repo for tests.
 type FakeRepo struct {
-	mu      sync.Mutex
-	records []Record
+	mu        sync.Mutex
+	records   []Record
+	decisions map[string]llm.Decision
 }
 
 // NewFake returns a new empty FakeRepo.
@@ -59,6 +64,42 @@ func (f *FakeRepo) FindByHash(sha256 string) (*Record, error) {
 // Close is a no-op for the fake repository.
 func (f *FakeRepo) Close() error {
 	return nil
+}
+
+// FindDecisionByHash returns a cached decision for sha256, if one exists.
+func (f *FakeRepo) FindDecisionByHash(sha256 string) (llm.Decision, bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	if f.decisions == nil {
+		return llm.Decision{}, false, nil
+	}
+	d, ok := f.decisions[sha256]
+	return d, ok, nil
+}
+
+// RecordDecision stores a decision keyed by sha256.
+func (f *FakeRepo) RecordDecision(sha256 string, decision llm.Decision) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	if f.decisions == nil {
+		f.decisions = make(map[string]llm.Decision)
+	}
+	f.decisions[sha256] = decision
+	return nil
+}
+
+// Decisions returns a snapshot of all cached decisions.
+func (f *FakeRepo) Decisions() map[string]llm.Decision {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	out := make(map[string]llm.Decision, len(f.decisions))
+	for k, v := range f.decisions {
+		out[k] = v
+	}
+	return out
 }
 
 // Records returns a snapshot of all stored records.

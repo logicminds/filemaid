@@ -14,8 +14,14 @@ func TestDefaultsMatchPythonReference(t *testing.T) {
 	if cfg.OllamaURL != "http://localhost:11434" {
 		t.Errorf("OllamaURL = %q", cfg.OllamaURL)
 	}
-	if cfg.Model != "filemaid-gemma4-26b" {
+	if cfg.Model != "filemaid-metadata" {
 		t.Errorf("Model = %q", cfg.Model)
+	}
+	if cfg.ImageModel != "filemaid-gemma4-12b" {
+		t.Errorf("ImageModel = %q", cfg.ImageModel)
+	}
+	if cfg.TextModel != "filemaid-metadata" {
+		t.Errorf("TextModel = %q", cfg.TextModel)
 	}
 	wantCleaners := []string{"docker", "npm", "cargo", "pip", "brew", "xcode"}
 	if !reflect.DeepEqual(cfg.AllowedCleaners, wantCleaners) {
@@ -126,7 +132,7 @@ func TestLoadPath(t *testing.T) {
 			name: "missing file returns defaults",
 			user: "",
 			want: func(t *testing.T, cfg *Config) {
-				if cfg.Model != "filemaid-gemma4-26b" {
+				if cfg.Model != "filemaid-metadata" {
 					t.Errorf("Model = %q, want default", cfg.Model)
 				}
 				if !strings.HasPrefix(cfg.Categories["Unknown"], home()) {

@@ -1,7 +1,9 @@
 {
-  "_model_note": "Install script auto-selects based on RAM: 24GB+ -> filemaid-gemma4-26b, 16GB+ -> filemaid-gemma4-12b, else filemaid-metadata.",
+  "_model_note": "Install script auto-selects based on RAM: 24GB+ -> filemaid-gemma4-26b, 16GB+ -> filemaid-gemma4-12b, else filemaid-metadata. Model is the fallback; image_model handles image files; text_model handles non-image files.",
   "ollama_url": "http://localhost:11434",
-  "model": "filemaid-gemma4-26b",
+  "model": "filemaid-metadata",
+  "image_model": "filemaid-gemma4-12b",
+  "text_model": "filemaid-metadata",
   "watch_dirs": [
     "~/Desktop",
     "~/Downloads"

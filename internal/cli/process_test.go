@@ -3,10 +3,12 @@ package cli
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -195,30 +197,65 @@ func TestProcessPathsDuplicateForcesReview(t *testing.T) {
 	if len(records) != 2 {
 		t.Fatalf("expected 2 history records, got %d", len(records))
 	}
-	if records[0].Action != "move" {
-		t.Errorf("first action = %q, want move", records[0].Action)
+
+	var moves, reviews int
+	for _, r := range records {
+		switch r.Action {
+		case "move":
+			moves++
+		case "review":
+			reviews++
+		}
 	}
-	if records[1].Action != "review" {
-		t.Errorf("second action = %q, want review", records[1].Action)
+	if moves != 1 {
+		t.Errorf("expected 1 move action, got %d", moves)
+	}
+	if reviews != 1 {
+		t.Errorf("expected 1 review action, got %d", reviews)
 	}
 }
 
 type fakeClassifier struct {
+	mu        sync.Mutex
 	decision  llm.Decision
 	err       error
 	validate  error
 	calls     []string
+	models    []string
 	validated bool
 }
 
-func (f *fakeClassifier) Classify(path string, cfg *config.Config) (llm.Decision, error) {
+func (f *fakeClassifier) Classify(path string, fileHash string, cfg *config.Config) (llm.Decision, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.calls = append(f.calls, path)
+	f.models = append(f.models, cfg.Model)
 	return f.decision, f.err
 }
 
 func (f *fakeClassifier) Validate(cfg *config.Config) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.validated = true
 	return f.validate
+}
+
+// Calls returns a snapshot of Classify calls seen so far.
+func (f *fakeClassifier) Calls() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make([]string, len(f.calls))
+	copy(out, f.calls)
+	return out
+}
+
+// Models returns a snapshot of cfg.Model values passed to Classify.
+func (f *fakeClassifier) Models() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make([]string, len(f.models))
+	copy(out, f.models)
+	return out
 }
 
 func testConfig(tmpDir string) *config.Config {
@@ -231,6 +268,9 @@ func testConfig(tmpDir string) *config.Config {
 		os.MkdirAll(d, 0755)
 	}
 	return &config.Config{
+		Model:              "text-model",
+		ImageModel:         "image-model",
+		TextModel:          "text-model",
 		AllowedDirs:        []string{desktop, downloads, images, documents, reviewDir},
 		ReviewDir:          reviewDir,
 		Tags:               false,
@@ -299,6 +339,133 @@ func TestProcessPathsLogsApplyError(t *testing.T) {
 
 	if !bytes.Contains(buf.Bytes(), []byte("apply failed")) {
 		t.Errorf("expected 'apply failed' log, got %q", buf.String())
+	}
+}
+
+func TestProcessPathsResultsInInputOrder(t *testing.T) {
+	tmp := t.TempDir()
+	cfg = testConfig(tmp)
+	db = state.NewFake()
+	processFS = actions.NewRecordingFS()
+	classifier = &fakeClassifier{decision: llm.Decision{
+		Category: "Documents",
+		Tags:     []string{"txt"},
+		Action:   "move",
+		Reason:   "text",
+	}}
+
+	paths := make([]string, 5)
+	for i := range paths {
+		p := filepath.Join(tmp, "Desktop", fmt.Sprintf("file%d.txt", i))
+		os.MkdirAll(filepath.Dir(p), 0755)
+		os.WriteFile(p, []byte(fmt.Sprintf("content%d", i)), 0644)
+		paths[i] = p
+	}
+
+	results, err := processPaths(paths)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(results) != len(paths) {
+		t.Fatalf("expected %d results, got %d", len(paths), len(results))
+	}
+	for i, want := range paths {
+		if results[i].Path != want {
+			t.Errorf("results[%d].Path = %q, want %q", i, results[i].Path, want)
+		}
+	}
+}
+
+// blockingClassifier blocks Classify calls until release() is invoked so tests
+// can observe concurrent classification.
+type blockingClassifier struct {
+	fakeClassifier
+	mu        sync.Mutex
+	cond      *sync.Cond
+	active    int
+	maxActive int
+	proceed   bool
+}
+
+func newBlockingClassifier() *blockingClassifier {
+	b := &blockingClassifier{}
+	b.cond = sync.NewCond(&b.mu)
+	return b
+}
+
+func (b *blockingClassifier) Classify(path string, fileHash string, cfg *config.Config) (llm.Decision, error) {
+	b.mu.Lock()
+	b.active++
+	if b.active > b.maxActive {
+		b.maxActive = b.active
+	}
+	for !b.proceed {
+		b.cond.Wait()
+	}
+	b.active--
+	b.mu.Unlock()
+	return b.fakeClassifier.Classify(path, fileHash, cfg)
+}
+
+func (b *blockingClassifier) release() {
+	b.mu.Lock()
+	b.proceed = true
+	b.cond.Broadcast()
+	b.mu.Unlock()
+}
+
+func TestProcessPathsProcessesConcurrently(t *testing.T) {
+	tmp := t.TempDir()
+	cfg = testConfig(tmp)
+	db = state.NewFake()
+	processFS = actions.NewRecordingFS()
+
+	bc := newBlockingClassifier()
+	bc.decision = llm.Decision{Category: "Documents", Action: "review", Reason: "test"}
+	classifier = bc
+	t.Cleanup(func() { classifier = llm.NewClient(nil) })
+
+	paths := make([]string, 5)
+	for i := range paths {
+		p := filepath.Join(tmp, "Desktop", fmt.Sprintf("concurrent%d.txt", i))
+		os.MkdirAll(filepath.Dir(p), 0755)
+		os.WriteFile(p, []byte(fmt.Sprintf("content%d", i)), 0644)
+		paths[i] = p
+	}
+
+	done := make(chan []processResult)
+	go func() {
+		res, err := processPaths(paths)
+		if err != nil {
+			t.Error(err)
+		}
+		done <- res
+	}()
+
+	// Wait for at least two concurrent Classify calls to confirm workers run
+	// in parallel rather than sequentially.
+	for {
+		bc.mu.Lock()
+		ma := bc.maxActive
+		bc.mu.Unlock()
+		if ma >= 2 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	bc.release()
+	results := <-done
+
+	if len(results) != len(paths) {
+		t.Fatalf("expected %d results, got %d", len(paths), len(results))
+	}
+
+	bc.mu.Lock()
+	peak := bc.maxActive
+	bc.mu.Unlock()
+	if peak < 2 {
+		t.Errorf("expected concurrent classification, got max active %d", peak)
 	}
 }
 
@@ -450,5 +617,113 @@ func TestProcessCommandPrintsJSON(t *testing.T) {
 	})
 	if !strings.Contains(out, `"ok": true`) {
 		t.Errorf("expected JSON output, got:\n%s", out)
+	}
+}
+
+func TestModelForPathRoutesByExtension(t *testing.T) {
+	tmp := t.TempDir()
+	cfg := testConfig(tmp)
+
+	tests := []struct {
+		path string
+		want string
+	}{
+		{"photo.png", "image-model"},
+		{"photo.jpg", "image-model"},
+		{"photo.jpeg", "image-model"},
+		{"doc.txt", "text-model"},
+		{"doc.pdf", "text-model"},
+		{"archive.zip", "text-model"},
+	}
+	for _, tc := range tests {
+		t.Run(filepath.Ext(tc.path), func(t *testing.T) {
+			got := modelForPath(filepath.Join(tmp, tc.path), cfg)
+			if got != tc.want {
+				t.Errorf("modelForPath(%q) = %q, want %q", tc.path, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestProcessPathsGroupsByModel(t *testing.T) {
+	tmp := t.TempDir()
+	cfg = testConfig(tmp)
+	db = state.NewFake()
+	processFS = actions.NewRecordingFS()
+	fake := &fakeClassifier{decision: llm.Decision{Category: "Documents", Action: "move", Reason: "test"}}
+	classifier = fake
+
+	files := []string{
+		filepath.Join(tmp, "Desktop", "a.txt"),
+		filepath.Join(tmp, "Images", "b.png"),
+		filepath.Join(tmp, "Documents", "c.txt"),
+		filepath.Join(tmp, "Images", "d.jpg"),
+	}
+	for _, f := range files {
+		os.MkdirAll(filepath.Dir(f), 0755)
+		os.WriteFile(f, []byte(f), 0644)
+	}
+
+	if _, err := processPaths(files); err != nil {
+		t.Fatalf("processPaths failed: %v", err)
+	}
+
+	calls := fake.Calls()
+	models := fake.Models()
+	if len(models) != len(files) {
+		t.Fatalf("got %d Classify calls, want %d", len(models), len(files))
+	}
+
+	pathToModel := make(map[string]string, len(files))
+	for i, path := range calls {
+		pathToModel[path] = models[i]
+	}
+
+	for _, path := range files {
+		want := "text-model"
+		if llm.IsImageFile(path) {
+			want = "image-model"
+		}
+		got, ok := pathToModel[path]
+		if !ok {
+			t.Errorf("file %q was not classified", path)
+			continue
+		}
+		if got != want {
+			t.Errorf("file %q classified with model %q, want %q", path, got, want)
+		}
+	}
+}
+
+func TestProcessPathsFallsBackToModel(t *testing.T) {
+	tmp := t.TempDir()
+	cfg = &config.Config{
+		Model:       "fallback-model",
+		AllowedDirs: []string{tmp},
+		ReviewDir:   tmp,
+		Tags:        false,
+		Categories:  map[string]string{"Unknown": tmp},
+	}
+	db = state.NewFake()
+	processFS = actions.NewRecordingFS()
+	fake := &fakeClassifier{decision: llm.Decision{Category: "Unknown", Action: "review"}}
+	classifier = fake
+
+	files := []string{
+		filepath.Join(tmp, "a.txt"),
+		filepath.Join(tmp, "b.png"),
+	}
+	for _, f := range files {
+		os.WriteFile(f, []byte(f), 0644)
+	}
+
+	if _, err := processPaths(files); err != nil {
+		t.Fatalf("processPaths failed: %v", err)
+	}
+
+	for _, m := range fake.Models() {
+		if m != "fallback-model" {
+			t.Errorf("expected fallback model, got %q", m)
+		}
 	}
 }
