@@ -53,6 +53,8 @@ type Config struct {
 	Comments            bool                     `json:"comments"`
 	SubcategorizeImages bool                     `json:"subcategorize_images"`
 	MinAgeHours         int                      `json:"min_age_hours"`
+	SmartFolders        bool                     `json:"smart_folders"`
+	SmartFoldersDir     string                   `json:"smart_folders_dir"`
 	RequestTimeout      Duration                 `json:"request_timeout"`
 	Categories          map[string]string        `json:"categories"`
 	SafeDeletePatterns  []string                 `json:"safe_delete_patterns"`
@@ -97,6 +99,8 @@ func Defaults() *Config {
 		Comments:            true,
 		SubcategorizeImages: true,
 		MinAgeHours:         0,
+		SmartFolders:        true,
+		SmartFoldersDir:     "~/Documents/Filemaid",
 		RequestTimeout:      Duration(120 * time.Second),
 		Categories: map[string]string{
 			"Screenshots": "~/Documents/Archive/Screenshots",

@@ -514,6 +514,122 @@ func TestApplyDoesNotDuplicateCategoryTag(t *testing.T) {
 	}
 }
 
+func TestApplyAddsFilemaidTagWhenSmartFoldersEnabled(t *testing.T) {
+	tmp := t.TempDir()
+	cfg := testConfig(t, tmp)
+	cfg.Tags = true
+	cfg.SmartFolders = true
+	db := state.NewFake()
+	fs := NewRecordingFS()
+
+	src := filepath.Join(tmp, "Desktop", "img.png")
+	if err := os.MkdirAll(filepath.Dir(src), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(src, []byte("image"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	decision := llm.Decision{Category: "Images", Tags: []string{"image", "desktop"}, Action: "move", Reason: "png"}
+	if _, err := Apply(decision, src, mustHash(t, src), cfg, db, false, fs, "", llm.Metrics{}); err != nil {
+		t.Fatal(err)
+	}
+	if len(fs.Tags) != 1 {
+		t.Fatalf("tagged %d times, want 1", len(fs.Tags))
+	}
+	want := []string{"filemaid", "Images", "image", "desktop"}
+	if !stringSliceEqual(fs.Tags[0].Tags, want) {
+		t.Errorf("tags = %v, want %v", fs.Tags[0].Tags, want)
+	}
+}
+
+func TestApplyNoFilemaidTagWhenSmartFoldersDisabled(t *testing.T) {
+	tmp := t.TempDir()
+	cfg := testConfig(t, tmp)
+	cfg.Tags = true
+	cfg.SmartFolders = false
+	db := state.NewFake()
+	fs := NewRecordingFS()
+
+	src := filepath.Join(tmp, "Desktop", "img.png")
+	if err := os.MkdirAll(filepath.Dir(src), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(src, []byte("image"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	decision := llm.Decision{Category: "Images", Tags: []string{"image", "desktop"}, Action: "move", Reason: "png"}
+	if _, err := Apply(decision, src, mustHash(t, src), cfg, db, false, fs, "", llm.Metrics{}); err != nil {
+		t.Fatal(err)
+	}
+	if len(fs.Tags) != 1 {
+		t.Fatalf("tagged %d times, want 1", len(fs.Tags))
+	}
+	want := []string{"Images", "image", "desktop"}
+	if !stringSliceEqual(fs.Tags[0].Tags, want) {
+		t.Errorf("tags = %v, want %v", fs.Tags[0].Tags, want)
+	}
+}
+
+func TestApplyOnlyFilemaidTagWhenTagsDisabledButSmartFoldersEnabled(t *testing.T) {
+	tmp := t.TempDir()
+	cfg := testConfig(t, tmp)
+	cfg.Tags = false
+	cfg.SmartFolders = true
+	db := state.NewFake()
+	fs := NewRecordingFS()
+
+	src := filepath.Join(tmp, "Desktop", "img.png")
+	if err := os.MkdirAll(filepath.Dir(src), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(src, []byte("image"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	decision := llm.Decision{Category: "Images", Tags: []string{"image", "desktop"}, Action: "move", Reason: "png"}
+	if _, err := Apply(decision, src, mustHash(t, src), cfg, db, false, fs, "", llm.Metrics{}); err != nil {
+		t.Fatal(err)
+	}
+	if len(fs.Tags) != 1 {
+		t.Fatalf("tagged %d times, want 1", len(fs.Tags))
+	}
+	want := []string{"filemaid"}
+	if !stringSliceEqual(fs.Tags[0].Tags, want) {
+		t.Errorf("tags = %v, want %v", fs.Tags[0].Tags, want)
+	}
+}
+
+func TestApplyNilTagsDoesNotPanicWithSmartFolders(t *testing.T) {
+	tmp := t.TempDir()
+	cfg := testConfig(t, tmp)
+	cfg.Tags = false
+	cfg.SmartFolders = true
+	db := state.NewFake()
+	fs := NewRecordingFS()
+
+	src := filepath.Join(tmp, "Desktop", "img.png")
+	if err := os.MkdirAll(filepath.Dir(src), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(src, []byte("image"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	decision := llm.Decision{Category: "Images", Action: "move", Reason: "png"}
+	if _, err := Apply(decision, src, mustHash(t, src), cfg, db, false, fs, "", llm.Metrics{}); err != nil {
+		t.Fatal(err)
+	}
+	if len(fs.Tags) != 1 {
+		t.Fatalf("tagged %d times, want 1", len(fs.Tags))
+	}
+	want := []string{"filemaid"}
+	if !stringSliceEqual(fs.Tags[0].Tags, want) {
+		t.Errorf("tags = %v, want %v", fs.Tags[0].Tags, want)
+	}
+}
+
 func TestApplySetsFinderComment(t *testing.T) {
 	tmp := t.TempDir()
 	cfg := testConfig(t, tmp)

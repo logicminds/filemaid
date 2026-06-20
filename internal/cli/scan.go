@@ -70,6 +70,9 @@ var scanCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
+		if err := regenerateSmartFolders(); err != nil {
+			slog.Warn("smart folder regeneration failed", "error", err)
+		}
 		if len(allResults) == 0 {
 			fmt.Println("No files to process.")
 			return nil

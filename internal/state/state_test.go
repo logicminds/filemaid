@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 
 	"github.com/logicminds/filemaid/internal/llm"
@@ -467,5 +468,60 @@ func TestFakeRepo_History(t *testing.T) {
 	}
 	if records[0].RunID.String != "run-1" {
 		t.Errorf("RunID = %q, want run-1", records[0].RunID.String)
+	}
+}
+
+func TestDistinctTags(t *testing.T) {
+	repo, err := state.Open(filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+	defer repo.Close()
+
+	if err := repo.Record("/a", "/b", "h1", "C", []string{"work", "filemaid", "  ", "personal"}, "move", "r", "", llm.Metrics{}); err != nil {
+		t.Fatalf("Record failed: %v", err)
+	}
+	if err := repo.Record("/c", "/d", "h2", "C", []string{"work", "archive"}, "move", "r", "", llm.Metrics{}); err != nil {
+		t.Fatalf("Record failed: %v", err)
+	}
+	if err := repo.Record("/e", "/f", "h3", "C", nil, "move", "r", "", llm.Metrics{}); err != nil {
+		t.Fatalf("Record failed: %v", err)
+	}
+	if err := repo.Record("/g", "/h", "h4", "C", []string{}, "move", "r", "", llm.Metrics{}); err != nil {
+		t.Fatalf("Record failed: %v", err)
+	}
+
+	got, err := repo.DistinctTags()
+	if err != nil {
+		t.Fatalf("DistinctTags failed: %v", err)
+	}
+	want := []string{"archive", "personal", "work"}
+	if !slices.Equal(got, want) {
+		t.Errorf("DistinctTags() = %v, want %v", got, want)
+	}
+}
+
+func TestFakeRepo_DistinctTags(t *testing.T) {
+	fake := state.NewFake()
+	if err := fake.Record("/a", "/b", "h1", "C", []string{"work", "filemaid", "  ", "personal"}, "move", "r", "", llm.Metrics{}); err != nil {
+		t.Fatalf("Record failed: %v", err)
+	}
+	if err := fake.Record("/c", "/d", "h2", "C", []string{"work", "archive"}, "move", "r", "", llm.Metrics{}); err != nil {
+		t.Fatalf("Record failed: %v", err)
+	}
+	if err := fake.Record("/e", "/f", "h3", "C", nil, "move", "r", "", llm.Metrics{}); err != nil {
+		t.Fatalf("Record failed: %v", err)
+	}
+	if err := fake.Record("/g", "/h", "h4", "C", []string{}, "move", "r", "", llm.Metrics{}); err != nil {
+		t.Fatalf("Record failed: %v", err)
+	}
+
+	got, err := fake.DistinctTags()
+	if err != nil {
+		t.Fatalf("DistinctTags failed: %v", err)
+	}
+	want := []string{"archive", "personal", "work"}
+	if !slices.Equal(got, want) {
+		t.Errorf("DistinctTags() = %v, want %v", got, want)
 	}
 }

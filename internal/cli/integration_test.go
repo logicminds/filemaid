@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -400,5 +401,47 @@ func TestSmokeEndToEnd(t *testing.T) {
 	}
 	if records[0].Category != "Images" {
 		t.Errorf("category = %q, want Images", records[0].Category)
+	}
+}
+
+func TestSmokeSmartFoldersRegeneration(t *testing.T) {
+	resetGlobals(t)
+
+	tmp := t.TempDir()
+	cfg = testConfig(tmp)
+	cfg.Tags = true
+	cfg.SmartFolders = true
+	cfg.SmartFoldersDir = filepath.Join(tmp, "SmartFolders")
+	db = state.NewFake()
+	processFS = actions.NewRecordingFS()
+	applyDecision = actions.Apply
+	classifier = &fakeClassifier{decision: llm.Decision{
+		Category: "Documents",
+		Tags:     []string{"work", "receipt"},
+		Action:   "move",
+		Reason:   "text file",
+	}}
+
+	src := filepath.Join(tmp, "Desktop", "note.txt")
+	if err := os.WriteFile(src, []byte("hello"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := processCmd.RunE(processCmd, []string{src}); err != nil {
+		t.Fatalf("process command failed: %v", err)
+	}
+
+	entries, err := os.ReadDir(cfg.SmartFoldersDir)
+	if err != nil {
+		t.Fatalf("read smart folder dir: %v", err)
+	}
+
+	var names []string
+	for _, e := range entries {
+		names = append(names, e.Name())
+	}
+	want := []string{"Documents.savedSearch", "Images.savedSearch", "Unknown.savedSearch", "receipt.savedSearch", "work.savedSearch"}
+	if !slices.Equal(names, want) {
+		t.Fatalf("saved searches = %v, want %v", names, want)
 	}
 }

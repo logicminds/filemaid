@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"github.com/logicminds/filemaid/internal/llm"
@@ -19,6 +20,7 @@ import (
 type Repo interface {
 	Record(original, final, sha256, category string, tags []string, action, reason string, runID string, metrics llm.Metrics) error
 	FindByHash(sha256 string) (*Record, error)
+	DistinctTags() ([]string, error)
 	FindDecisionByHash(sha256 string) (llm.Decision, bool, error)
 	RecordDecision(sha256 string, decision llm.Decision) error
 	History(limit int, runID string) ([]Record, error)
@@ -184,6 +186,44 @@ func (s *State) FindByHash(sha256 string) (*Record, error) {
 	r.Action = action.String
 	r.Reason = reason.String
 	return &r, nil
+}
+
+// DistinctTags returns all unique tags stored across history rows, excluding the
+// reserved 'filemaid' tag and any empty or whitespace-only values.
+func (s *State) DistinctTags() ([]string, error) {
+	rows, err := s.db.Query("SELECT tags FROM history")
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	seen := make(map[string]struct{})
+	var tags sql.NullString
+	for rows.Next() {
+		if err := rows.Scan(&tags); err != nil {
+			return nil, err
+		}
+		if !tags.Valid || tags.String == "" {
+			continue
+		}
+		for _, t := range strings.Split(tags.String, ",") {
+			t = strings.TrimSpace(t)
+			if t == "" || t == "filemaid" {
+				continue
+			}
+			seen[t] = struct{}{}
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	out := make([]string, 0, len(seen))
+	for t := range seen {
+		out = append(out, t)
+	}
+	sort.Strings(out)
+	return out, nil
 }
 
 // History returns up to limit history rows ordered by most recent first.

@@ -41,6 +41,12 @@ func TestDefaultsMatchPythonReference(t *testing.T) {
 	if cfg.MinAgeHours != 0 {
 		t.Errorf("MinAgeHours = %d, want 0", cfg.MinAgeHours)
 	}
+	if cfg.SmartFolders != true {
+		t.Errorf("SmartFolders = %v, want true", cfg.SmartFolders)
+	}
+	if cfg.SmartFoldersDir != "~/Documents/Filemaid" {
+		t.Errorf("SmartFoldersDir = %q, want ~/Documents/Filemaid", cfg.SmartFoldersDir)
+	}
 
 	defaultCategories := []string{"Screenshots", "Documents", "Receipts", "Images", "Installers", "Code", "Archives", "Media", "Unknown"}
 	for _, name := range defaultCategories {
@@ -127,6 +133,35 @@ func TestEnsureUnknownAddsReviewDir(t *testing.T) {
 
 	if cfg.Categories["Unknown"] != cfg.ReviewDir {
 		t.Errorf("Unknown = %q, want %q", cfg.Categories["Unknown"], cfg.ReviewDir)
+	}
+}
+
+func TestSmartFoldersMarshalUnmarshal(t *testing.T) {
+	orig := Defaults()
+	orig.SmartFolders = true
+	orig.SmartFoldersDir = "~/Documents/Filemaid"
+
+	b, err := json.Marshal(orig)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+
+	if !strings.Contains(string(b), `"smart_folders":true`) {
+		t.Errorf("marshaled JSON missing smart_folders: %s", b)
+	}
+	if !strings.Contains(string(b), `"smart_folders_dir":"~/Documents/Filemaid"`) {
+		t.Errorf("marshaled JSON missing smart_folders_dir: %s", b)
+	}
+
+	var got Config
+	if err := json.Unmarshal(b, &got); err != nil {
+		t.Fatalf("Unmarshal: %v", err)
+	}
+	if got.SmartFolders != true {
+		t.Errorf("SmartFolders = %v, want true", got.SmartFolders)
+	}
+	if got.SmartFoldersDir != "~/Documents/Filemaid" {
+		t.Errorf("SmartFoldersDir = %q, want ~/Documents/Filemaid", got.SmartFoldersDir)
 	}
 }
 
@@ -244,6 +279,30 @@ func TestLoadPath(t *testing.T) {
 				}
 				if cfg.Categories["Custom"] == "" {
 					t.Error("Custom category missing")
+				}
+			},
+		},
+		{
+			name: "missing smart folders uses defaults",
+			user: `{"smart_folders": false, "smart_folders_dir": "~/Custom/Smart"}`,
+			want: func(t *testing.T, cfg *Config) {
+				if cfg.SmartFolders {
+					t.Error("SmartFolders = true, want false")
+				}
+				if !strings.HasPrefix(cfg.SmartFoldersDir, home()) || !strings.Contains(cfg.SmartFoldersDir, "Custom/Smart") {
+					t.Errorf("SmartFoldersDir not expanded correctly: got %q", cfg.SmartFoldersDir)
+				}
+			},
+		},
+		{
+			name: "omitted smart folders keys use defaults",
+			user: `{"model": "custom-model"}`,
+			want: func(t *testing.T, cfg *Config) {
+				if !cfg.SmartFolders {
+					t.Error("SmartFolders = false, want default true")
+				}
+				if !strings.HasPrefix(cfg.SmartFoldersDir, home()) || !strings.Contains(cfg.SmartFoldersDir, "Documents/Filemaid") {
+					t.Errorf("SmartFoldersDir not expanded correctly: got %q", cfg.SmartFoldersDir)
 				}
 			},
 		},

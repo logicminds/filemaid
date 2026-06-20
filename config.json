@@ -29,6 +29,8 @@
   "tags": true,
   "comments": true,
   "subcategorize_images": true,
+  "smart_folders": true,
+  "smart_folders_dir": "~/Documents/Filemaid",
   "min_age_hours": 0,
   "request_timeout": "120s",
   "categories": {

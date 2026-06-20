@@ -2,6 +2,8 @@ package state
 
 import (
 	"database/sql"
+	"sort"
+	"strings"
 	"sync"
 
 	"github.com/logicminds/filemaid/internal/llm"
@@ -117,6 +119,34 @@ func (f *FakeRepo) Records() []Record {
 	out := make([]Record, len(f.records))
 	copy(out, f.records)
 	return out
+}
+
+// DistinctTags returns all unique tags stored across in-memory records,
+// excluding the reserved 'filemaid' tag and any empty or whitespace-only values.
+func (f *FakeRepo) DistinctTags() ([]string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	seen := make(map[string]struct{})
+	for _, r := range f.records {
+		if r.Tags == "" {
+			continue
+		}
+		for _, t := range strings.Split(r.Tags, ",") {
+			t = strings.TrimSpace(t)
+			if t == "" || t == "filemaid" {
+				continue
+			}
+			seen[t] = struct{}{}
+		}
+	}
+
+	out := make([]string, 0, len(seen))
+	for t := range seen {
+		out = append(out, t)
+	}
+	sort.Strings(out)
+	return out, nil
 }
 
 // History returns up to limit in-memory records ordered by insertion order reversed.
