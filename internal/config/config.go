@@ -11,6 +11,8 @@ import (
 type Config struct {
 	OllamaURL           string                   `json:"ollama_url"`
 	Model               string                   `json:"model"`
+	ImageModel          string                   `json:"image_model"`
+	TextModel           string                   `json:"text_model"`
 	WatchDirs           []string                 `json:"watch_dirs"`
 	AllowedDirs         []string                 `json:"allowed_dirs"`
 	AllowedCleaners     []string                 `json:"allowed_cleaners"`
@@ -51,8 +53,9 @@ type ReviewCleanupConfig struct {
 func Defaults() *Config {
 	return &Config{
 		OllamaURL:           "http://localhost:11434",
-		Model:               "filemaid-gemma4-26b",
-		WatchDirs:           []string{"~/Desktop", "~/Downloads"},
+		Model:               "filemaid-metadata",
+		ImageModel:          "filemaid-gemma4-12b",
+		TextModel:           "filemaid-metadata",
 		AllowedDirs:         []string{"~/Desktop", "~/Downloads", "~/Documents/Archive", "~/.filemaid/review"},
 		AllowedCleaners:     []string{"docker", "npm", "cargo", "pip", "brew", "xcode"},
 		ReviewDir:           "~/.filemaid/review",

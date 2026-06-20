@@ -221,6 +221,7 @@ type fakeClassifier struct {
 	err       error
 	validate  error
 	calls     []string
+	models    []string
 	validated bool
 }
 
@@ -228,6 +229,7 @@ func (f *fakeClassifier) Classify(path string, fileHash string, cfg *config.Conf
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.calls = append(f.calls, path)
+	f.models = append(f.models, cfg.Model)
 	return f.decision, f.err
 }
 
@@ -247,6 +249,16 @@ func (f *fakeClassifier) Calls() []string {
 	return out
 }
 
+// Models returns a snapshot of cfg.Model values passed to Classify.
+func (f *fakeClassifier) Models() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make([]string, len(f.models))
+	copy(out, f.models)
+	return out
+}
+
+
 func testConfig(tmpDir string) *config.Config {
 	reviewDir := filepath.Join(tmpDir, "review")
 	desktop := filepath.Join(tmpDir, "Desktop")
@@ -257,10 +269,13 @@ func testConfig(tmpDir string) *config.Config {
 		os.MkdirAll(d, 0755)
 	}
 	return &config.Config{
-		AllowedDirs:        []string{desktop, downloads, images, documents, reviewDir},
-		ReviewDir:          reviewDir,
-		Tags:               false,
-		SafeDeletePatterns: []string{},
+		Model:               "text-model",
+		ImageModel:          "image-model",
+		TextModel:           "text-model",
+		AllowedDirs:         []string{desktop, downloads, images, documents, reviewDir},
+		ReviewDir:           reviewDir,
+		Tags:                false,
+		SafeDeletePatterns:  []string{},
 		Categories: map[string]string{
 			"Images":    images,
 			"Documents": documents,
@@ -603,5 +618,113 @@ func TestProcessCommandPrintsJSON(t *testing.T) {
 	})
 	if !strings.Contains(out, `"ok": true`) {
 		t.Errorf("expected JSON output, got:\n%s", out)
+	}
+}
+
+func TestModelForPathRoutesByExtension(t *testing.T) {
+	tmp := t.TempDir()
+	cfg := testConfig(tmp)
+
+	tests := []struct {
+		path string
+		want string
+	}{
+		{"photo.png", "image-model"},
+		{"photo.jpg", "image-model"},
+		{"photo.jpeg", "image-model"},
+		{"doc.txt", "text-model"},
+		{"doc.pdf", "text-model"},
+		{"archive.zip", "text-model"},
+	}
+	for _, tc := range tests {
+		t.Run(filepath.Ext(tc.path), func(t *testing.T) {
+			got := modelForPath(filepath.Join(tmp, tc.path), cfg)
+			if got != tc.want {
+				t.Errorf("modelForPath(%q) = %q, want %q", tc.path, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestProcessPathsGroupsByModel(t *testing.T) {
+	tmp := t.TempDir()
+	cfg = testConfig(tmp)
+	db = state.NewFake()
+	processFS = actions.NewRecordingFS()
+	fake := &fakeClassifier{decision: llm.Decision{Category: "Documents", Action: "move", Reason: "test"}}
+	classifier = fake
+
+	files := []string{
+		filepath.Join(tmp, "Desktop", "a.txt"),
+		filepath.Join(tmp, "Images", "b.png"),
+		filepath.Join(tmp, "Documents", "c.txt"),
+		filepath.Join(tmp, "Images", "d.jpg"),
+	}
+	for _, f := range files {
+		os.MkdirAll(filepath.Dir(f), 0755)
+		os.WriteFile(f, []byte(f), 0644)
+	}
+
+	if _, err := processPaths(files); err != nil {
+		t.Fatalf("processPaths failed: %v", err)
+	}
+
+	calls := fake.Calls()
+	models := fake.Models()
+	if len(models) != len(files) {
+		t.Fatalf("got %d Classify calls, want %d", len(models), len(files))
+	}
+
+	pathToModel := make(map[string]string, len(files))
+	for i, path := range calls {
+		pathToModel[path] = models[i]
+	}
+
+	for _, path := range files {
+		want := "text-model"
+		if llm.IsImageFile(path) {
+			want = "image-model"
+		}
+		got, ok := pathToModel[path]
+		if !ok {
+			t.Errorf("file %q was not classified", path)
+			continue
+		}
+		if got != want {
+			t.Errorf("file %q classified with model %q, want %q", path, got, want)
+		}
+	}
+}
+
+func TestProcessPathsFallsBackToModel(t *testing.T) {
+	tmp := t.TempDir()
+	cfg = &config.Config{
+		Model:       "fallback-model",
+		AllowedDirs: []string{tmp},
+		ReviewDir:   tmp,
+		Tags:        false,
+		Categories:  map[string]string{"Unknown": tmp},
+	}
+	db = state.NewFake()
+	processFS = actions.NewRecordingFS()
+	fake := &fakeClassifier{decision: llm.Decision{Category: "Unknown", Action: "review"}}
+	classifier = fake
+
+	files := []string{
+		filepath.Join(tmp, "a.txt"),
+		filepath.Join(tmp, "b.png"),
+	}
+	for _, f := range files {
+		os.WriteFile(f, []byte(f), 0644)
+	}
+
+	if _, err := processPaths(files); err != nil {
+		t.Fatalf("processPaths failed: %v", err)
+	}
+
+	for _, m := range fake.Models() {
+		if m != "fallback-model" {
+			t.Errorf("expected fallback model, got %q", m)
+		}
 	}
 }

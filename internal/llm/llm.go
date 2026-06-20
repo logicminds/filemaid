@@ -292,6 +292,14 @@ var imageExts = map[string]bool{
 	".heic": true,
 }
 
+
+// IsImageFile reports whether path has an extension treated as an image for
+// classification purposes. It is used by callers to route files to the
+// configured image model.
+func IsImageFile(path string) bool {
+	ext := strings.ToLower(filepath.Ext(path))
+	return imageExts[ext]
+}
 var textExts = map[string]bool{
 	".txt":   true,
 	".md":    true,

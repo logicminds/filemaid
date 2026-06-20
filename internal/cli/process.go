@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -49,6 +50,42 @@ type processItem struct {
 	isDuplicate bool
 	ageDecision llm.Decision
 	ageMatched  bool
+	model       string
+}
+
+// modelForPath returns the configured model to use for the given path.
+// Image files route to ImageModel; everything else routes to TextModel.
+// Either falls back to Model when the specific model is not configured.
+func modelForPath(path string, cfg *config.Config) string {
+	if llm.IsImageFile(path) {
+		if cfg.ImageModel != "" {
+			return cfg.ImageModel
+		}
+	} else {
+		if cfg.TextModel != "" {
+			return cfg.TextModel
+		}
+	}
+	return cfg.Model
+}
+
+// groupItemsByModel groups process items by their target model name.
+func groupItemsByModel(items []processItem) map[string][]processItem {
+	groups := make(map[string][]processItem)
+	for _, item := range items {
+		groups[item.model] = append(groups[item.model], item)
+	}
+	return groups
+}
+
+// sortedModelNames returns the model keys of groups in deterministic order.
+func sortedModelNames(groups map[string][]processItem) []string {
+	names := make([]string, 0, len(groups))
+	for name := range groups {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
 }
 
 var (
@@ -196,6 +233,7 @@ func processPaths(paths []string) ([]processResult, error) {
 			isDuplicate: isDuplicate,
 			ageDecision: ageDecision,
 			ageMatched:  ageMatched,
+			model:       modelForPath(src, cfg),
 		})
 	}
 
@@ -204,70 +242,77 @@ func processPaths(paths []string) ([]processResult, error) {
 	sem := make(chan struct{}, defaultProcessWorkers)
 	var applyMu sync.Mutex
 
-	for _, item := range items {
-		wg.Add(1)
-		go func(item processItem) {
-			defer wg.Done()
-			sem <- struct{}{}
-			defer func() { <-sem }()
+	groups := groupItemsByModel(items)
+	for _, model := range sortedModelNames(groups) {
+		groupItems := groups[model]
+		groupCfg := *cfg
+		groupCfg.Model = model
 
-			decision := item.ageDecision
-			if !item.ageMatched {
-				fmt.Fprintf(os.Stderr, "Classifying %s...\n", item.src)
-				var err error
-				decision, err = classifier.Classify(item.src, item.fileHash, cfg)
+		for _, item := range groupItems {
+			wg.Add(1)
+			go func(item processItem, cfg *config.Config) {
+				defer wg.Done()
+				sem <- struct{}{}
+				defer func() { <-sem }()
+
+				decision := item.ageDecision
+				if !item.ageMatched {
+					fmt.Fprintf(os.Stderr, "Classifying %s...\n", item.src)
+					var err error
+					decision, err = classifier.Classify(item.src, item.fileHash, cfg)
+					if err != nil {
+						slog.Warn("classification failed", "path", item.src, "error", err)
+						decision = llm.NewDecision()
+					}
+				}
+
+				if item.isDuplicate {
+					if actions.MatchesPatterns(item.src, cfg.SafeDeletePatterns) {
+						decision.Action = "delete"
+						decision.Reason += "; duplicate matches safe delete pattern"
+					} else if decision.Action != "review" {
+						decision.Action = "review"
+						decision.Reason += "; duplicate detected"
+					}
+				}
+
+				applyMu.Lock()
+				result, err := applyDecision(decision, item.src, item.fileHash, cfg, db, item.isDuplicate, processFS)
+				applyMu.Unlock()
+
 				if err != nil {
-					slog.Warn("classification failed", "path", item.src, "error", err)
-					decision = llm.NewDecision()
+					slog.Error("apply failed", "path", item.src, "error", err)
+					results[item.pos] = processResult{
+						Path:     item.src,
+						Category: decision.Category,
+						Tags:     processTags(decision),
+						Action:   decision.Action,
+						Result:   "",
+						OK:       false,
+						Error:    err.Error(),
+					}
+					return
 				}
-			}
 
-			if item.isDuplicate {
-				if actions.MatchesPatterns(item.src, cfg.SafeDeletePatterns) {
-					decision.Action = "delete"
-					decision.Reason += "; duplicate matches safe delete pattern"
-				} else if decision.Action != "review" {
-					decision.Action = "review"
-					decision.Reason += "; duplicate detected"
-				}
-			}
-
-			applyMu.Lock()
-			result, err := applyDecision(decision, item.src, item.fileHash, cfg, db, item.isDuplicate, processFS)
-			applyMu.Unlock()
-
-			if err != nil {
-				slog.Error("apply failed", "path", item.src, "error", err)
+				slog.Info("processed",
+					"src", item.src,
+					"result", result,
+					"category", decision.Category,
+					"action", decision.Action,
+					"reason", decision.Reason,
+				)
 				results[item.pos] = processResult{
 					Path:     item.src,
 					Category: decision.Category,
 					Tags:     processTags(decision),
 					Action:   decision.Action,
-					Result:   "",
-					OK:       false,
-					Error:    err.Error(),
+					Result:   result,
+					OK:       true,
 				}
-				return
-			}
-
-			slog.Info("processed",
-				"src", item.src,
-				"result", result,
-				"category", decision.Category,
-				"action", decision.Action,
-				"reason", decision.Reason,
-			)
-			results[item.pos] = processResult{
-				Path:     item.src,
-				Category: decision.Category,
-				Tags:     processTags(decision),
-				Action:   decision.Action,
-				Result:   result,
-				OK:       true,
-			}
-		}(item)
+			}(item, &groupCfg)
+		}
+		wg.Wait()
 	}
-	wg.Wait()
 	return results, nil
 }
 
