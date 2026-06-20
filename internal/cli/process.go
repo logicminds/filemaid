@@ -364,6 +364,31 @@ func processPaths(ctx context.Context, paths []string, runID string) ([]processR
 
 		ageDecision, ageMatched := checkAgeRule(src, cfg)
 
+		// Decision cache hit: apply the cached decision directly without
+		// acquiring a worker or calling the LLM.
+		if !ageMatched {
+			if cached, ok, err := db.FindDecisionByHash(fileHash); err == nil && ok {
+				decision := coerceDuplicateDecision(cached, src, cfg, isDuplicate)
+				results[i] = applyFile(src, fileHash, isDuplicate, decision, llm.Metrics{}, runID)
+				continue
+			}
+		}
+
+		// Duplicates that cannot be promoted to delete are reviewed immediately
+		// without an LLM round-trip.
+		if isDuplicate && !actions.MatchesPatterns(src, cfg.SafeDeletePatterns) {
+			var decision llm.Decision
+			if ageMatched {
+				decision = ageDecision
+			} else {
+				decision = llm.NewDecision()
+				decision.Reason = "duplicate detected"
+			}
+			decision = coerceDuplicateDecision(decision, src, cfg, isDuplicate)
+			results[i] = applyFile(src, fileHash, isDuplicate, decision, llm.Metrics{}, runID)
+			continue
+		}
+
 		items = append(items, processItem{
 			pos:         i,
 			src:         src,
@@ -403,55 +428,11 @@ func processPaths(ctx context.Context, paths []string, runID string) ([]processR
 					}
 				}
 
-				if item.isDuplicate {
-					if actions.MatchesPatterns(item.src, cfg.SafeDeletePatterns) {
-						decision.Action = "delete"
-						decision.Reason += "; duplicate matches safe delete pattern"
-					} else if decision.Action != "review" {
-						decision.Action = "review"
-						decision.Reason += "; duplicate detected"
-					}
-				}
+				decision = coerceDuplicateDecision(decision, item.src, cfg, item.isDuplicate)
 
 				applyMu.Lock()
-				result, err := applyDecision(decision, item.src, item.fileHash, cfg, db, item.isDuplicate, processFS, runID, metrics)
+				results[item.pos] = applyFile(item.src, item.fileHash, item.isDuplicate, decision, metrics, runID)
 				applyMu.Unlock()
-
-				if err != nil {
-					slog.Error("apply failed", "path", item.src, "error", err)
-					results[item.pos] = processResult{
-						Path:     item.src,
-						Category: decision.Category,
-						Tags:     processTags(decision),
-						Action:   decision.Action,
-						Result:   "",
-						OK:       false,
-						Error:    err.Error(),
-					}
-					return
-				}
-
-				slog.Info("processed",
-					"src", item.src,
-					"result", result,
-					"category", decision.Category,
-					"action", decision.Action,
-					"reason", decision.Reason,
-				)
-				results[item.pos] = processResult{
-					Path:             item.src,
-					Category:         decision.Category,
-					Tags:             processTags(decision),
-					Action:           decision.Action,
-					Result:           result,
-					OK:               true,
-					DurationMs:       metrics.DurationMs,
-					PromptTokens:     metrics.PromptTokens,
-					CompletionTokens: metrics.CompletionTokens,
-					TotalTokens:      metrics.TotalTokens,
-					TokensPerSec:     metrics.TokensPerSec,
-					ContextSize:      metrics.ContextSize,
-				}
 			}(item, &groupCfg)
 		}
 		wg.Wait()
@@ -467,6 +448,61 @@ func skipResult(path string, reason string) processResult {
 		Result: "-",
 		OK:     false,
 		Error:  reason,
+	}
+}
+
+// coerceDuplicateDecision applies duplicate safety rules to a decision.
+// Safe-delete duplicates are promoted to delete; all other duplicates are
+// coerced to review.
+func coerceDuplicateDecision(decision llm.Decision, src string, cfg *config.Config, isDuplicate bool) llm.Decision {
+	if !isDuplicate {
+		return decision
+	}
+	if actions.MatchesPatterns(src, cfg.SafeDeletePatterns) {
+		decision.Action = "delete"
+		decision.Reason += "; duplicate matches safe delete pattern"
+	} else if decision.Action != "review" {
+		decision.Action = "review"
+		decision.Reason += "; duplicate detected"
+	}
+	return decision
+}
+
+// applyFile applies a decision to a single file and builds a processResult.
+func applyFile(src, fileHash string, isDuplicate bool, decision llm.Decision, metrics llm.Metrics, runID string) processResult {
+	result, err := applyDecision(decision, src, fileHash, cfg, db, isDuplicate, processFS, runID, metrics)
+	if err != nil {
+		slog.Error("apply failed", "path", src, "error", err)
+		return processResult{
+			Path:     src,
+			Category: decision.Category,
+			Tags:     processTags(decision),
+			Action:   decision.Action,
+			Result:   "",
+			OK:       false,
+			Error:    err.Error(),
+		}
+	}
+	slog.Info("processed",
+		"src", src,
+		"result", result,
+		"category", decision.Category,
+		"action", decision.Action,
+		"reason", decision.Reason,
+	)
+	return processResult{
+		Path:             src,
+		Category:         decision.Category,
+		Tags:             processTags(decision),
+		Action:           decision.Action,
+		Result:           result,
+		OK:               true,
+		DurationMs:       metrics.DurationMs,
+		PromptTokens:     metrics.PromptTokens,
+		CompletionTokens: metrics.CompletionTokens,
+		TotalTokens:      metrics.TotalTokens,
+		TokensPerSec:     metrics.TokensPerSec,
+		ContextSize:      metrics.ContextSize,
 	}
 }
 

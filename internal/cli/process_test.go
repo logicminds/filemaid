@@ -816,3 +816,205 @@ func TestProcessPathsFallsBackToModel(t *testing.T) {
 		}
 	}
 }
+func TestProcessPathsUsesCachedDecisionWithoutClassifying(t *testing.T) {
+	tmp := t.TempDir()
+	cfg = testConfig(tmp)
+	db = state.NewFake()
+	processFS = actions.NewRecordingFS()
+	fc := &fakeClassifier{decision: llm.Decision{
+		Category: "Documents",
+		Action:   "move",
+		Reason:   "should not run",
+	}}
+	classifier = fc
+
+	src := filepath.Join(tmp, "Desktop", "note.txt")
+	os.MkdirAll(filepath.Dir(src), 0755)
+	os.WriteFile(src, []byte("cached"), 0644)
+
+	hash, err := actions.ComputeHash(src)
+	if err != nil {
+		t.Fatalf("compute hash: %v", err)
+	}
+	_ = db.RecordDecision(hash, llm.Decision{
+		Category: "Images",
+		Action:   "move",
+		Reason:   "from cache",
+	})
+
+	if _, err := processPaths(context.Background(), []string{src}, "run-test"); err != nil {
+		t.Fatal(err)
+	}
+
+	if len(fc.Calls()) != 0 {
+		t.Errorf("expected classifier to be skipped, got %d calls", len(fc.Calls()))
+	}
+
+	records := db.(*state.FakeRepo).Records()
+	if len(records) != 1 {
+		t.Fatalf("expected 1 history record, got %d", len(records))
+	}
+	if records[0].Category != "Images" {
+		t.Errorf("category = %q, want Images", records[0].Category)
+	}
+	if records[0].Action != "move" {
+		t.Errorf("action = %q, want move", records[0].Action)
+	}
+}
+
+func TestProcessPathsDuplicateSkipsClassification(t *testing.T) {
+	tmp := t.TempDir()
+	cfg = testConfig(tmp)
+	db = state.NewFake()
+	processFS = actions.NewRecordingFS()
+	fc := &fakeClassifier{decision: llm.Decision{
+		Category: "Documents",
+		Action:   "move",
+		Reason:   "text",
+	}}
+	classifier = fc
+
+	src1 := filepath.Join(tmp, "Desktop", "a.txt")
+	src2 := filepath.Join(tmp, "Desktop", "b.txt")
+	os.MkdirAll(filepath.Dir(src1), 0755)
+	os.WriteFile(src1, []byte("same"), 0644)
+	os.WriteFile(src2, []byte("same"), 0644)
+
+	if _, err := processPaths(context.Background(), []string{src1, src2}, "run-test"); err != nil {
+		t.Fatal(err)
+	}
+
+	if len(fc.Calls()) != 1 {
+		t.Errorf("expected 1 classification, got %d", len(fc.Calls()))
+	}
+
+	records := db.(*state.FakeRepo).Records()
+	if len(records) != 2 {
+		t.Fatalf("expected 2 history records, got %d", len(records))
+	}
+
+	var moves, reviews int
+	for _, r := range records {
+		switch r.Action {
+		case "move":
+			moves++
+		case "review":
+			reviews++
+		}
+	}
+	if moves != 1 {
+		t.Errorf("expected 1 move, got %d", moves)
+	}
+	if reviews != 1 {
+		t.Errorf("expected 1 review, got %d", reviews)
+	}
+}
+
+func TestProcessPathsDuplicateWithSafeDeleteStillClassifies(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("HOME", tmp)
+	cfg = testConfig(tmp)
+	cfg.SafeDeletePatterns = []string{"~/Downloads/*.tmp"}
+	db = state.NewFake()
+	processFS = actions.NewRecordingFS()
+	fc := &fakeClassifier{decision: llm.Decision{
+		Category: "Documents",
+		Action:   "move",
+		Reason:   "text",
+	}}
+	classifier = fc
+
+	downloads := filepath.Join(tmp, "Downloads")
+	os.MkdirAll(downloads, 0755)
+	src1 := filepath.Join(downloads, "a.tmp")
+	src2 := filepath.Join(downloads, "b.tmp")
+	os.WriteFile(src1, []byte("same"), 0644)
+	os.WriteFile(src2, []byte("same"), 0644)
+
+	if _, err := processPaths(context.Background(), []string{src1, src2}, "run-test"); err != nil {
+		t.Fatal(err)
+	}
+
+	if len(fc.Calls()) != 2 {
+		t.Errorf("expected 2 classifications for safe-delete duplicates, got %d", len(fc.Calls()))
+	}
+
+	records := db.(*state.FakeRepo).Records()
+	if len(records) != 2 {
+		t.Fatalf("expected 2 history records, got %d", len(records))
+	}
+
+	var moves, deletes int
+	for _, r := range records {
+		switch r.Action {
+		case "move":
+			moves++
+		case "delete":
+			deletes++
+		}
+	}
+	if moves != 1 {
+		t.Errorf("expected 1 move, got %d", moves)
+	}
+	if deletes != 1 {
+		t.Errorf("expected 1 delete, got %d", deletes)
+	}
+}
+
+func TestProcessPathsCachedDecisionCoercedForDuplicate(t *testing.T) {
+	tmp := t.TempDir()
+	cfg = testConfig(tmp)
+	db = state.NewFake()
+	processFS = actions.NewRecordingFS()
+	fc := &fakeClassifier{decision: llm.Decision{
+		Category: "Documents",
+		Action:   "move",
+		Reason:   "should not run",
+	}}
+	classifier = fc
+
+	src1 := filepath.Join(tmp, "Desktop", "a.txt")
+	src2 := filepath.Join(tmp, "Desktop", "b.txt")
+	os.MkdirAll(filepath.Dir(src1), 0755)
+	os.WriteFile(src1, []byte("cached"), 0644)
+	os.WriteFile(src2, []byte("cached"), 0644)
+
+	hash, err := actions.ComputeHash(src1)
+	if err != nil {
+		t.Fatalf("compute hash: %v", err)
+	}
+	_ = db.RecordDecision(hash, llm.Decision{
+		Category: "Images",
+		Action:   "move",
+		Reason:   "from cache",
+	})
+
+	if _, err := processPaths(context.Background(), []string{src1, src2}, "run-test"); err != nil {
+		t.Fatal(err)
+	}
+
+	if len(fc.Calls()) != 0 {
+		t.Errorf("expected classifier to be skipped, got %d calls", len(fc.Calls()))
+	}
+
+	records := db.(*state.FakeRepo).Records()
+	if len(records) != 2 {
+		t.Fatalf("expected 2 history records, got %d", len(records))
+	}
+
+	var moves, reviews int
+	for _, r := range records {
+		switch r.Action {
+		case "move":
+			moves++
+		case "review":
+			reviews++
+		}
+	}
+	if moves != 1 {
+		t.Errorf("expected 1 move, got %d", moves)
+	}
+	if reviews != 1 {
+		t.Errorf("expected 1 review, got %d", reviews)
+	}
+}
