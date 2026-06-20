@@ -308,15 +308,21 @@ func readRequestBody(req *http.Request) map[string]any {
 // message in an /api/chat request body.
 func chatImageCount(body map[string]any) int {
 	msgs, ok := body["messages"].([]any)
-	if !ok || len(msgs) < 2 {
-		return 0
-	}
-	user, ok := msgs[1].(map[string]any)
 	if !ok {
 		return 0
 	}
-	imgs, _ := user["images"].([]any)
-	return len(imgs)
+	for _, m := range msgs {
+		msg, ok := m.(map[string]any)
+		if !ok {
+			continue
+		}
+		if role, _ := msg["role"].(string); role != "user" {
+			continue
+		}
+		imgs, _ := msg["images"].([]any)
+		return len(imgs)
+	}
+	return 0
 }
 
 func jsonResponse(body map[string]any) *http.Response {

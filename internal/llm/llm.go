@@ -585,14 +585,12 @@ func categorySet(categories map[string]string) map[string]bool {
 
 func (c *Client) requestGenerate(ollamaURL, model, prompt string, images []string) (map[string]any, error) {
 	body := map[string]any{
-		"model": model,
-		"system": ("You classify files for a macOS file manager. " +
-			"Output valid JSON only with keys category, subcategory, tags, action, destination, reason. " +
-			"No markdown, no code fences, no extra text."),
+		"model":      model,
 		"prompt":     prompt,
 		"images":     images,
 		"stream":     false,
 		"keep_alive": "5m",
+		"think":      false,
 		"options": map[string]any{
 			"temperature": 0.2,
 			"num_predict": 512,
@@ -612,13 +610,6 @@ func (c *Client) requestChat(ollamaURL, model, prompt string, images []string, c
 		"model": model,
 		"messages": []map[string]any{
 			{
-				"role": "system",
-				"content": ("You classify files for a macOS file manager. Use the classify_file tool. " +
-					"If the category is clear, action should be move. " +
-					"Use delete only for obvious trash, installers, or duplicates. " +
-					"Use review only when ambiguous, sensitive, or unclassifiable."),
-			},
-			{
 				"role":    "user",
 				"content": prompt,
 				"images":  images,
@@ -627,6 +618,7 @@ func (c *Client) requestChat(ollamaURL, model, prompt string, images []string, c
 		"tools":      []map[string]any{toolSchema(catList)},
 		"stream":     false,
 		"keep_alive": "5m",
+		"think":      false,
 		"options": map[string]any{
 			"temperature": 0.2,
 			"num_predict": 512,
