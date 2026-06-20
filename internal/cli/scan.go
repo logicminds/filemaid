@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/logicminds/filemaid/internal/actions"
+	"github.com/logicminds/filemaid/internal/log"
 
 	"github.com/spf13/cobra"
 )
@@ -23,15 +24,15 @@ var (
 
 func init() {
 	scanCmd.Flags().StringVar(&scanDir, "dir", "", "directory to scan (default: watch_dirs)")
-	scanCmd.Flags().StringVar(&processFormat, "format", "table", "output format (table|json)")
+	scanCmd.Flags().StringVar(&processFormat, "format", "table", "output format (table|human|json)")
 	scanCmd.Flags().BoolVar(&processJSON, "json", false, "output results as JSON (shorthand for --format json)")
+	scanCmd.Flags().BoolVar(&processQuiet, "quiet", false, "suppress log output to stderr")
 	rootCmd.AddCommand(scanCmd)
 }
 
 var scanCmd = &cobra.Command{
 	Use:   "scan",
 	Short: "Scan watch directories for stale files",
-	Long:  "Scan the configured watch directories (or a single directory with --dir) for files matching age rules and queue them for processing.",
 	RunE: func(cmd *cobra.Command, args []string) error {
 		if err := classifier.Validate(cfg); err != nil {
 			return fmt.Errorf("model validation failed: %w", err)
@@ -42,6 +43,16 @@ var scanCmd = &cobra.Command{
 			ctx = cmd.Context()
 		}
 		runID := newRunID()
+
+		format := processFormat
+		if processJSON {
+			format = "json"
+		}
+		quiet := processQuiet || (format != "json" && isTerminal(os.Stdout))
+		if quiet {
+			log.SetStderrEnabled(false)
+			defer log.SetStderrEnabled(true)
+		}
 
 		var allResults []processResult
 		var err error
@@ -62,10 +73,6 @@ var scanCmd = &cobra.Command{
 		if len(allResults) == 0 {
 			fmt.Println("No files to process.")
 			return nil
-		}
-		format := processFormat
-		if processJSON {
-			format = "json"
 		}
 		out, err := formatProcessResults(allResults, format)
 		if err != nil {

@@ -47,7 +47,7 @@ var historyCmd = &cobra.Command{
 			fmt.Printf("%d files processed in run %s\n\n", len(records), runID)
 		}
 		for _, r := range records {
-			fmt.Printf("%s  %s\n  category=%s action=%s result=%s\n", r.CreatedAt, r.OriginalPath, r.Category, r.Action, r.FinalPath)
+			fmt.Printf("%s  %s\n  category=%s action=%s result=%s\n", r.CreatedAt, collapseHome(r.OriginalPath), r.Category, r.Action, collapseHome(r.FinalPath))
 			if r.PromptTokens.Int64 > 0 || r.CompletionTokens.Int64 > 0 {
 				fmt.Printf("  tokens=%d/%d (%.1f tok/s) duration=%dms ctx=%d\n", r.PromptTokens.Int64, r.CompletionTokens.Int64, r.TokensPerSec.Float64, r.LLMDurationMs.Int64, r.ContextSize.Int64)
 			}

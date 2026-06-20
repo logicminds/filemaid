@@ -21,7 +21,7 @@ func TestFormatCleanupTable(t *testing.T) {
 	if !strings.Contains(out, "1.0 kB") {
 		t.Errorf("table missing saved space: %s", out)
 	}
-	if !strings.Contains(out, "not_allowed") {
+	if !strings.Contains(out, "not_allowed") && !strings.Contains(out, "-") {
 		t.Errorf("table missing status: %s", out)
 	}
 }

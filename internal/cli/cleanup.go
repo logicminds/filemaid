@@ -4,9 +4,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"os"
 	"strings"
 
 	"github.com/logicminds/filemaid/internal/cleaners"
+	"github.com/logicminds/filemaid/internal/log"
 
 	"github.com/spf13/cobra"
 )
@@ -25,6 +27,7 @@ var (
 func init() {
 	cleanupCmd.Flags().BoolVar(&cleanupDryRun, "dry-run", false, "do not actually clean anything")
 	cleanupCmd.Flags().StringVar(&cleanupFormat, "format", "table", "output format (table|json)")
+	cleanupCmd.Flags().BoolVar(&processQuiet, "quiet", false, "suppress log output to stderr")
 	rootCmd.AddCommand(cleanupCmd)
 }
 
@@ -33,6 +36,12 @@ var cleanupCmd = &cobra.Command{
 	Short: "Run dev artifact cleaners",
 	Long:  "Run the configured dev-artifact and review-queue cleaners (docker, npm, cargo, pip, brew, xcode, review).",
 	RunE: func(cmd *cobra.Command, args []string) error {
+		quiet := processQuiet || (cleanupFormat != "json" && isTerminal(os.Stdout))
+		if quiet {
+			log.SetStderrEnabled(false)
+			defer log.SetStderrEnabled(true)
+		}
+
 		results := runCleanup(cleanupDryRun)
 		out, err := formatCleanupResults(results, cleanupFormat)
 		if err != nil {
@@ -108,6 +117,7 @@ func formatCleanupResults(results []cleaners.CleanupResult, format string) (stri
 
 // formatCleanupTable renders cleaner results as an ASCII table.
 func formatCleanupTable(results []cleaners.CleanupResult) string {
+	useColor := isTerminal(os.Stdout)
 	headers := []string{"Cleaner", "Status", "Space saved", "Details"}
 	rows := make([][]string, 0, len(results))
 	for _, r := range results {
@@ -121,7 +131,19 @@ func formatCleanupTable(results []cleaners.CleanupResult) string {
 		if r.Detail != "" {
 			detail = strings.Split(r.Detail, "\n")[0]
 		}
-		rows = append(rows, []string{r.Name, r.Status, saved, detail})
+		status := cleanupStatusSymbol(r.Status, useColor)
+		rows = append(rows, []string{r.Name, status, saved, detail})
 	}
 	return renderTable(headers, rows)
+}
+
+func cleanupStatusSymbol(status string, useColor bool) string {
+	switch status {
+	case "success", "ok":
+		return colorize("✓", colorGreen, useColor)
+	case "disabled", "not_installed", "not_allowed":
+		return colorize("-", colorCyan, useColor)
+	default:
+		return colorize("⚠", colorYellow, useColor)
+	}
 }
