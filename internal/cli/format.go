@@ -73,3 +73,80 @@ func mapSliceIndex[T any, U any](in []T, widths []int, fn func(T, int) U) []U {
 	}
 	return out
 }
+
+// isTerminal reports whether f is connected to an interactive terminal.
+// It uses the character-device check, which is sufficient on macOS and Unix.
+func isTerminal(f *os.File) bool {
+	stat, err := f.Stat()
+	if err != nil {
+		return false
+	}
+	return stat.Mode()&os.ModeCharDevice != 0
+}
+
+// ANSI color/formatting codes. These are only applied when stdout is a terminal.
+const (
+	colorReset  = "\033[0m"
+	colorBold   = "\033[1m"
+	colorRed    = "\033[31m"
+	colorGreen  = "\033[32m"
+	colorYellow = "\033[33m"
+	colorBlue   = "\033[34m"
+	colorCyan   = "\033[36m"
+)
+
+// colorize wraps s with code and reset when useColor is true.
+func colorize(s, code string, useColor bool) string {
+	if !useColor {
+		return s
+	}
+	return code + s + colorReset
+}
+
+// truncatePath shortens p to at most maxLen runes, preserving the basename.
+func truncatePath(p string, maxLen int) string {
+	if maxLen <= 0 {
+		return p
+	}
+	r := []rune(p)
+	if len(r) <= maxLen {
+		return p
+	}
+	base := []rune(filepath.Base(p))
+	if len(base) >= maxLen {
+		if maxLen <= 3 {
+			return string(base[len(base)-maxLen:])
+		}
+		return "..." + string(base[len(base)-maxLen+3:])
+	}
+	// "prefix ... basename"
+	reserve := len(base) + 5 // " ... "
+	if reserve > maxLen {
+		return "..." + string(base[len(base)-maxLen+3:])
+	}
+	prefixLen := maxLen - reserve
+	return string(r[:prefixLen]) + " ... " + string(base)
+}
+
+// truncateTags joins tags and truncates the result to maxLen runes.
+func truncateTags(tags []string, maxLen int) string {
+	if maxLen <= 0 {
+		return strings.Join(tags, ", ")
+	}
+	s := strings.Join(tags, ", ")
+	r := []rune(s)
+	if len(r) <= maxLen {
+		return s
+	}
+	if maxLen <= 3 {
+		return "..."
+	}
+	return string(r[:maxLen-3]) + "..."
+}
+
+func max(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
+}

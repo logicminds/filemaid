@@ -100,8 +100,17 @@ For instant per-file processing without background agents, use the Shortcuts fol
 ## Usage
 
 ```zsh
-# Process files manually
+# Process files manually (table output, auto-quiet in a terminal)
 ./bin/filemaid process ~/Desktop/Screenshot*.png ~/Downloads/receipt.pdf
+
+# Process files with a more readable list format
+./bin/filemaid process --format human ~/Desktop/Screenshot*.png
+
+# Get process results as JSON
+./bin/filemaid process --json ~/Desktop/Screenshot*.png
+
+# Suppress JSON log lines on stderr
+./bin/filemaid process --quiet ~/Desktop/Screenshot*.png ~/Downloads/receipt.pdf
 
 # Scan watch directories
 ./bin/filemaid scan

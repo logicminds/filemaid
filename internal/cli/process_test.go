@@ -549,7 +549,7 @@ func TestFormatProcessTable(t *testing.T) {
 		{Path: "/tmp/bad", Category: "Documents", Tags: []string{}, Action: "move", Result: "", OK: false, Error: "move failed"},
 	}
 	out := formatProcessTable(results)
-	for _, want := range []string{"File", "Category", "Tags", "Action", "Result", "Status", "Documents", "txt", "Receipts", "pdf", "✅", "❌"} {
+	for _, want := range []string{"File", "Category", "Tags", "Action", "Result", "Status", "Documents", "txt", "Receipts", "pdf", "✓", "⚠"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("table output missing %q:\n%s", want, out)
 		}
@@ -575,6 +575,49 @@ func TestFormatProcessResultsJSON(t *testing.T) {
 		}
 	}
 }
+func TestFormatHuman(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	results := []processResult{
+		{Path: filepath.Join(home, "Desktop", "note.txt"), Category: "Documents", Tags: []string{"txt"}, Action: "move", Result: filepath.Join(home, "Documents", "Archive", "note.txt"), OK: true},
+		{Path: "/tmp/missing", Action: "skip", Result: "-", OK: false, Error: "path does not exist"},
+	}
+	out := formatHuman(results)
+	for _, want := range []string{"note.txt", "Documents", "txt", "move", "~/Documents/Archive/note.txt", "path does not exist", "2 files processed", "1 ok", "1 skip"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("human output missing %q:\n%s", want, out)
+		}
+	}
+}
+
+func TestProcessPathsIncludesSkippedResults(t *testing.T) {
+	tmp := t.TempDir()
+	cfg = testConfig(tmp)
+	db = state.NewFake()
+	processFS = actions.NewOSFS()
+
+	valid := filepath.Join(tmp, "Desktop", "note.txt")
+	os.MkdirAll(filepath.Dir(valid), 0755)
+	os.WriteFile(valid, []byte("hello"), 0644)
+	missing := filepath.Join(tmp, "Desktop", "gone.txt")
+
+	results, err := processPaths(context.Background(), []string{valid, missing}, "run-test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(results) != 2 {
+		t.Fatalf("expected 2 results, got %d", len(results))
+	}
+	if results[0].Path != valid {
+		t.Errorf("results[0].Path = %q, want %q", results[0].Path, valid)
+	}
+	if results[1].Path != missing {
+		t.Errorf("results[1].Path = %q, want %q", results[1].Path, missing)
+	}
+	if results[1].Action != "skip" {
+		t.Errorf("results[1].Action = %q, want skip", results[1].Action)
+	}
+}
 
 func TestProcessCommandPrintsTable(t *testing.T) {
 	tmp := t.TempDir()
@@ -597,7 +640,7 @@ func TestProcessCommandPrintsTable(t *testing.T) {
 			t.Fatalf("process failed: %v", err)
 		}
 	})
-	if !strings.Contains(out, "File") || !strings.Contains(out, "✅") {
+	if !strings.Contains(out, "File") || !strings.Contains(out, "✓") {
 		t.Errorf("expected table output, got:\n%s", out)
 	}
 }

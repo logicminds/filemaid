@@ -16,6 +16,7 @@ import (
 	"github.com/logicminds/filemaid/internal/actions"
 	"github.com/logicminds/filemaid/internal/config"
 	"github.com/logicminds/filemaid/internal/llm"
+	"github.com/logicminds/filemaid/internal/log"
 	"github.com/logicminds/filemaid/internal/state"
 
 	"github.com/spf13/cobra"
@@ -46,6 +47,8 @@ const defaultProcessWorkers = 4
 // processItem carries the sequential preprocessing state for a single accepted
 // file into the concurrent classify+apply stage.
 type processItem struct {
+	// pos is the input index into the original paths slice, used to write the
+	// final result back into the correct position.
 	pos         int
 	src         string
 	fileHash    string
@@ -93,14 +96,16 @@ func sortedModelNames(groups map[string][]processItem) []string {
 var (
 	processFormat string
 	processJSON   bool
+	processQuiet  bool
 )
 
 // applierFunc matches the signature of actions.Apply so it can be swapped in tests.
 type applierFunc func(decision llm.Decision, src string, fileHash string, cfg *config.Config, db state.Repo, isDuplicate bool, fs actions.FS, runID string, metrics llm.Metrics) (string, error)
 
 func init() {
-	processCmd.Flags().StringVar(&processFormat, "format", "table", "output format (table|json)")
+	processCmd.Flags().StringVar(&processFormat, "format", "table", "output format (table|human|json)")
 	processCmd.Flags().BoolVar(&processJSON, "json", false, "output results as JSON (shorthand for --format json)")
+	processCmd.Flags().BoolVar(&processQuiet, "quiet", false, "suppress log output to stderr")
 	rootCmd.AddCommand(processCmd)
 }
 
@@ -120,6 +125,19 @@ var processCmd = &cobra.Command{
 		if cmd != nil {
 			ctx = cmd.Context()
 		}
+
+		format := processFormat
+		if processJSON {
+			format = "json"
+		}
+		// For interactive human-readable output, keep structured logs in the
+		// log file but suppress JSON spam on stderr so the table/list is clean.
+		quiet := processQuiet || (format != "json" && isTerminal(os.Stdout))
+		if quiet {
+			log.SetStderrEnabled(false)
+			defer log.SetStderrEnabled(true)
+		}
+
 		runID := newRunID()
 		results, err := processPaths(ctx, args, runID)
 		if err != nil {
@@ -128,10 +146,6 @@ var processCmd = &cobra.Command{
 		if len(results) == 0 {
 			fmt.Println("No files processed.")
 			return nil
-		}
-		format := processFormat
-		if processJSON {
-			format = "json"
 		}
 		out, err := formatProcessResults(results, format)
 		if err != nil {
@@ -159,70 +173,181 @@ type processResult struct {
 	ContextSize      int      `json:"context_size"`
 }
 
-// formatProcessResults renders process results as a table or JSON.
+// formatProcessResults renders process results as a table, human-readable list, or JSON.
 func formatProcessResults(results []processResult, format string) (string, error) {
-	if format == "json" {
+	switch format {
+	case "json":
 		out, err := json.MarshalIndent(results, "", "  ")
 		return string(out), err
+	case "human":
+		return formatHuman(results), nil
+	default:
+		return formatProcessTable(results), nil
 	}
-	return formatProcessTable(results), nil
 }
 
-// formatProcessTable renders process results as an ASCII table.
+// column width caps for the process output table. These keep the table usable
+// on typical terminals without excessive wrapping.
+const (
+	maxFileLen   = 42
+	maxCatLen    = 16
+	maxTagsLen   = 30
+	maxActionLen = 8
+	maxResultLen = 48
+)
+
+// formatProcessTable renders process results as a compact ASCII table.
 func formatProcessTable(results []processResult) string {
+	useColor := isTerminal(os.Stdout)
 	headers := []string{"File", "Category", "Tags", "Action", "Result", "Status"}
 	rows := make([][]string, 0, len(results))
 	for _, r := range results {
-		status := "❌"
-		if r.OK {
-			status = "✅"
+		status := statusSymbol(r.OK, r.Error, useColor)
+		action := r.Action
+		if action == "" {
+			action = "-"
 		}
-		tags := strings.Join(r.Tags, ", ")
-		rows = append(rows, []string{collapseHome(r.Path), r.Category, tags, r.Action, collapseHome(r.Result), status})
+		category := r.Category
+		if category == "" {
+			category = "-"
+		}
+		rows = append(rows, []string{
+			truncatePath(collapseHome(r.Path), maxFileLen),
+			truncateTags([]string{category}, maxCatLen),
+			truncateTags(r.Tags, maxTagsLen),
+			truncateTags([]string{action}, maxActionLen),
+			truncatePath(collapseHome(r.Result), maxResultLen),
+			status,
+		})
 	}
-	return renderTable(headers, rows)
+	var lines []string
+	lines = append(lines, renderTable(headers, rows))
+	lines = append(lines, "")
+	lines = append(lines, formatSummary(results, useColor))
+	return strings.Join(lines, "\n")
 }
 
-// processPaths classifies and applies decisions to each path. It mirrors the
-// Python process_paths behaviour: skip non-existent, non-file, hidden, and
-// out-of-allowed files; honour age rules; detect duplicates; coerce unsafe
-// deletes to review; and log the result.
+// formatHuman renders results as a compact list designed for readability.
+func formatHuman(results []processResult) string {
+	useColor := isTerminal(os.Stdout)
+	var lines []string
+	for _, r := range results {
+		name := filepath.Base(r.Path)
+		status := statusSymbol(r.OK, r.Error, useColor)
+		lines = append(lines, fmt.Sprintf("%s  %s", status, colorize(name, colorBold, useColor)))
+		if r.Category != "" {
+			lines = append(lines, fmt.Sprintf("   Category: %s", r.Category))
+		}
+		if len(r.Tags) > 0 {
+			lines = append(lines, fmt.Sprintf("   Tags:     %s", strings.Join(r.Tags, ", ")))
+		}
+		if r.Action != "" {
+			lines = append(lines, fmt.Sprintf("   Action:   %s", r.Action))
+		}
+		if r.Result != "" {
+			lines = append(lines, fmt.Sprintf("   Result:   %s", collapseHome(r.Result)))
+		}
+		if r.Error != "" {
+			lines = append(lines, colorize(fmt.Sprintf("   Error:    %s", r.Error), colorRed, useColor))
+		}
+	}
+	lines = append(lines, "")
+	lines = append(lines, formatSummary(results, useColor))
+	return strings.Join(lines, "\n")
+}
+
+// statusSymbol returns the status glyph for a result, optionally colored.
+func statusSymbol(ok bool, err string, useColor bool) string {
+	if err != "" {
+		return colorize("⚠", colorYellow, useColor)
+	}
+	if ok {
+		return colorize("✓", colorGreen, useColor)
+	}
+	return colorize("✗", colorRed, useColor)
+}
+
+// formatSummary returns a one-line summary of the results.
+func formatSummary(results []processResult, useColor bool) string {
+	var ok, review, skip, failed int
+	for _, r := range results {
+		if r.Action == "skip" {
+			skip++
+		} else if r.Error != "" {
+			failed++
+		} else if r.Action == "review" {
+			review++
+		} else if r.OK {
+			ok++
+		}
+	}
+	parts := []string{fmt.Sprintf("%d file%s processed", len(results), plural(len(results)))}
+	if ok > 0 {
+		parts = append(parts, colorize(fmt.Sprintf("%d ok", ok), colorGreen, useColor))
+	}
+	if review > 0 {
+		parts = append(parts, colorize(fmt.Sprintf("%d review", review), colorYellow, useColor))
+	}
+	if skip > 0 {
+		parts = append(parts, colorize(fmt.Sprintf("%d skip", skip), colorCyan, useColor))
+	}
+	if failed > 0 {
+		parts = append(parts, colorize(fmt.Sprintf("%d failed", failed), colorRed, useColor))
+	}
+	return strings.Join(parts, " · ")
+}
+
+func plural(n int) string {
+	if n == 1 {
+		return ""
+	}
+	return "s"
+}
+
 // processPaths classifies and applies decisions to each path. It mirrors the
 // Python process_paths behaviour: skip non-existent, non-file, hidden, and
 // out-of-allowed files; honour age rules; detect duplicates; coerce unsafe
 // deletes to review; log the result; and return a displayable result per file.
 func processPaths(ctx context.Context, paths []string, runID string) ([]processResult, error) {
 	// Preprocess sequentially so skipping, hash/duplicate detection, age-rule
-	// matching and their logs remain deterministic and ordered.
+	// matching and their logs remain deterministic and ordered. Skipped paths
+	// still produce a result so the final table is complete.
+	results := make([]processResult, len(paths))
 	items := make([]processItem, 0, len(paths))
 	seenHashes := make(map[string]bool)
-	for _, raw := range paths {
+	for i, raw := range paths {
 		src, err := filepath.Abs(raw)
 		if err != nil {
+			results[i] = skipResult(raw, fmt.Sprintf("path normalization failed: %v", err))
 			slog.Warn("path normalization failed", "path", raw, "error", err)
 			continue
 		}
 
 		info, err := os.Stat(src)
 		if err != nil {
+			results[i] = skipResult(src, "path does not exist")
 			slog.Warn("path does not exist", "path", raw)
 			continue
 		}
 		if !info.Mode().IsRegular() {
+			results[i] = skipResult(src, "not a regular file")
 			slog.Warn("not a file", "path", src)
 			continue
 		}
 		if isHidden(src) {
+			results[i] = skipResult(src, "hidden file")
 			slog.Info("skipping hidden file", "path", src)
 			continue
 		}
 		if len(cfg.AllowedDirs) > 0 && !actions.WithinAllowed(src, cfg.AllowedDirs) {
+			results[i] = skipResult(src, "outside allowed dirs")
 			slog.Warn("skipping file outside allowed dirs", "path", src)
 			continue
 		}
 
 		fileHash, err := actions.ComputeHash(src)
 		if err != nil {
+			results[i] = skipResult(src, fmt.Sprintf("hash failed: %v", err))
 			slog.Warn("hash failed", "path", src, "error", err)
 			continue
 		}
@@ -240,7 +365,7 @@ func processPaths(ctx context.Context, paths []string, runID string) ([]processR
 		ageDecision, ageMatched := checkAgeRule(src, cfg)
 
 		items = append(items, processItem{
-			pos:         len(items),
+			pos:         i,
 			src:         src,
 			fileHash:    fileHash,
 			isDuplicate: isDuplicate,
@@ -250,7 +375,6 @@ func processPaths(ctx context.Context, paths []string, runID string) ([]processR
 		})
 	}
 
-	results := make([]processResult, len(items))
 	var wg sync.WaitGroup
 	sem := make(chan struct{}, defaultProcessWorkers)
 	var applyMu sync.Mutex
@@ -333,6 +457,17 @@ func processPaths(ctx context.Context, paths []string, runID string) ([]processR
 		wg.Wait()
 	}
 	return results, nil
+}
+
+// skipResult builds a processResult for a path that was skipped during preprocessing.
+func skipResult(path string, reason string) processResult {
+	return processResult{
+		Path:   path,
+		Action: "skip",
+		Result: "-",
+		OK:     false,
+		Error:  reason,
+	}
 }
 
 // newRunID returns a deterministic, unique run identifier.
