@@ -22,13 +22,13 @@ func NewFake() *FakeRepo {
 }
 
 // Record stores a history row in memory.
-func (f *FakeRepo) Record(original, final, sha256, category string, tags []string, action, reason string, runID string, metrics llm.Metrics) error {
+func (f *FakeRepo) Record(input RecordInput) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
 	tagsStr := ""
-	if len(tags) > 0 {
-		for i, t := range tags {
+	if len(input.Tags) > 0 {
+		for i, t := range input.Tags {
 			if i > 0 {
 				tagsStr += ","
 			}
@@ -38,20 +38,28 @@ func (f *FakeRepo) Record(original, final, sha256, category string, tags []strin
 
 	f.records = append(f.records, Record{
 		ID:               int64(len(f.records) + 1),
-		OriginalPath:     original,
-		FinalPath:        final,
-		SHA256:           sha256,
-		Category:         category,
+		OriginalPath:     input.OriginalPath,
+		FinalPath:        input.FinalPath,
+		SHA256:           input.SHA256,
+		Category:         input.Category,
 		Tags:             tagsStr,
-		Action:           action,
-		Reason:           reason,
-		RunID:            sql.NullString{String: runID, Valid: runID != ""},
-		LLMDurationMs:    sql.NullInt64{Int64: metrics.DurationMs, Valid: metrics.DurationMs != 0},
-		PromptTokens:     sql.NullInt64{Int64: int64(metrics.PromptTokens), Valid: metrics.PromptTokens != 0},
-		CompletionTokens: sql.NullInt64{Int64: int64(metrics.CompletionTokens), Valid: metrics.CompletionTokens != 0},
-		TotalTokens:      sql.NullInt64{Int64: int64(metrics.TotalTokens), Valid: metrics.TotalTokens != 0},
-		TokensPerSec:     sql.NullFloat64{Float64: metrics.TokensPerSec, Valid: metrics.TokensPerSec != 0},
-		ContextSize:      sql.NullInt64{Int64: int64(metrics.ContextSize), Valid: metrics.ContextSize != 0},
+		Action:           input.Action,
+		Reason:           input.Reason,
+		RunID:            sql.NullString{String: input.RunID, Valid: input.RunID != ""},
+		LLMDurationMs:    sql.NullInt64{Int64: input.Metrics.DurationMs, Valid: input.Metrics.DurationMs != 0},
+		PromptTokens:     sql.NullInt64{Int64: int64(input.Metrics.PromptTokens), Valid: input.Metrics.PromptTokens != 0},
+		CompletionTokens: sql.NullInt64{Int64: int64(input.Metrics.CompletionTokens), Valid: input.Metrics.CompletionTokens != 0},
+		TotalTokens:      sql.NullInt64{Int64: int64(input.Metrics.TotalTokens), Valid: input.Metrics.TotalTokens != 0},
+		TokensPerSec:     sql.NullFloat64{Float64: input.Metrics.TokensPerSec, Valid: input.Metrics.TokensPerSec != 0},
+		ContextSize:      sql.NullInt64{Int64: int64(input.Metrics.ContextSize), Valid: input.Metrics.ContextSize != 0},
+		OriginalName:     input.OriginalName,
+		NewName:          input.NewName,
+		NameQuality:      sql.NullFloat64{Float64: input.NameQuality, Valid: input.NameQuality != 0},
+		MediaKind:        input.MediaKind,
+		PerceptualHash:   input.PerceptualHash,
+		AVSignature:      input.AVSignature,
+		TextSignature:    input.TextSignature,
+		HashAlgorithm:    input.HashAlgorithm,
 	})
 	return nil
 }
@@ -68,6 +76,39 @@ func (f *FakeRepo) FindByHash(sha256 string) (*Record, error) {
 		}
 	}
 	return nil, nil
+}
+
+// FindDuplicatesByHash returns all in-memory records matching sha256, ordered by most recent first.
+func (f *FakeRepo) FindDuplicatesByHash(sha256 string) ([]Record, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	var out []Record
+	for i := len(f.records) - 1; i >= 0; i-- {
+		if f.records[i].SHA256 == sha256 {
+			out = append(out, f.records[i])
+		}
+	}
+	return out, nil
+}
+
+// FindSimilarByFingerprints returns in-memory records that share any of the
+// provided non-empty fingerprint signatures, ordered by most recent first.
+func (f *FakeRepo) FindSimilarByFingerprints(perceptualHash, avSignature, textSignature string) ([]Record, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	var out []Record
+	for i := len(f.records) - 1; i >= 0; i-- {
+		r := f.records[i]
+		match := (perceptualHash != "" && r.PerceptualHash == perceptualHash) ||
+			(avSignature != "" && r.AVSignature == avSignature) ||
+			(textSignature != "" && r.TextSignature == textSignature)
+		if match {
+			out = append(out, r)
+		}
+	}
+	return out, nil
 }
 
 // Close is a no-op for the fake repository.

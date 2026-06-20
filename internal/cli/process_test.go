@@ -17,6 +17,7 @@ import (
 	"github.com/logicminds/filemaid/internal/config"
 	"github.com/logicminds/filemaid/internal/llm"
 	"github.com/logicminds/filemaid/internal/state"
+	"github.com/spf13/cobra"
 )
 
 func TestIsHidden(t *testing.T) {
@@ -277,6 +278,7 @@ func testConfig(tmpDir string) *config.Config {
 		Tags:               false,
 		Comments:           false,
 		SafeDeletePatterns: []string{},
+		ProcessWorkers:     4,
 		Categories: map[string]string{
 			"Images":    images,
 			"Documents": documents,
@@ -472,6 +474,221 @@ func TestProcessPathsProcessesConcurrently(t *testing.T) {
 	}
 }
 
+func TestProcessPathsUsesConfiguredWorkers(t *testing.T) {
+	tmp := t.TempDir()
+	cfg = testConfig(tmp)
+	cfg.ProcessWorkers = 2
+	db = state.NewFake()
+	processFS = actions.NewRecordingFS()
+
+	bc := newBlockingClassifier()
+	bc.decision = llm.Decision{Category: "Documents", Action: "review", Reason: "test"}
+	classifier = bc
+	t.Cleanup(func() { classifier = llm.NewClient(nil) })
+
+	paths := make([]string, 5)
+	for i := range paths {
+		p := filepath.Join(tmp, "Desktop", fmt.Sprintf("worker%d.txt", i))
+		os.MkdirAll(filepath.Dir(p), 0755)
+		os.WriteFile(p, []byte(fmt.Sprintf("content%d", i)), 0644)
+		paths[i] = p
+	}
+
+	done := make(chan []processResult)
+	go func() {
+		res, err := processPaths(context.Background(), paths, "run-test")
+		if err != nil {
+			t.Error(err)
+		}
+		done <- res
+	}()
+
+	for {
+		bc.mu.Lock()
+		ma := bc.maxActive
+		bc.mu.Unlock()
+		if ma >= 2 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	bc.release()
+	results := <-done
+
+	if len(results) != len(paths) {
+		t.Fatalf("expected %d results, got %d", len(paths), len(results))
+	}
+
+	bc.mu.Lock()
+	peak := bc.maxActive
+	bc.mu.Unlock()
+	if peak != 2 {
+		t.Errorf("expected worker concurrency of 2, got max active %d", peak)
+	}
+}
+
+// blockingApplier blocks Apply calls until release() is invoked so tests can
+// observe concurrent applies.
+type blockingApplier struct {
+	mu        sync.Mutex
+	cond      *sync.Cond
+	active    int
+	maxActive int
+	proceed   bool
+}
+
+func newBlockingApplier() *blockingApplier {
+	b := &blockingApplier{}
+	b.cond = sync.NewCond(&b.mu)
+	return b
+}
+
+func (b *blockingApplier) Apply(decision llm.Decision, src string, fileHash string, cfg *config.Config, db state.Repo, isDuplicate bool, fs actions.FS, runID string, metrics llm.Metrics) (string, error) {
+	b.mu.Lock()
+	b.active++
+	if b.active > b.maxActive {
+		b.maxActive = b.active
+	}
+	for !b.proceed {
+		b.cond.Wait()
+	}
+	b.active--
+	b.mu.Unlock()
+	return src + "_moved", nil
+}
+
+func (b *blockingApplier) release() {
+	b.mu.Lock()
+	b.proceed = true
+	b.cond.Broadcast()
+	b.mu.Unlock()
+}
+
+// pathClassifier returns a decision whose category depends on the input path.
+type pathClassifier struct {
+	mu    sync.Mutex
+	calls []string
+}
+
+func (p *pathClassifier) Classify(ctx context.Context, src string, fileHash string, cfg *config.Config) (llm.Decision, llm.Metrics, error) {
+	p.mu.Lock()
+	p.calls = append(p.calls, src)
+	p.mu.Unlock()
+	if strings.Contains(filepath.Base(src), "image") {
+		return llm.Decision{Category: "Images", Action: "move"}, llm.Metrics{}, nil
+	}
+	return llm.Decision{Category: "Documents", Action: "move"}, llm.Metrics{}, nil
+}
+
+func (p *pathClassifier) Validate(cfg *config.Config) error { return nil }
+
+func TestProcessPathsAppliesConcurrentlyForDifferentDirs(t *testing.T) {
+	tmp := t.TempDir()
+	cfg = testConfig(tmp)
+	cfg.ProcessWorkers = 2
+	db = state.NewFake()
+	processFS = actions.NewRecordingFS()
+
+	pc := &pathClassifier{}
+	classifier = pc
+	t.Cleanup(func() { classifier = llm.NewClient(nil) })
+
+	ba := newBlockingApplier()
+	applyDecision = ba.Apply
+	t.Cleanup(func() { applyDecision = actions.Apply })
+
+	paths := []string{
+		filepath.Join(tmp, "Desktop", "image1.jpg"),
+		filepath.Join(tmp, "Desktop", "doc1.txt"),
+	}
+	for i, p := range paths {
+		os.MkdirAll(filepath.Dir(p), 0755)
+		os.WriteFile(p, []byte(fmt.Sprintf("content%d", i)), 0644)
+	}
+
+	done := make(chan []processResult)
+	go func() {
+		res, err := processPaths(context.Background(), paths, "run-test")
+		if err != nil {
+			t.Error(err)
+		}
+		done <- res
+	}()
+
+	for {
+		ba.mu.Lock()
+		ma := ba.maxActive
+		ba.mu.Unlock()
+		if ma >= 2 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	ba.release()
+	results := <-done
+
+	if len(results) != len(paths) {
+		t.Fatalf("expected %d results, got %d", len(paths), len(results))
+	}
+
+	ba.mu.Lock()
+	peak := ba.maxActive
+	ba.mu.Unlock()
+	if peak < 2 {
+		t.Errorf("expected concurrent applies for different dirs, got max active %d", peak)
+	}
+}
+
+func TestProcessPathsAppliesSeriallyForSameDir(t *testing.T) {
+	tmp := t.TempDir()
+	cfg = testConfig(tmp)
+	cfg.ProcessWorkers = 2
+	db = state.NewFake()
+	processFS = actions.NewRecordingFS()
+
+	classifier = &fakeClassifier{decision: llm.Decision{Category: "Documents", Action: "move", Reason: "test"}}
+	t.Cleanup(func() { classifier = llm.NewClient(nil) })
+
+	ba := newBlockingApplier()
+	applyDecision = ba.Apply
+	t.Cleanup(func() { applyDecision = actions.Apply })
+
+	paths := []string{
+		filepath.Join(tmp, "Desktop", "doc1.txt"),
+		filepath.Join(tmp, "Desktop", "doc2.txt"),
+	}
+	for i, p := range paths {
+		os.MkdirAll(filepath.Dir(p), 0755)
+		os.WriteFile(p, []byte(fmt.Sprintf("content%d", i)), 0644)
+	}
+
+	done := make(chan []processResult)
+	go func() {
+		res, err := processPaths(context.Background(), paths, "run-test")
+		if err != nil {
+			t.Error(err)
+		}
+		done <- res
+	}()
+
+	time.Sleep(50 * time.Millisecond)
+	ba.release()
+	results := <-done
+
+	if len(results) != len(paths) {
+		t.Fatalf("expected %d results, got %d", len(paths), len(results))
+	}
+
+	ba.mu.Lock()
+	peak := ba.maxActive
+	ba.mu.Unlock()
+	if peak != 1 {
+		t.Errorf("expected serial applies for same dir, got max active %d", peak)
+	}
+}
+
 func TestProcessCommandFailsValidationBeforeTouchingFiles(t *testing.T) {
 	tmp := t.TempDir()
 	cfg = testConfig(tmp)
@@ -543,13 +760,14 @@ func TestFormatProcessTable(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	results := []processResult{
-		{Path: "/tmp/note.txt", Category: "Documents", Tags: []string{"txt"}, Action: "move", Result: "/archive/note.txt", OK: true},
-		{Path: filepath.Join(home, "Downloads", "receipt.pdf"), Category: "Receipts", Tags: []string{"pdf"}, Action: "move", Result: filepath.Join(home, "Documents", "Archive", "Receipts", "receipt.pdf"), OK: true},
-		{Path: "/tmp/unknown", Category: "Unknown", Tags: []string{}, Action: "review", Result: "/review/unknown", OK: true},
-		{Path: "/tmp/bad", Category: "Documents", Tags: []string{}, Action: "move", Result: "", OK: false, Error: "move failed"},
+		{Path: "/tmp/note.txt", Category: "Documents", Tags: []string{"txt"}, Action: "move", Result: "/archive/note.txt", OriginalName: "note.txt", OK: true},
+		{Path: filepath.Join(home, "Downloads", "receipt.pdf"), Category: "Receipts", Tags: []string{"pdf"}, Action: "move", Result: filepath.Join(home, "Documents", "Archive", "Receipts", "receipt.pdf"), OriginalName: "receipt.pdf", OK: true},
+		{Path: "/tmp/unknown", Category: "Unknown", Tags: []string{}, Action: "review", Result: "/review/unknown", OriginalName: "unknown", OK: true},
+		{Path: "/tmp/bad", Category: "Documents", Tags: []string{}, Action: "move", Result: "", OriginalName: "bad", OK: false, Error: "move failed"},
+		{Path: "/tmp/photo.jpg", Category: "Images", Tags: []string{"jpg"}, Action: "move", Result: "/archive/vacation-photo.jpg", OriginalName: "photo.jpg", NewName: "vacation-photo.jpg", OK: true},
 	}
 	out := formatProcessTable(results)
-	for _, want := range []string{"File", "Category", "Tags", "Action", "Result", "Status", "Documents", "txt", "Receipts", "pdf", "✓", "⚠"} {
+	for _, want := range []string{"File", "Category", "Tags", "Action", "Name", "Result", "Status", "Documents", "txt", "Receipts", "pdf", "✓", "⚠", "kept name", "photo.jpg -> vacation-photo.jpg"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("table output missing %q:\n%s", want, out)
 		}
@@ -575,15 +793,17 @@ func TestFormatProcessResultsJSON(t *testing.T) {
 		}
 	}
 }
+
 func TestFormatHuman(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	results := []processResult{
-		{Path: filepath.Join(home, "Desktop", "note.txt"), Category: "Documents", Tags: []string{"txt"}, Action: "move", Result: filepath.Join(home, "Documents", "Archive", "note.txt"), OK: true},
-		{Path: "/tmp/missing", Action: "skip", Result: "-", OK: false, Error: "path does not exist"},
+		{Path: filepath.Join(home, "Desktop", "note.txt"), Category: "Documents", Tags: []string{"txt"}, Action: "move", Result: filepath.Join(home, "Documents", "Archive", "note.txt"), OriginalName: "note.txt", OK: true},
+		{Path: "/tmp/missing", Action: "skip", Result: "-", OriginalName: "missing", OK: false, Error: "path does not exist"},
+		{Path: "/tmp/photo.jpg", Category: "Images", Tags: []string{"jpg"}, Action: "move", Result: "/archive/vacation-photo.jpg", OriginalName: "photo.jpg", NewName: "vacation-photo.jpg", OK: true},
 	}
 	out := formatHuman(results)
-	for _, want := range []string{"note.txt", "Documents", "txt", "move", "~/Documents/Archive/note.txt", "path does not exist", "2 files processed", "1 ok", "1 skip"} {
+	for _, want := range []string{"note.txt", "Documents", "txt", "move", "kept name", "~/Documents/Archive/note.txt", "path does not exist", "3 files processed", "2 ok", "1 skip", "photo.jpg -> vacation-photo.jpg"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("human output missing %q:\n%s", want, out)
 		}
@@ -1016,5 +1236,292 @@ func TestProcessPathsCachedDecisionCoercedForDuplicate(t *testing.T) {
 	}
 	if reviews != 1 {
 		t.Errorf("expected 1 review, got %d", reviews)
+	}
+}
+func TestApplyRenameFlagsOverridesConfig(t *testing.T) {
+	tmp := t.TempDir()
+	cfg = testConfig(tmp)
+	cfg.Rename = false
+	cfg.RenameLevel = 2
+
+	cmd := &cobra.Command{Use: "test"}
+	cmd.Flags().BoolVar(&renameEnabled, "rename", false, "")
+	cmd.Flags().IntVar(&renameLevel, "rename-level", 0, "")
+	renameEnabled = false
+	renameLevel = 0
+
+	if err := cmd.Flags().Set("rename", "true"); err != nil {
+		t.Fatalf("set rename flag: %v", err)
+	}
+	if err := cmd.Flags().Set("rename-level", "4"); err != nil {
+		t.Fatalf("set rename-level flag: %v", err)
+	}
+
+	applyRenameFlags(cmd)
+
+	if !cfg.Rename {
+		t.Errorf("cfg.Rename = %v, want true", cfg.Rename)
+	}
+	if cfg.RenameLevel != 4 {
+		t.Errorf("cfg.RenameLevel = %d, want 4", cfg.RenameLevel)
+	}
+}
+
+func TestApplyRenameFlagsLeavesDefaultsWhenUnset(t *testing.T) {
+	tmp := t.TempDir()
+	cfg = testConfig(tmp)
+	cfg.Rename = true
+	cfg.RenameLevel = 3
+
+	cmd := &cobra.Command{Use: "test"}
+	cmd.Flags().BoolVar(&renameEnabled, "rename", false, "")
+	cmd.Flags().IntVar(&renameLevel, "rename-level", 0, "")
+	renameEnabled = false
+	renameLevel = 0
+
+	applyRenameFlags(cmd)
+
+	if !cfg.Rename {
+		t.Errorf("cfg.Rename = %v, want true (config value preserved)", cfg.Rename)
+	}
+	if cfg.RenameLevel != 3 {
+		t.Errorf("cfg.RenameLevel = %d, want 3 (config value preserved)", cfg.RenameLevel)
+	}
+}
+
+func TestProcessCmdHasRenameFlags(t *testing.T) {
+	if f := processCmd.Flags().Lookup("rename"); f == nil {
+		t.Error("process command missing --rename flag")
+	}
+	if f := processCmd.Flags().Lookup("rename-level"); f == nil {
+		t.Error("process command missing --rename-level flag")
+	}
+}
+
+func TestScanCmdHasRenameFlags(t *testing.T) {
+	if f := scanCmd.Flags().Lookup("rename"); f == nil {
+		t.Error("scan command missing --rename flag")
+	}
+	if f := scanCmd.Flags().Lookup("rename-level"); f == nil {
+		t.Error("scan command missing --rename-level flag")
+	}
+}
+
+// blockingHash blocks hash calls until release() is invoked so tests can
+// observe concurrent hashing.
+type blockingHash struct {
+	mu        sync.Mutex
+	cond      *sync.Cond
+	active    int
+	maxActive int
+	proceed   bool
+}
+
+func newBlockingHash() *blockingHash {
+	b := &blockingHash{}
+	b.cond = sync.NewCond(&b.mu)
+	return b
+}
+
+func (b *blockingHash) Hash(path string) (string, error) {
+	b.mu.Lock()
+	b.active++
+	if b.active > b.maxActive {
+		b.maxActive = b.active
+	}
+	for !b.proceed {
+		b.cond.Wait()
+	}
+	b.active--
+	b.mu.Unlock()
+	return fmt.Sprintf("hash-%s", filepath.Base(path)), nil
+}
+
+func (b *blockingHash) release() {
+	b.mu.Lock()
+	b.proceed = true
+	b.cond.Broadcast()
+	b.mu.Unlock()
+}
+
+func TestProcessPathsHashesConcurrently(t *testing.T) {
+	tmp := t.TempDir()
+	cfg = testConfig(tmp)
+	cfg.ProcessWorkers = 2
+	db = state.NewFake()
+	processFS = actions.NewRecordingFS()
+	classifier = &fakeClassifier{decision: llm.Decision{
+		Category: "Documents",
+		Action:   "review",
+		Reason:   "test",
+	}}
+	t.Cleanup(func() { classifier = llm.NewClient(nil) })
+
+	bh := newBlockingHash()
+	computeHash = bh.Hash
+	t.Cleanup(func() { computeHash = actions.ComputeHash })
+
+	paths := make([]string, 3)
+	for i := range paths {
+		p := filepath.Join(tmp, "Desktop", fmt.Sprintf("concurrent%d.txt", i))
+		os.MkdirAll(filepath.Dir(p), 0755)
+		os.WriteFile(p, []byte(fmt.Sprintf("content%d", i)), 0644)
+		paths[i] = p
+	}
+
+	done := make(chan []processResult)
+	go func() {
+		res, err := processPaths(context.Background(), paths, "run-test")
+		if err != nil {
+			t.Error(err)
+		}
+		done <- res
+	}()
+
+	// Wait for at least two concurrent hash calls to confirm workers run
+	// in parallel rather than sequentially.
+	for {
+		bh.mu.Lock()
+		ma := bh.maxActive
+		bh.mu.Unlock()
+		if ma >= 2 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	bh.release()
+	results := <-done
+
+	if len(results) != len(paths) {
+		t.Fatalf("expected %d results, got %d", len(paths), len(results))
+	}
+
+	bh.mu.Lock()
+	peak := bh.maxActive
+	bh.mu.Unlock()
+	if peak < 2 {
+		t.Errorf("expected concurrent hashing, got max active %d", peak)
+	}
+
+	for i, want := range paths {
+		if results[i].Path != want {
+			t.Errorf("results[%d].Path = %q, want %q", i, results[i].Path, want)
+		}
+	}
+}
+func TestProcessCmdHasDryRunFlag(t *testing.T) {
+	if f := processCmd.Flags().Lookup("dry-run"); f == nil {
+		t.Error("process command missing --dry-run flag")
+	}
+}
+
+func TestScanCmdHasDryRunFlag(t *testing.T) {
+	if f := scanCmd.Flags().Lookup("dry-run"); f == nil {
+		t.Error("scan command missing --dry-run flag")
+	}
+}
+
+func TestProcessCommandDryRunPreventsMove(t *testing.T) {
+	tmp := t.TempDir()
+	cfg = testConfig(tmp)
+	cfg.Rename = false
+	fakeDB := state.NewFake()
+	db = fakeDB
+	fs := actions.NewRecordingFS()
+	processFS = fs
+	classifier = &fakeClassifier{decision: llm.Decision{
+		Category: "Documents",
+		Tags:     []string{"txt"},
+		Action:   "move",
+		Reason:   "text",
+	}}
+
+	src := filepath.Join(tmp, "Desktop", "note.txt")
+	os.MkdirAll(filepath.Dir(src), 0755)
+	os.WriteFile(src, []byte("hello"), 0644)
+
+	processDryRun = true
+	t.Cleanup(func() { processDryRun = false })
+
+	out := captureStdout(t, func() {
+		if err := processCmd.RunE(nil, []string{src}); err != nil {
+			t.Fatalf("process failed: %v", err)
+		}
+	})
+	if !strings.Contains(out, "kept name") {
+		t.Errorf("expected kept name in output, got:\n%s", out)
+	}
+	if len(fs.Moved) != 0 {
+		t.Errorf("dry-run should not move files, got %d moves", len(fs.Moved))
+	}
+	if len(fakeDB.Records()) != 0 {
+		t.Errorf("dry-run should not record history, got %d records", len(fakeDB.Records()))
+	}
+}
+func TestProcessCommandShowsRename(t *testing.T) {
+	tmp := t.TempDir()
+	cfg = testConfig(tmp)
+	cfg.Rename = true
+	cfg.RenameLevel = 0
+	db = state.NewFake()
+	processFS = actions.NewRecordingFS()
+	classifier = &fakeClassifier{decision: llm.Decision{
+		Category:    "Documents",
+		Tags:        []string{"txt"},
+		Action:      "move",
+		Reason:      "text",
+		NewName:     "renamed-note.txt",
+		NameQuality: 2,
+	}}
+
+	src := filepath.Join(tmp, "Desktop", "note.txt")
+	os.MkdirAll(filepath.Dir(src), 0755)
+	os.WriteFile(src, []byte("hello"), 0644)
+
+	out := captureStdout(t, func() {
+		if err := processCmd.RunE(nil, []string{src}); err != nil {
+			t.Fatalf("process failed: %v", err)
+		}
+	})
+	if !strings.Contains(out, "note.txt -> renamed-note.txt") {
+		t.Errorf("expected rename in output, got:\n%s", out)
+	}
+}
+
+func TestProcessCommandDryRunShowsRename(t *testing.T) {
+	tmp := t.TempDir()
+	cfg = testConfig(tmp)
+	cfg.Rename = true
+	cfg.RenameLevel = 0
+	db = state.NewFake()
+	fs := actions.NewRecordingFS()
+	processFS = fs
+	classifier = &fakeClassifier{decision: llm.Decision{
+		Category:    "Documents",
+		Tags:        []string{"txt"},
+		Action:      "move",
+		Reason:      "text",
+		NewName:     "renamed-note.txt",
+		NameQuality: 2,
+	}}
+
+	src := filepath.Join(tmp, "Desktop", "note.txt")
+	os.MkdirAll(filepath.Dir(src), 0755)
+	os.WriteFile(src, []byte("hello"), 0644)
+
+	processDryRun = true
+	t.Cleanup(func() { processDryRun = false })
+
+	out := captureStdout(t, func() {
+		if err := processCmd.RunE(nil, []string{src}); err != nil {
+			t.Fatalf("process failed: %v", err)
+		}
+	})
+	if !strings.Contains(out, "note.txt -> renamed-note.txt") {
+		t.Errorf("expected rename preview in output, got:\n%s", out)
+	}
+	if len(fs.Moved) != 0 {
+		t.Errorf("dry-run should not move files, got %d moves", len(fs.Moved))
 	}
 }

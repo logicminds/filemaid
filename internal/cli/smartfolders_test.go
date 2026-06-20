@@ -48,7 +48,7 @@ func TestRegenerateSmartFolders_BuildsSavedSearches(t *testing.T) {
 		},
 	}
 	fake := state.NewFake()
-	if err := fake.Record("/a", "/b", "h1", "Images", []string{"work", "personal"}, "move", "r", "", llm.Metrics{}); err != nil {
+	if err := fake.Record(state.RecordInput{OriginalPath: "/a", FinalPath: "/b", SHA256: "h1", Category: "Images", Tags: []string{"work", "personal"}, Action: "move", Reason: "r", Metrics: llm.Metrics{}}); err != nil {
 		t.Fatalf("Record failed: %v", err)
 	}
 	db = fake

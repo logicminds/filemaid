@@ -27,6 +27,9 @@ func init() {
 	scanCmd.Flags().StringVar(&processFormat, "format", "table", "output format (table|human|json)")
 	scanCmd.Flags().BoolVar(&processJSON, "json", false, "output results as JSON (shorthand for --format json)")
 	scanCmd.Flags().BoolVar(&processQuiet, "quiet", false, "suppress log output to stderr")
+	scanCmd.Flags().BoolVar(&renameEnabled, "rename", false, "enable AI-generated file renaming")
+	scanCmd.Flags().IntVar(&renameLevel, "rename-level", 0, "rename detail level (0-3)")
+	scanCmd.Flags().BoolVar(&processDryRun, "dry-run", false, "preview changes without moving files")
 	rootCmd.AddCommand(scanCmd)
 }
 
@@ -34,6 +37,7 @@ var scanCmd = &cobra.Command{
 	Use:   "scan",
 	Short: "Scan watch directories for stale files",
 	RunE: func(cmd *cobra.Command, args []string) error {
+		applyRenameFlags(cmd)
 		if err := classifier.Validate(cfg); err != nil {
 			return fmt.Errorf("model validation failed: %w", err)
 		}
@@ -54,6 +58,17 @@ var scanCmd = &cobra.Command{
 			defer log.SetStderrEnabled(true)
 		}
 
+		if processDryRun {
+			oldFS := processFS
+			oldDB := db
+			processFS = noopFS{}
+			db = &noopRecordRepo{Repo: oldDB}
+			defer func() {
+				processFS = oldFS
+				db = oldDB
+			}()
+		}
+
 		var allResults []processResult
 		var err error
 		if scanDir != "" {
@@ -70,8 +85,10 @@ var scanCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
-		if err := regenerateSmartFolders(); err != nil {
-			slog.Warn("smart folder regeneration failed", "error", err)
+		if !processDryRun {
+			if err := regenerateSmartFolders(); err != nil {
+				slog.Warn("smart folder regeneration failed", "error", err)
+			}
 		}
 		if len(allResults) == 0 {
 			fmt.Println("No files to process.")

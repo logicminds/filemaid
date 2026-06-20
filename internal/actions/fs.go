@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sync"
+	"time"
 	"unicode/utf16"
 )
 
@@ -22,14 +23,28 @@ type FS interface {
 	SetTags(path string, tags []string)
 	SetFinderComment(path string, comment string)
 	Trash(path string) error
+	// FlushMDImport flushes any deferred mdimport calls. It is optional for
+	// test implementations; OSFS batches per-directory re-indexes and flushes
+	// them here.
+	FlushMDImport()
 }
 
 // OSFS is the production macOS implementation of FS.
-type OSFS struct{}
+type OSFS struct {
+	batcher *mdimportBatcher
+}
 
 // NewOSFS returns a new OSFS instance.
 func NewOSFS() *OSFS {
-	return &OSFS{}
+	return &OSFS{
+		batcher: newMDImportBatcher(func(dir string) error { return run("mdimport", dir) }),
+	}
+}
+
+// newOSFSWithBatcher returns an OSFS that calls run for each directory flush.
+// It is intended for tests that need to observe mdimport batching.
+func newOSFSWithBatcher(run func(dir string) error) *OSFS {
+	return &OSFS{batcher: newMDImportBatcher(run)}
 }
 
 // Move attempts an os.Rename and falls back to copy + remove for cross-device
@@ -77,8 +92,8 @@ func (o *OSFS) Exists(path string) bool {
 	return err == nil
 }
 
-// SetTags writes Finder tags via xattr and re-indexes with mdimport. Errors are
-// intentionally ignored to match the Python implementation.
+// SetTags writes Finder tags via xattr and defers the per-directory mdimport
+// re-index. Errors are intentionally ignored to match the Python implementation.
 func (o *OSFS) SetTags(path string, tags []string) {
 	if len(tags) == 0 {
 		return
@@ -86,12 +101,12 @@ func (o *OSFS) SetTags(path string, tags []string) {
 	plist := encodeStringArrayPlist(tags)
 	hex := fmt.Sprintf("%x", plist)
 	_ = run("xattr", "-w", "-x", "com.apple.metadata:_kMDItemUserTags", hex, path)
-	_ = run("mdimport", path)
+	o.batcher.Add(filepath.Dir(path))
 }
 
 // SetFinderComment writes the LLM reason as a Finder comment via xattr and
-// re-indexes with mdimport. Errors are intentionally ignored, matching the
-// tag-writing behaviour.
+// defers the per-directory mdimport re-index. Errors are intentionally ignored,
+// matching the tag-writing behaviour.
 func (o *OSFS) SetFinderComment(path string, comment string) {
 	if comment == "" {
 		return
@@ -99,7 +114,12 @@ func (o *OSFS) SetFinderComment(path string, comment string) {
 	plist := encodeStringPlist(comment)
 	hex := fmt.Sprintf("%x", plist)
 	_ = run("xattr", "-w", "-x", "com.apple.metadata:kMDItemFinderComment", hex, path)
-	_ = run("mdimport", path)
+	o.batcher.Add(filepath.Dir(path))
+}
+
+// FlushMDImport flushes any deferred mdimport calls.
+func (o *OSFS) FlushMDImport() {
+	o.batcher.Flush()
 }
 
 // Trash sends path to the Finder trash via osascript. Errors are ignored to
@@ -114,6 +134,66 @@ func run(name string, args ...string) error {
 	cmd.Stdout = io.Discard
 	cmd.Stderr = io.Discard
 	return cmd.Run()
+}
+
+// mdimportBatcher collects directories that need a Spotlight re-index and
+// flushes them with a single mdimport invocation per directory.
+type mdimportBatcher struct {
+	mu    sync.Mutex
+	dirs  map[string]bool
+	timer *time.Timer
+	delay time.Duration
+	run   func(dir string) error
+}
+
+func newMDImportBatcher(run func(dir string) error) *mdimportBatcher {
+	return &mdimportBatcher{
+		dirs:  make(map[string]bool),
+		delay: 100 * time.Millisecond,
+		run:   run,
+	}
+}
+
+// Add registers a directory for a deferred mdimport re-index.
+func (b *mdimportBatcher) Add(dir string) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.dirs[dir] = true
+	if b.timer == nil {
+		b.timer = time.AfterFunc(b.delay, b.flush)
+	}
+}
+
+// Flush immediately runs mdimport for every queued directory.
+func (b *mdimportBatcher) Flush() {
+	b.mu.Lock()
+	if b.timer != nil {
+		b.timer.Stop()
+		b.timer = nil
+	}
+	dirs := make([]string, 0, len(b.dirs))
+	for dir := range b.dirs {
+		dirs = append(dirs, dir)
+	}
+	b.dirs = make(map[string]bool)
+	b.mu.Unlock()
+	for _, dir := range dirs {
+		_ = b.run(dir)
+	}
+}
+
+func (b *mdimportBatcher) flush() {
+	b.mu.Lock()
+	dirs := make([]string, 0, len(b.dirs))
+	for dir := range b.dirs {
+		dirs = append(dirs, dir)
+	}
+	b.dirs = make(map[string]bool)
+	b.timer = nil
+	b.mu.Unlock()
+	for _, dir := range dirs {
+		_ = b.run(dir)
+	}
 }
 
 // encodeStringArrayPlist emits a minimal binary plist containing a single
@@ -294,6 +374,9 @@ func (r *RecordingFS) SetFinderComment(path string, comment string) {
 	r.Comments = append(r.Comments, CommentRecord{Path: path, Comment: comment})
 	r.mu.Unlock()
 }
+
+// FlushMDImport is a no-op for RecordingFS.
+func (r *RecordingFS) FlushMDImport() {}
 
 // Trash records the trash operation without moving the file.
 func (r *RecordingFS) Trash(path string) error {

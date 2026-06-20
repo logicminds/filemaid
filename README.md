@@ -16,7 +16,7 @@ A local, AI-powered file organizer for macOS. It watches your `Desktop` and `Dow
 - **Move + tag + comment** — files are moved into `~/Documents/Archive/<category>/`, tagged with Finder tags, and the classification reason is stored in the Finder comment.
 - **Review-before-delete** — anything uncertain goes to `~/.filemaid/review/`; deletions only happen for explicitly safe patterns or duplicates.
 - **Dev cache cleanup** — scheduled cleanup for Docker, npm, cargo, pip, Homebrew, and Xcode.
-- **Two triggers** — instant Shortcuts folder automations or periodic launchd agents.
+- **Smart rename** — optionally renames files based on LLM-suggested names when the suggested name quality meets your threshold, with duplicate and near-duplicate detection.
 - **Private & offline** — no cloud services; everything runs locally via Ollama.
 - **Single Go binary** — one self-contained binary; only Cobra is used for the CLI.
 
@@ -114,6 +114,15 @@ For instant per-file processing without background agents, use the Shortcuts fol
 
 # Scan watch directories
 ./bin/filemaid scan
+
+# Process with smart rename enabled for this run
+./bin/filemaid process --rename --rename-level 3 ~/Desktop/*.pdf
+
+# Preview renames without moving files
+./bin/filemaid process --dry-run ~/Desktop/*.png
+
+# Scan with rename preview
+./bin/filemaid scan --dry-run
 
 # Run cleaners in dry-run mode
 ./bin/filemaid cleanup --dry-run
@@ -255,7 +264,22 @@ The generated configuration is written to `~/.config/filemaid/config.json` and c
     "enabled": true,
     "mode": "safe",
     "max_age_days": 30
-  }
+  },
+  "_rename_note": "Set rename=true to let the LLM suggest better filenames. rename_level (1-5) is the minimum name_quality required before a rename is applied.",
+  "rename": false,
+  "rename_level": 2,
+  "rename_max_length": 120,
+  "rename_min_length": 20,
+  "rename_invalid_chars": "<>:\"/\\\\|?*",
+  "rename_image_similarity_threshold": 0.95,
+  "rename_av_similarity_threshold": 0.90,
+  "_ffmpeg_note": "rename_use_ffmpeg enables audio/video fingerprinting via ffmpeg. This improves duplicate/near-duplicate detection but can be slow for large media libraries.",
+  "rename_use_ffmpeg": false,
+  "external_tools": {
+    "ffmpeg": "ffmpeg"
+  },
+  "process_workers": 4,
+  "max_image_dimension": 1024
 }
 ```
 
@@ -280,8 +304,47 @@ The generated configuration is written to `~/.config/filemaid/config.json` and c
 | `age_rules` | Patterns + age that force a specific action, e.g. old `.dmg` installers become `review`. |
 | `dev_cleanup` | Per-cleaner enable/disable and mode (`safe` is the only mode currently). |
 | `review_cleanup` | Enable and set retention for the review-queue cleaner. Set `max_age_days` to `0` to disable. |
+| `rename` | When `true`, the LLM may suggest better filenames. |
+| `rename_level` | Minimum `name_quality` (1-5) required before applying a rename. |
+| `rename_max_length` | Maximum length for a renamed file. |
+| `rename_min_length` | Minimum length below which a rename is not applied. |
+| `rename_invalid_chars` | Characters stripped from suggested names. |
+| `rename_image_similarity_threshold` | Perceptual-hash similarity (0-1) above which images are sent to review. |
+| `rename_av_similarity_threshold` | Audio/video similarity (0-1) above which files are sent to review. |
+| `rename_use_ffmpeg` | Enable ffmpeg-based audio/video fingerprinting. Slow for large libraries; requires ffmpeg on PATH. |
+| `external_tools` | Paths to optional tools (`ffmpeg`). |
+| `process_workers` | Concurrency for classification/hashing/apply (minimum 1). |
+| `max_image_dimension` | Largest dimension for image payloads sent to the vision model (minimum 64). |
 
 Changes take effect the next time `filemaid process`, `filemaid scan`, or `filemaid cleanup` runs.
+
+## Rename
+
+When `rename` is enabled, filemaid asks the LLM to suggest a better filename and a `name_quality` score (1-5). If the score is at least `rename_level`, the file is renamed while preserving its extension.
+
+Suggested names are sanitized: characters matching `rename_invalid_chars` are stripped, the length is clamped between `rename_min_length` and `rename_max_length`, and collisions are resolved with a counter suffix (e.g., `document-2.pdf`).
+
+Duplicate or near-duplicate files are routed to the review queue instead of being renamed:
+
+- Exact SHA-256 duplicates are always sent to review.
+- Images are compared by perceptual hash; similarity above `rename_image_similarity_threshold` goes to review.
+- Audio/video files are compared by ffmpeg-extracted signatures when `rename_use_ffmpeg` is `true` and ffmpeg is available; otherwise a structural fallback is used. Similarity above `rename_av_similarity_threshold` goes to review.
+
+**Performance note:** enabling `rename_use_ffmpeg` can be slow for large media libraries because each audio/video file is decoded and fingerprinted. Only enable it if you need robust duplicate detection for media.
+
+Use `--dry-run` to preview suggested names without moving or renaming files:
+
+```zsh
+./bin/filemaid process --rename --dry-run ~/Desktop/*.pdf
+```
+
+| Rename level | Typical behavior |
+|--------------|------------------|
+| 1 | Apply almost any suggested name. |
+| 2 | Apply reasonable names (default). |
+| 3 | Apply only clearly better names. |
+| 4 | Apply only high-confidence names. |
+| 5 | Apply only very high-confidence names. |
 
 ## Custom Ollama Models
 
@@ -376,6 +439,24 @@ Then install the required tools:
 brew install go ollama
 ```
 
+## Acceptance Test Checklist
+
+Before releasing a rename-related change, run through the following:
+
+- [ ] `go test ./...` passes and coverage stays above 80%.
+- [ ] `go vet ./...` and `gofmt -l .` are clean.
+- [ ] `filemaid process --rename` renames a file when `name_quality` >= `rename_level`.
+- [ ] `filemaid process --rename` keeps the original name when `name_quality` < `rename_level`.
+- [ ] `filemaid process --dry-run` shows proposed names without moving files.
+- [ ] `filemaid scan --dry-run` shows proposed names without moving files.
+- [ ] Duplicate files (same SHA-256) are routed to review instead of renamed.
+- [ ] Similar images above `rename_image_similarity_threshold` are routed to review.
+- [ ] `rename_use_ffmpeg: true` works when ffmpeg is installed and warns/falls back when it is missing.
+- [ ] Review queue (`filemaid review`) shows original and proposed names.
+- [ ] `filemaid review --approve` moves a review item to its category.
+- [ ] `filemaid review --reject` trashes a review item.
+- [ ] Finder tags and Smart Folders still regenerate after rename operations.
+-
 ### Scan agent cannot read Desktop/Downloads
 
 The background scan agent may need Full Disk Access for the `filemaid` binary:

@@ -5,7 +5,9 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 	"unicode/utf16"
@@ -871,6 +873,343 @@ func TestApplyUnknownCategoryGoesToReview(t *testing.T) {
 	}
 }
 
+func TestApplyRenameAtLevelGate(t *testing.T) {
+	tmp := t.TempDir()
+	cfg := testConfig(t, tmp)
+	cfg.Rename = true
+	cfg.RenameLevel = 3
+	cfg.RenameMinLength = 5
+	cfg.RenameMaxLength = 120
+	cfg.RenameInvalidChars = "<>:\"/\\\\|?*"
+	db := state.NewFake()
+	fs := NewRecordingFS()
+
+	src := filepath.Join(tmp, "Desktop", "doc.txt")
+	if err := os.MkdirAll(filepath.Dir(src), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(src, []byte("project notes"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	decision := llm.Decision{
+		Category:    "Documents",
+		Action:      "move",
+		Reason:      "txt",
+		NewName:     "Project Notes.txt",
+		NameQuality: 3,
+	}
+	result, err := Apply(decision, src, mustHash(t, src), cfg, db, false, fs, "", llm.Metrics{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if filepath.Base(result) != "Project Notes.txt" {
+		t.Errorf("result base = %q, want %q", filepath.Base(result), "Project Notes.txt")
+	}
+	if _, err := os.Stat(filepath.Join(tmp, "Documents", "Project Notes.txt")); err != nil {
+		t.Errorf("renamed dest missing: %v", err)
+	}
+}
+
+func TestApplyRenameBelowLevelKeepsOriginal(t *testing.T) {
+	tmp := t.TempDir()
+	cfg := testConfig(t, tmp)
+	cfg.Rename = true
+	cfg.RenameLevel = 4
+	db := state.NewFake()
+	fs := NewRecordingFS()
+
+	src := filepath.Join(tmp, "Desktop", "notes.txt")
+	if err := os.MkdirAll(filepath.Dir(src), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(src, []byte("notes"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	decision := llm.Decision{
+		Category:    "Documents",
+		Action:      "move",
+		Reason:      "txt",
+		NewName:     "Better Name.txt",
+		NameQuality: 3,
+	}
+	result, err := Apply(decision, src, mustHash(t, src), cfg, db, false, fs, "", llm.Metrics{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if filepath.Base(result) != "notes.txt" {
+		t.Errorf("result base = %q, want %q", filepath.Base(result), "notes.txt")
+	}
+}
+
+func TestApplyRenameCollisionUsesCounterSuffix(t *testing.T) {
+	tmp := t.TempDir()
+	cfg := testConfig(t, tmp)
+	cfg.Rename = true
+	cfg.RenameLevel = 1
+	cfg.RenameMinLength = 1
+	db := state.NewFake()
+	fs := NewRecordingFS()
+
+	if err := os.MkdirAll(filepath.Join(tmp, "Documents"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(tmp, "Documents", "Report.txt"), []byte("existing"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	src := filepath.Join(tmp, "Desktop", "doc.txt")
+	if err := os.MkdirAll(filepath.Dir(src), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(src, []byte("report content"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	decision := llm.Decision{
+		Category:    "Documents",
+		Action:      "move",
+		Reason:      "txt",
+		NewName:     "Report.txt",
+		NameQuality: 1,
+	}
+	result, err := Apply(decision, src, mustHash(t, src), cfg, db, false, fs, "", llm.Metrics{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if filepath.Base(result) != "Report 1.txt" {
+		t.Errorf("result base = %q, want %q", filepath.Base(result), "Report 1.txt")
+	}
+}
+
+func TestApplyRenameInvalidNameKeepsOriginal(t *testing.T) {
+	tmp := t.TempDir()
+	cfg := testConfig(t, tmp)
+	cfg.Rename = true
+	cfg.RenameLevel = 1
+	cfg.RenameInvalidChars = "<>:\"/\\\\|?*"
+	db := state.NewFake()
+	fs := NewRecordingFS()
+
+	src := filepath.Join(tmp, "Desktop", "doc.txt")
+	if err := os.MkdirAll(filepath.Dir(src), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(src, []byte("doc"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	decision := llm.Decision{
+		Category:    "Documents",
+		Action:      "move",
+		Reason:      "txt",
+		NewName:     "???.txt",
+		NameQuality: 1,
+	}
+	result, err := Apply(decision, src, mustHash(t, src), cfg, db, false, fs, "", llm.Metrics{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if filepath.Base(result) != "doc.txt" {
+		t.Errorf("result base = %q, want %q", filepath.Base(result), "doc.txt")
+	}
+}
+
+func TestApplyDuplicateContentRoutesToReview(t *testing.T) {
+	tmp := t.TempDir()
+	cfg := testConfig(t, tmp)
+	cfg.Rename = true
+	cfg.RenameLevel = 1
+	db := state.NewFake()
+	fs := NewRecordingFS()
+
+	src1 := filepath.Join(tmp, "Desktop", "a.txt")
+	if err := os.MkdirAll(filepath.Dir(src1), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(src1, []byte("duplicate content"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	decision := llm.Decision{Category: "Documents", Action: "move", Reason: "txt", NewName: "First.txt", NameQuality: 1}
+	if _, err := Apply(decision, src1, mustHash(t, src1), cfg, db, false, fs, "", llm.Metrics{}); err != nil {
+		t.Fatal(err)
+	}
+
+	src2 := filepath.Join(tmp, "Desktop", "b.txt")
+	if err := os.WriteFile(src2, []byte("duplicate content"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	decision2 := llm.Decision{Category: "Documents", Action: "move", Reason: "txt", NewName: "Second.txt", NameQuality: 1}
+	result, err := Apply(decision2, src2, mustHash(t, src2), cfg, db, false, fs, "", llm.Metrics{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(result, cfg.ReviewDir) {
+		t.Errorf("result = %q, want prefix %q", result, cfg.ReviewDir)
+	}
+	recs := db.Records()
+	if len(recs) != 2 {
+		t.Fatalf("recorded %d rows, want 2", len(recs))
+	}
+	last := recs[len(recs)-1]
+	if last.Action != "review" {
+		t.Errorf("action = %q, want review", last.Action)
+	}
+	if !strings.Contains(last.Reason, "duplicate content detected") {
+		t.Errorf("reason = %q, want duplicate mention", last.Reason)
+	}
+}
+
+func TestApplySimilarContentRoutesToReview(t *testing.T) {
+	tmp := t.TempDir()
+	cfg := testConfig(t, tmp)
+	cfg.Rename = true
+	cfg.RenameLevel = 1
+	db := state.NewFake()
+	fs := NewRecordingFS()
+
+	src1 := filepath.Join(tmp, "Desktop", "a.txt")
+	if err := os.MkdirAll(filepath.Dir(src1), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(src1, []byte("hello world report"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	decision := llm.Decision{Category: "Documents", Action: "move", Reason: "txt", NewName: "First.txt", NameQuality: 1}
+	if _, err := Apply(decision, src1, mustHash(t, src1), cfg, db, false, fs, "", llm.Metrics{}); err != nil {
+		t.Fatal(err)
+	}
+
+	src2 := filepath.Join(tmp, "Desktop", "b.txt")
+	if err := os.WriteFile(src2, []byte("hello world report\x01"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	decision2 := llm.Decision{Category: "Documents", Action: "move", Reason: "txt", NewName: "Second.txt", NameQuality: 1}
+	result, err := Apply(decision2, src2, mustHash(t, src2), cfg, db, false, fs, "", llm.Metrics{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(result, cfg.ReviewDir) {
+		t.Errorf("result = %q, want prefix %q", result, cfg.ReviewDir)
+	}
+	recs := db.Records()
+	if len(recs) != 2 {
+		t.Fatalf("recorded %d rows, want 2", len(recs))
+	}
+	last := recs[len(recs)-1]
+	if last.Action != "review" {
+		t.Errorf("action = %q, want review", last.Action)
+	}
+	if !strings.Contains(last.Reason, "similar content detected") {
+		t.Errorf("reason = %q, want similar mention", last.Reason)
+	}
+}
+
+func TestApplyRenameRecordsNamesInHistory(t *testing.T) {
+	tmp := t.TempDir()
+	cfg := testConfig(t, tmp)
+	cfg.Rename = true
+	cfg.RenameLevel = 1
+	cfg.RenameMinLength = 1
+	db := state.NewFake()
+	fs := NewRecordingFS()
+
+	src := filepath.Join(tmp, "Desktop", "doc.txt")
+	if err := os.MkdirAll(filepath.Dir(src), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(src, []byte("doc"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	decision := llm.Decision{
+		Category:    "Documents",
+		Action:      "move",
+		Reason:      "txt",
+		NewName:     "Renamed Document.txt",
+		NameQuality: 1,
+	}
+	if _, err := Apply(decision, src, mustHash(t, src), cfg, db, false, fs, "", llm.Metrics{}); err != nil {
+		t.Fatal(err)
+	}
+	recs := db.Records()
+	if len(recs) != 1 {
+		t.Fatalf("recorded %d rows, want 1", len(recs))
+	}
+	if recs[0].OriginalName != "doc.txt" {
+		t.Errorf("original_name = %q, want %q", recs[0].OriginalName, "doc.txt")
+	}
+	if recs[0].NewName != "Renamed Document.txt" {
+		t.Errorf("new_name = %q, want %q", recs[0].NewName, "Renamed Document.txt")
+	}
+	if recs[0].NameQuality.Float64 != 1 {
+		t.Errorf("name_quality = %v, want 1", recs[0].NameQuality.Float64)
+	}
+	if recs[0].MediaKind == "" {
+		t.Errorf("media_kind empty")
+	}
+}
+
+func TestApplyRenameEnforcesMinMaxLength(t *testing.T) {
+	tmp := t.TempDir()
+	cfg := testConfig(t, tmp)
+	cfg.Rename = true
+	cfg.RenameLevel = 1
+	cfg.RenameMinLength = 10
+	cfg.RenameMaxLength = 25
+	cfg.RenameInvalidChars = "<>:\"/\\\\|?*"
+	db := state.NewFake()
+	fs := NewRecordingFS()
+
+	src := filepath.Join(tmp, "Desktop", "doc.txt")
+	if err := os.MkdirAll(filepath.Dir(src), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(src, []byte("doc"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	longName := strings.Repeat("a", 100) + ".txt"
+	decision := llm.Decision{
+		Category:    "Documents",
+		Action:      "move",
+		Reason:      "txt",
+		NewName:     longName,
+		NameQuality: 1,
+	}
+	result, err := Apply(decision, src, mustHash(t, src), cfg, db, false, fs, "", llm.Metrics{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	base := filepath.Base(result)
+	if base == longName {
+		t.Errorf("long name was not truncated")
+	}
+	if len(base) > cfg.RenameMaxLength {
+		t.Errorf("result length %d > max %d", len(base), cfg.RenameMaxLength)
+	}
+
+	shortSrc := filepath.Join(tmp, "Desktop", "short.txt")
+	if err := os.WriteFile(shortSrc, []byte("short"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	decision2 := llm.Decision{
+		Category:    "Documents",
+		Action:      "move",
+		Reason:      "txt",
+		NewName:     "tiny.txt",
+		NameQuality: 1,
+	}
+	result2, err := Apply(decision2, shortSrc, mustHash(t, shortSrc), cfg, db, false, fs, "", llm.Metrics{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if filepath.Base(result2) != "short.txt" {
+		t.Errorf("below min length should keep original, got %q", filepath.Base(result2))
+	}
+}
+
 func TestOSFSMoveAndExists(t *testing.T) {
 	tmp := t.TempDir()
 	fs := NewOSFS()
@@ -1181,5 +1520,126 @@ func TestEncodeStringArrayPlistLarge(t *testing.T) {
 	plist := encodeStringArrayPlist(items)
 	if string(plist[:8]) != "bplist00" {
 		t.Errorf("bad header: %q", plist[:8])
+	}
+}
+
+func TestMDImportBatcherDedupesDirectories(t *testing.T) {
+	var mu sync.Mutex
+	var calls []string
+	b := newMDImportBatcher(func(dir string) error {
+		mu.Lock()
+		calls = append(calls, dir)
+		mu.Unlock()
+		return nil
+	})
+	b.Add("/tmp/a")
+	b.Add("/tmp/a") // duplicate
+	b.Add("/tmp/b")
+	b.Flush()
+
+	mu.Lock()
+	n := len(calls)
+	mu.Unlock()
+	if n != 2 {
+		t.Fatalf("expected 2 mdimport calls, got %d", n)
+	}
+	sort.Strings(calls)
+	if calls[0] != "/tmp/a" || calls[1] != "/tmp/b" {
+		t.Errorf("unexpected calls: %v", calls)
+	}
+}
+
+func TestMDImportBatcherFlushesAfterDelay(t *testing.T) {
+	var mu sync.Mutex
+	var calls []string
+	b := newMDImportBatcher(func(dir string) error {
+		mu.Lock()
+		calls = append(calls, dir)
+		mu.Unlock()
+		return nil
+	})
+	b.delay = 10 * time.Millisecond
+	b.Add("/tmp/a")
+
+	time.Sleep(50 * time.Millisecond)
+	mu.Lock()
+	n := len(calls)
+	mu.Unlock()
+	if n != 1 {
+		t.Fatalf("expected 1 mdimport call after delay, got %d", n)
+	}
+	if calls[0] != "/tmp/a" {
+		t.Errorf("expected mdimport /tmp/a, got %q", calls[0])
+	}
+}
+
+func TestOSFSBatchesMDImportPerDirectory(t *testing.T) {
+	tmp := t.TempDir()
+	var mu sync.Mutex
+	var calls []string
+	fs := newOSFSWithBatcher(func(dir string) error {
+		mu.Lock()
+		calls = append(calls, dir)
+		mu.Unlock()
+		return nil
+	})
+
+	path1 := filepath.Join(tmp, "a.txt")
+	path2 := filepath.Join(tmp, "b.txt")
+	if err := os.WriteFile(path1, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path2, []byte("y"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	fs.SetTags(path1, []string{"red"})
+	fs.SetFinderComment(path2, "classified")
+	fs.FlushMDImport()
+
+	mu.Lock()
+	n := len(calls)
+	mu.Unlock()
+	if n != 1 {
+		t.Fatalf("expected 1 mdimport call for same dir, got %d", n)
+	}
+	if calls[0] != tmp {
+		t.Errorf("expected mdimport %q, got %q", tmp, calls[0])
+	}
+}
+
+func TestOSFSBatchesMDImportPerDistinctDirectories(t *testing.T) {
+	tmp := t.TempDir()
+	dirA := filepath.Join(tmp, "a")
+	dirB := filepath.Join(tmp, "b")
+	if err := os.MkdirAll(dirA, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(dirB, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	var mu sync.Mutex
+	var calls []string
+	fs := newOSFSWithBatcher(func(dir string) error {
+		mu.Lock()
+		calls = append(calls, dir)
+		mu.Unlock()
+		return nil
+	})
+
+	fs.SetTags(filepath.Join(dirA, "f.txt"), []string{"red"})
+	fs.SetTags(filepath.Join(dirB, "f.txt"), []string{"blue"})
+	fs.FlushMDImport()
+
+	mu.Lock()
+	n := len(calls)
+	mu.Unlock()
+	if n != 2 {
+		t.Fatalf("expected 2 mdimport calls for distinct dirs, got %d", n)
+	}
+	sort.Strings(calls)
+	if calls[0] != dirA || calls[1] != dirB {
+		t.Errorf("unexpected calls: %v", calls)
 	}
 }

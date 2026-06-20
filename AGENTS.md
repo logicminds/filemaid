@@ -33,13 +33,14 @@ filemaid cleanup
 
 The shared value object is `llm.Decision` (`internal/llm/llm.go`):
 
-```go
 type Decision struct {
     Category    string   `json:"category"`
     Tags        []string `json:"tags"`
     Action      string   `json:"action"`      // "move" | "delete" | "review"
     Destination string   `json:"destination"`
     Reason      string   `json:"reason"`
+    NewName     string   `json:"new_name"`    // LLM-suggested filename (extension preserved)
+    NameQuality int      `json:"name_quality"` // 1-5; 0 means no suggestion
 }
 ```
 
@@ -76,17 +77,22 @@ type Decision struct {
 | Dry-run cleaners | `~/.local/bin/filemaid cleanup --dry-run` |
 | Run cleaners now | `~/.local/bin/filemaid cleanup` |
 | View/approve review queue | `~/.local/bin/filemaid review` or `~/.local/bin/filemaid review --open` |
+| Process with smart rename | `~/.local/bin/filemaid process --rename --rename-level 3 <paths>` |
+| Preview renames (dry run) | `~/.local/bin/filemaid process --dry-run <paths>` |
+| Scan with rename preview | `~/.local/bin/filemaid scan --dry-run` |
 | Tail logs | `~/.local/bin/filemaid logs --tail 50` |
 | Show resolved config | `~/.local/bin/filemaid config` |
 
 ## Code Conventions & Common Patterns
 
-- **Go standard library plus Cobra only.** `go.mod` declares only `github.com/spf13/cobra` as a direct dependency.
+- **Go standard library plus Cobra, plus goimagehash for perceptual hashing.** `go.mod` declares `github.com/spf13/cobra` and `github.com/corona10/goimagehash` as direct dependencies.
 - **Go 1.23+.** `go.mod` requires `go 1.23`.
 - **Config-driven behavior.** Most rules live in `~/.config/filemaid/config.json` and are merged with defaults in `internal/config`. All paths containing `~` are expanded.
 - **Whitelist safety.** `allowed_dirs` gates both source and destination paths; `allowed_cleaners` gates which cleaners may run.
 - **Fail-safe classification.** Any LLM error, parse failure, timeout, or ambiguous result becomes `category="Unknown"`, `action="review"`.
 - **Delete safety.** `action="delete"` is only honored if the file matches `safe_delete_patterns` or is a duplicate; otherwise it is coerced to `"review"`.
+- **Rename safety.** `actions.Apply` only renames when `cfg.Rename` is true and `decision.NameQuality` >= `cfg.RenameLevel`. Duplicates route to review; similar files above configured thresholds route to review; invalid or too-short/long names fall back to the original name.
+- **Extension preservation.** Any LLM-suggested `NewName` must preserve the source file extension; mismatches are corrected before application.
 - **Pattern matching.** `safe_delete_patterns` and `age_rules` use `filepath.Match` against the path relative to `~`.
 - **Cleaner plugin contract.** Each cleaner module exposes:
   ```go
@@ -97,6 +103,7 @@ type Decision struct {
 - **Embedded assets.** The default `config.json` and `modelfiles/` are embedded into the binary under `internal/setup/assets`, so `filemaid setup` is self-contained and works from a single portable binary.
 - **Subprocess calls are fire-and-forget.** External-tool failures are logged but do not abort moves.
 - **macOS-specific integration.** Finder tags are written via `xattr` + `mdimport`; trash uses `osascript` "Finder delete".
+- **Dry-run mode.** `process` and `scan` support `--dry-run`, which records no history, performs no moves, and previews renames in output.
 
 ## Important Files
 

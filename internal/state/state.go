@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"sort"
@@ -15,16 +16,37 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-// Repo persists and queries file processing history and cached classification
-// decisions.
 type Repo interface {
-	Record(original, final, sha256, category string, tags []string, action, reason string, runID string, metrics llm.Metrics) error
+	Record(input RecordInput) error
 	FindByHash(sha256 string) (*Record, error)
+	FindDuplicatesByHash(sha256 string) ([]Record, error)
+	FindSimilarByFingerprints(perceptualHash, avSignature, textSignature string) ([]Record, error)
 	DistinctTags() ([]string, error)
 	FindDecisionByHash(sha256 string) (llm.Decision, bool, error)
 	RecordDecision(sha256 string, decision llm.Decision) error
 	History(limit int, runID string) ([]Record, error)
 	Close() error
+}
+
+// RecordInput holds all data persisted by Record.
+type RecordInput struct {
+	OriginalPath   string
+	FinalPath      string
+	SHA256         string
+	Category       string
+	Tags           []string
+	Action         string
+	Reason         string
+	RunID          string
+	Metrics        llm.Metrics
+	OriginalName   string
+	NewName        string
+	NameQuality    float64
+	MediaKind      string
+	PerceptualHash string
+	AVSignature    string
+	TextSignature  string
+	HashAlgorithm  string
 }
 
 // Record is a single row from the history table.
@@ -45,6 +67,14 @@ type Record struct {
 	TotalTokens      sql.NullInt64
 	TokensPerSec     sql.NullFloat64
 	ContextSize      sql.NullInt64
+	OriginalName     string
+	NewName          string
+	NameQuality      sql.NullFloat64
+	MediaKind        string
+	PerceptualHash   string
+	AVSignature      string
+	TextSignature    string
+	HashAlgorithm    string
 }
 
 // State is the SQLite-backed implementation of Repo.
@@ -62,15 +92,29 @@ CREATE TABLE IF NOT EXISTS history (
     tags TEXT,
     action TEXT,
     reason TEXT,
-    created_at TEXT DEFAULT CURRENT_TIMESTAMP
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    original_name TEXT,
+    new_name TEXT,
+    name_quality REAL,
+    media_kind TEXT,
+    perceptual_hash TEXT,
+    av_signature TEXT,
+    text_signature TEXT,
+    hash_algorithm TEXT
 );
-CREATE INDEX IF NOT EXISTS idx_sha256 ON history(sha256);
 CREATE TABLE IF NOT EXISTS decisions (
     sha256 TEXT PRIMARY KEY,
     decision TEXT NOT NULL,
     created_at TEXT DEFAULT CURRENT_TIMESTAMP
 );
 `
+
+var historyIndexes = []string{
+	"CREATE INDEX IF NOT EXISTS idx_sha256 ON history(sha256)",
+	"CREATE INDEX IF NOT EXISTS idx_perceptual_hash ON history(perceptual_hash)",
+	"CREATE INDEX IF NOT EXISTS idx_av_signature ON history(av_signature)",
+	"CREATE INDEX IF NOT EXISTS idx_text_signature ON history(text_signature)",
+}
 
 var historyColumns = []string{
 	"run_id TEXT",
@@ -80,6 +124,49 @@ var historyColumns = []string{
 	"total_tokens INTEGER",
 	"tokens_per_sec REAL",
 	"context_size INTEGER",
+	"original_name TEXT",
+	"new_name TEXT",
+	"name_quality REAL",
+	"media_kind TEXT",
+	"perceptual_hash TEXT",
+	"av_signature TEXT",
+	"text_signature TEXT",
+	"hash_algorithm TEXT",
+}
+
+const historySelectColumns = `id, original_path, final_path, sha256, category, tags, action, reason, created_at, run_id, llm_duration_ms, prompt_tokens, completion_tokens, total_tokens, tokens_per_sec, context_size, original_name, new_name, name_quality, media_kind, perceptual_hash, av_signature, text_signature, hash_algorithm`
+
+func scanRecord(row interface {
+	Scan(dest ...interface{}) error
+}) (*Record, error) {
+	var r Record
+	var finalPath, sha, category, tags, action, reason sql.NullString
+	var origName, newName, mediaKind, pHash, avSig, textSig, hashAlgo sql.NullString
+	err := row.Scan(
+		&r.ID, &r.OriginalPath, &finalPath, &sha, &category, &tags, &action, &reason, &r.CreatedAt,
+		&r.RunID, &r.LLMDurationMs, &r.PromptTokens, &r.CompletionTokens, &r.TotalTokens, &r.TokensPerSec, &r.ContextSize,
+		&origName, &newName, &r.NameQuality, &mediaKind, &pHash, &avSig, &textSig, &hashAlgo,
+	)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	r.FinalPath = finalPath.String
+	r.SHA256 = sha.String
+	r.Category = category.String
+	r.Tags = tags.String
+	r.Action = action.String
+	r.Reason = reason.String
+	r.OriginalName = origName.String
+	r.NewName = newName.String
+	r.MediaKind = mediaKind.String
+	r.PerceptualHash = pHash.String
+	r.AVSignature = avSig.String
+	r.TextSignature = textSig.String
+	r.HashAlgorithm = hashAlgo.String
+	return &r, nil
 }
 
 // Open creates the parent directories for path, opens the SQLite database, and
@@ -94,6 +181,7 @@ func Open(path string) (*State, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open sqlite: %w", err)
 	}
+	enableWAL(db)
 
 	if _, err := db.Exec(schema); err != nil {
 		_ = db.Close()
@@ -105,7 +193,37 @@ func Open(path string) (*State, error) {
 		return nil, fmt.Errorf("migrate history columns: %w", err)
 	}
 
+	if err := migrateIndexes(db); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("migrate indexes: %w", err)
+	}
+
 	return &State{db: db}, nil
+}
+
+// migrateIndexes creates any missing history indexes. It runs after column
+// migrations so that indexes on added columns do not fail on legacy databases.
+func migrateIndexes(db *sql.DB) error {
+	for _, stmt := range historyIndexes {
+		if _, err := db.Exec(stmt); err != nil {
+			return fmt.Errorf("create index: %w", err)
+		}
+	}
+	return nil
+}
+
+// enableWAL attempts to set the SQLite journal mode to WAL. If the database
+// engine does not support WAL or refuses the change, it logs a warning and
+// returns so that Open can continue normally.
+func enableWAL(db *sql.DB) {
+	var mode string
+	if err := db.QueryRow("PRAGMA journal_mode=WAL").Scan(&mode); err != nil {
+		slog.Warn("sqlite WAL mode query failed", "error", err)
+		return
+	}
+	if mode != "wal" {
+		slog.Warn("sqlite WAL mode not supported or enabled", "mode", mode)
+	}
 }
 
 // migrateHistoryColumns adds any missing metric/run columns to existing databases.
@@ -145,12 +263,14 @@ func migrateHistoryColumns(db *sql.DB) error {
 }
 
 // Record inserts a new history row.
-func (s *State) Record(original, final, sha256, category string, tags []string, action, reason string, runID string, metrics llm.Metrics) error {
-	tagsStr := strings.Join(tags, ",")
+func (s *State) Record(input RecordInput) error {
+	tagsStr := strings.Join(input.Tags, ",")
 	_, err := s.db.Exec(
-		`INSERT INTO history (original_path, final_path, sha256, category, tags, action, reason, run_id, llm_duration_ms, prompt_tokens, completion_tokens, total_tokens, tokens_per_sec, context_size)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		original, final, sha256, category, tagsStr, action, reason, runID, metrics.DurationMs, metrics.PromptTokens, metrics.CompletionTokens, metrics.TotalTokens, metrics.TokensPerSec, metrics.ContextSize,
+		`INSERT INTO history (original_path, final_path, sha256, category, tags, action, reason, run_id, llm_duration_ms, prompt_tokens, completion_tokens, total_tokens, tokens_per_sec, context_size, original_name, new_name, name_quality, media_kind, perceptual_hash, av_signature, text_signature, hash_algorithm)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		input.OriginalPath, input.FinalPath, input.SHA256, input.Category, tagsStr, input.Action, input.Reason, input.RunID,
+		input.Metrics.DurationMs, input.Metrics.PromptTokens, input.Metrics.CompletionTokens, input.Metrics.TotalTokens, input.Metrics.TokensPerSec, input.Metrics.ContextSize,
+		input.OriginalName, input.NewName, input.NameQuality, input.MediaKind, input.PerceptualHash, input.AVSignature, input.TextSignature, input.HashAlgorithm,
 	)
 	if err != nil {
 		return fmt.Errorf("insert history: %w", err)
@@ -161,31 +281,19 @@ func (s *State) Record(original, final, sha256, category string, tags []string, 
 // FindByHash returns the most recent history row matching sha256, or nil if none exists.
 func (s *State) FindByHash(sha256 string) (*Record, error) {
 	row := s.db.QueryRow(
-		`SELECT id, original_path, final_path, sha256, category, tags, action, reason, created_at, run_id, llm_duration_ms, prompt_tokens, completion_tokens, total_tokens, tokens_per_sec, context_size
-		 FROM history
-		 WHERE sha256 = ?
-		 ORDER BY created_at DESC, id DESC
-		 LIMIT 1`,
+		`SELECT `+historySelectColumns+
+			` FROM history
+			 WHERE sha256 = ?
+			 ORDER BY created_at DESC, id DESC
+			 LIMIT 1`,
 		sha256,
 	)
 
-	var r Record
-	var finalPath, sha, category, tags, action, reason sql.NullString
-	err := row.Scan(&r.ID, &r.OriginalPath, &finalPath, &sha, &category, &tags, &action, &reason, &r.CreatedAt, &r.RunID, &r.LLMDurationMs, &r.PromptTokens, &r.CompletionTokens, &r.TotalTokens, &r.TokensPerSec, &r.ContextSize)
-	if err == sql.ErrNoRows {
-		return nil, nil
-	}
+	r, err := scanRecord(row)
 	if err != nil {
 		return nil, fmt.Errorf("find by hash: %w", err)
 	}
-
-	r.FinalPath = finalPath.String
-	r.SHA256 = sha.String
-	r.Category = category.String
-	r.Tags = tags.String
-	r.Action = action.String
-	r.Reason = reason.String
-	return &r, nil
+	return r, nil
 }
 
 // DistinctTags returns all unique tags stored across history rows, excluding the
@@ -236,13 +344,13 @@ func (s *State) History(limit int, runID string) ([]Record, error) {
 	var err error
 	if runID != "" {
 		rows, err = s.db.Query(
-			`SELECT id, original_path, final_path, sha256, category, tags, action, reason, created_at, run_id, llm_duration_ms, prompt_tokens, completion_tokens, total_tokens, tokens_per_sec, context_size
-			 FROM history WHERE run_id = ? ORDER BY created_at DESC, id DESC LIMIT ?`,
+			`SELECT `+historySelectColumns+
+				` FROM history WHERE run_id = ? ORDER BY created_at DESC, id DESC LIMIT ?`,
 			runID, limit)
 	} else {
 		rows, err = s.db.Query(
-			`SELECT id, original_path, final_path, sha256, category, tags, action, reason, created_at, run_id, llm_duration_ms, prompt_tokens, completion_tokens, total_tokens, tokens_per_sec, context_size
-			 FROM history ORDER BY created_at DESC, id DESC LIMIT ?`,
+			`SELECT `+historySelectColumns+
+				` FROM history ORDER BY created_at DESC, id DESC LIMIT ?`,
 			limit)
 	}
 	if err != nil {
@@ -254,9 +362,11 @@ func (s *State) History(limit int, runID string) ([]Record, error) {
 	for rows.Next() {
 		var r Record
 		var finalPath, sha, category, tags, action, reason sql.NullString
+		var origName, newName, mediaKind, pHash, avSig, textSig, hashAlgo sql.NullString
 		if err := rows.Scan(
 			&r.ID, &r.OriginalPath, &finalPath, &sha, &category, &tags, &action, &reason, &r.CreatedAt,
 			&r.RunID, &r.LLMDurationMs, &r.PromptTokens, &r.CompletionTokens, &r.TotalTokens, &r.TokensPerSec, &r.ContextSize,
+			&origName, &newName, &r.NameQuality, &mediaKind, &pHash, &avSig, &textSig, &hashAlgo,
 		); err != nil {
 			return nil, fmt.Errorf("scan history: %w", err)
 		}
@@ -266,10 +376,74 @@ func (s *State) History(limit int, runID string) ([]Record, error) {
 		r.Tags = tags.String
 		r.Action = action.String
 		r.Reason = reason.String
+		r.OriginalName = origName.String
+		r.NewName = newName.String
+		r.MediaKind = mediaKind.String
+		r.PerceptualHash = pHash.String
+		r.AVSignature = avSig.String
+		r.TextSignature = textSig.String
+		r.HashAlgorithm = hashAlgo.String
 		out = append(out, r)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("iterate history: %w", err)
+	}
+	return out, nil
+}
+
+// FindDuplicatesByHash returns all history rows matching sha256, ordered by most recent first.
+func (s *State) FindDuplicatesByHash(sha256 string) ([]Record, error) {
+	rows, err := s.db.Query(
+		`SELECT `+historySelectColumns+
+			` FROM history WHERE sha256 = ? ORDER BY created_at DESC, id DESC`,
+		sha256,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("find duplicates by hash: %w", err)
+	}
+	defer rows.Close()
+
+	var out []Record
+	for rows.Next() {
+		r, err := scanRecord(rows)
+		if err != nil {
+			return nil, fmt.Errorf("scan duplicate: %w", err)
+		}
+		out = append(out, *r)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate duplicates: %w", err)
+	}
+	return out, nil
+}
+
+// FindSimilarByFingerprints returns history rows that share any of the provided
+// non-empty fingerprint signatures, ordered by most recent first.
+func (s *State) FindSimilarByFingerprints(perceptualHash, avSignature, textSignature string) ([]Record, error) {
+	rows, err := s.db.Query(
+		`SELECT `+historySelectColumns+
+			` FROM history
+			 WHERE (?1 <> '' AND perceptual_hash = ?1)
+			    OR (?2 <> '' AND av_signature = ?2)
+			    OR (?3 <> '' AND text_signature = ?3)
+			 ORDER BY created_at DESC, id DESC`,
+		perceptualHash, avSignature, textSignature,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("find similar by fingerprints: %w", err)
+	}
+	defer rows.Close()
+
+	var out []Record
+	for rows.Next() {
+		r, err := scanRecord(rows)
+		if err != nil {
+			return nil, fmt.Errorf("scan similar: %w", err)
+		}
+		out = append(out, *r)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate similar: %w", err)
 	}
 	return out, nil
 }

@@ -34,6 +34,8 @@ type Decision struct {
 	Action      string   `json:"action"` // move | delete | review
 	Destination string   `json:"destination"`
 	Reason      string   `json:"reason"`
+	NewName     string   `json:"new_name"`
+	NameQuality int      `json:"name_quality"`
 }
 
 // Metrics holds LLM telemetry for a single classification.
@@ -147,7 +149,7 @@ func (c *Client) Classify(ctx context.Context, path string, fileHash string, cfg
 		if resp.Error != "" {
 			return Decision{}, resp, errors.New(resp.Error)
 		}
-		if decision, ok := parseResponse(resp, categories); ok {
+		if decision, ok := parseResponse(resp, categories, path); ok {
 			return decision, resp, nil
 		}
 		return Decision{}, resp, errors.New("could not parse model response")
@@ -397,12 +399,10 @@ File:
 - modified: %s
 %s
 
-Return a single compact JSON object and nothing else. Leave destination empty.
-{"category": "...", "subcategory": "...", "tags": ["..."], "action": "...", "destination": "", "reason": "..."}`
+Return a single compact JSON object and nothing else. Leave destination empty. If the current filename is poor or misleading, suggest a better one in "new_name" (preserve the original extension) and rate the current name in "name_quality" (integer 1-5, where 5 is excellent). Omit new_name when the current name is already good.
+{"category": "...", "subcategory": "...", "tags": ["..."], "action": "...", "destination": "", "reason": "...", "new_name": "...", "name_quality": 3}`
 
-const subcategoryInstructions = `For image files, also provide a concise subcategory describing the main subject or scene (e.g., cat, dog, baby, kid, woman, wedding, car, nature, food, selfie, document-photo). For screenshots, describe the app or context (e.g., Safari, Terminal, Slack, VS Code, browser, lock-screen, menu-bar). The subcategory will be added as a Finder tag.`
-
-const maxImageDimension = 1024
+const subcategoryInstructions = `For image files, also provide a concise subcategory describing the main subject or scene (e.g., cat, dog, baby, kid, woman, wedding, car, nature, food, selfie, document-photo). For screenshots, describe the app or context (e.g., Safari, Terminal, Slack, VS Code: browser, lock-screen, menu-bar). The subcategory will be added as a Finder tag.`
 
 // encodeImageToJPEG re-encodes img as a JPEG with the given quality.
 func encodeImageToJPEG(img image.Image, quality int) ([]byte, error) {
@@ -559,7 +559,11 @@ func buildPrompt(path string, cfg *config.Config) (string, []string, error) {
 		}
 		b, err := os.ReadFile(path)
 		if err == nil {
-			resized, resizeErr := resizeImageBytes(b, maxImageDimension)
+			maxDim := cfg.MaxImageDimension
+			if maxDim < 64 {
+				maxDim = 64
+			}
+			resized, resizeErr := resizeImageBytes(b, maxDim)
 			if resizeErr == nil {
 				images = append(images, base64.StdEncoding.EncodeToString(resized))
 			} else {
@@ -697,6 +701,16 @@ func toolSchema(categories []string) map[string]any {
 						"enum": []string{"move", "delete", "review"},
 					},
 					"reason": map[string]any{"type": "string"},
+					"new_name": map[string]any{
+						"type":        "string",
+						"description": "Suggested new filename; must preserve the original file extension",
+					},
+					"name_quality": map[string]any{
+						"type":        "integer",
+						"minimum":     1,
+						"maximum":     5,
+						"description": "Quality rating of the current filename from 1 (poor) to 5 (excellent)",
+					},
 				},
 				"required": []string{"category", "tags", "action", "reason"},
 			},
@@ -766,12 +780,12 @@ type chatResponse struct {
 	LoadDuration       int64 `json:"load_duration"`
 }
 
-func parseResponse(resp chatResponse, categories map[string]bool) (Decision, bool) {
+func parseResponse(resp chatResponse, categories map[string]bool, path string) (Decision, bool) {
 	msg := resp.Message
 	for _, tc := range msg.ToolCalls {
 		args, ok := parseArguments(tc.Function.Arguments)
 		if ok {
-			return buildDecision(args, categories, ""), true
+			return buildDecision(args, categories, "", path), true
 		}
 	}
 
@@ -781,7 +795,7 @@ func parseResponse(resp chatResponse, categories map[string]bool) (Decision, boo
 	if content := strings.TrimSpace(msg.Content); content != "" {
 		if parsed, ok := extractJSON(content); ok {
 			dest, _ := stringField(parsed, "destination")
-			return buildDecision(parsed, categories, dest), true
+			return buildDecision(parsed, categories, dest, path), true
 		}
 	}
 
@@ -791,7 +805,7 @@ func parseResponse(resp chatResponse, categories map[string]bool) (Decision, boo
 	if thinking := strings.TrimSpace(msg.Thinking); thinking != "" {
 		if parsed, ok := extractJSON(thinking); ok {
 			dest, _ := stringField(parsed, "destination")
-			return buildDecision(parsed, categories, dest), true
+			return buildDecision(parsed, categories, dest, path), true
 		}
 	}
 
@@ -799,7 +813,7 @@ func parseResponse(resp chatResponse, categories map[string]bool) (Decision, boo
 	if resp := strings.TrimSpace(resp.Response); resp != "" {
 		if parsed, ok := extractJSON(resp); ok {
 			dest, _ := stringField(parsed, "destination")
-			return buildDecision(parsed, categories, dest), true
+			return buildDecision(parsed, categories, dest, path), true
 		}
 	}
 
@@ -886,7 +900,7 @@ func extractJSON(raw string) (map[string]any, bool) {
 	return out, true
 }
 
-func buildDecision(m map[string]any, categories map[string]bool, destination string) Decision {
+func buildDecision(m map[string]any, categories map[string]bool, destination, path string) Decision {
 	d := NewDecision()
 	d.Destination = destination
 
@@ -907,7 +921,40 @@ func buildDecision(m map[string]any, categories map[string]bool, destination str
 	}
 
 	d.Reason, _ = stringField(m, "reason")
+
+	if newName, ok := stringField(m, "new_name"); ok {
+		d.NewName = validateNewName(path, newName)
+	}
+
+	if q, ok := intField(m, "name_quality"); ok {
+		if q < 1 {
+			q = 1
+		} else if q > 5 {
+			q = 5
+		}
+		d.NameQuality = q
+	}
+
 	return d
+}
+
+// validateNewName ensures the suggested filename preserves the original file
+// extension. If the LLM changes the extension or omits it, the original
+// extension is restored or appended.
+func validateNewName(path, name string) string {
+	origExt := filepath.Ext(path)
+	newExt := filepath.Ext(name)
+	if origExt == "" {
+		return name
+	}
+	if newExt == "" {
+		return name + origExt
+	}
+	if !strings.EqualFold(newExt, origExt) {
+		base := strings.TrimSuffix(name, newExt)
+		return base + origExt
+	}
+	return name
 }
 
 func stringField(m map[string]any, key string) (string, bool) {
@@ -939,4 +986,31 @@ func stringSliceField(m map[string]any, key string) []string {
 		return s
 	}
 	return nil
+}
+func intField(m map[string]any, key string) (int, bool) {
+	v, ok := m[key]
+	if !ok {
+		return 0, false
+	}
+	switch n := v.(type) {
+	case int:
+		return n, true
+	case int8:
+		return int(n), true
+	case int16:
+		return int(n), true
+	case int32:
+		return int(n), true
+	case int64:
+		return int(n), true
+	case float32:
+		return int(n), true
+	case float64:
+		return int(n), true
+	case json.Number:
+		if i, err := n.Int64(); err == nil {
+			return int(i), true
+		}
+	}
+	return 0, false
 }

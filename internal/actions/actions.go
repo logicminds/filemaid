@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/logicminds/filemaid/internal/config"
+	"github.com/logicminds/filemaid/internal/fingerprint"
 	"github.com/logicminds/filemaid/internal/llm"
 	"github.com/logicminds/filemaid/internal/state"
 )
@@ -115,13 +116,46 @@ func Apply(decision llm.Decision, src string, fileHash string, cfg *config.Confi
 		return fmt.Sprintf("skipped (not allowed): %s", src), nil
 	}
 
-	reviewBase := datedReviewPath(cfg.ReviewDir, filepath.Base(src))
+	originalName := filepath.Base(src)
+	reviewBase := datedReviewPath(cfg.ReviewDir, originalName)
 
-	if decision.Action == "delete" {
-		safe := MatchesPatterns(src, cfg.SafeDeletePatterns) || isDuplicate
-		if !safe {
+	var fp fingerprint.MediaFingerprint
+	var fpErr error
+	if cfg.Rename {
+		fp, fpErr = fingerprint.ComputeFingerprint(src, cfg)
+	}
+
+	var duplicates []state.Record
+	var similar []state.Record
+	if cfg.Rename && fpErr == nil {
+		duplicates, _ = db.FindDuplicatesByHash(fileHash)
+		similar, _ = db.FindSimilarByFingerprints(fp.PerceptualHash, fp.AVSignature, fp.TextSignature)
+	}
+
+	if cfg.Rename && decision.Action != "review" && fpErr == nil {
+		if len(duplicates) > 0 {
 			decision.Action = "review"
-			decision.Reason = fmt.Sprintf("delete refused for safety; original reason: %s", decision.Reason)
+			decision.Reason = fmt.Sprintf("duplicate content detected; original reason: %s", decision.Reason)
+		} else if len(similar) > 0 {
+			threshold := cfg.RenameImageSimilarityThreshold
+			if fp.MediaKind == "audio" || fp.MediaKind == "video" {
+				threshold = cfg.RenameAVSimilarityThreshold
+			}
+			for _, rec := range similar {
+				recFP := fingerprint.MediaFingerprint{
+					MediaKind:      rec.MediaKind,
+					PerceptualHash: rec.PerceptualHash,
+					AVSignature:    rec.AVSignature,
+					TextSignature:  rec.TextSignature,
+					HashAlgorithm:  rec.HashAlgorithm,
+				}
+				score := fingerprint.CompareFiles(fp, recFP)
+				if score >= threshold {
+					decision.Action = "review"
+					decision.Reason = fmt.Sprintf("similar content detected (%.2f); original reason: %s", score, decision.Reason)
+					break
+				}
+			}
 		}
 	}
 
@@ -138,28 +172,65 @@ func Apply(decision llm.Decision, src string, fileHash string, cfg *config.Confi
 			decision.Action = "review"
 			decision.Reason = fmt.Sprintf("trash failed: %s", err)
 		} else {
-			if dbErr := db.Record(src, "trash", fileHash, decision.Category, decision.Tags, "delete", decision.Reason, runID, metrics); dbErr != nil {
+			if dbErr := db.Record(state.RecordInput{
+				OriginalPath:   src,
+				FinalPath:      "trash",
+				SHA256:         fileHash,
+				Category:       decision.Category,
+				Tags:           []string{},
+				Action:         "delete",
+				Reason:         decision.Reason,
+				RunID:          runID,
+				Metrics:        metrics,
+				OriginalName:   originalName,
+				NewName:        "",
+				NameQuality:    float64(decision.NameQuality),
+				MediaKind:      fp.MediaKind,
+				PerceptualHash: fp.PerceptualHash,
+				AVSignature:    fp.AVSignature,
+				TextSignature:  fp.TextSignature,
+				HashAlgorithm:  fp.HashAlgorithm,
+			}); dbErr != nil {
 				return "", fmt.Errorf("record history: %w", dbErr)
 			}
 			return "trash", nil
 		}
 	}
 
-	var dest string
+	var destDir string
+	var destFileName string
 	if decision.Action == "review" {
-		dest = reviewBase
+		destDir = filepath.Dir(reviewBase)
+		destFileName = originalName
 	} else if decision.Destination != "" {
-		dest = expandTilde(decision.Destination)
+		dest := expandTilde(decision.Destination)
+		destDir = filepath.Dir(dest)
+		destFileName = filepath.Base(dest)
 	} else if catDir, ok := cfg.Categories[decision.Category]; ok {
-		dest = filepath.Join(expandTilde(catDir), filepath.Base(src))
+		destDir = expandTilde(catDir)
+		destFileName = originalName
 	} else {
-		dest = reviewBase
+		destDir = filepath.Dir(reviewBase)
+		destFileName = originalName
 	}
 
-	dest = UniqueDest(dest, fs)
+	renamedTo := ""
+	if cfg.Rename && decision.Action != "review" && decision.Action != "delete" && decision.NameQuality >= cfg.RenameLevel && fpErr == nil {
+		if sanitized, ok := sanitizeName(decision.NewName, originalName, cfg); ok {
+			destFileName = uniqueNameWithCounter(destDir, sanitized, fs)
+			renamedTo = destFileName
+		}
+	}
+
+	dest := filepath.Join(destDir, destFileName)
+	if cfg.Rename && renamedTo != "" {
+		// Renamed destinations already resolved collisions with a counter suffix.
+	} else {
+		dest = UniqueDest(dest, fs)
+	}
 
 	if len(cfg.AllowedDirs) > 0 && !WithinAllowed(dest, cfg.AllowedDirs) {
-		dest = datedReviewPath(cfg.ReviewDir, filepath.Base(src))
+		dest = datedReviewPath(cfg.ReviewDir, originalName)
 		dest = UniqueDest(dest, fs)
 		decision.Action = "review"
 		decision.Reason += "; destination outside allowed dirs"
@@ -170,7 +241,7 @@ func Apply(decision llm.Decision, src string, fileHash string, cfg *config.Confi
 	}
 	if err := fs.Move(src, dest); err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return fmt.Sprintf("skipped (%s no longer exists)", filepath.Base(src)), nil
+			return fmt.Sprintf("skipped (%s no longer exists)", originalName), nil
 		}
 		return "", fmt.Errorf("move failed: %s -> %s: %w", src, dest, err)
 	}
@@ -195,10 +266,108 @@ func Apply(decision llm.Decision, src string, fileHash string, cfg *config.Confi
 		fs.SetFinderComment(dest, decision.Reason)
 	}
 
-	if err := db.Record(src, dest, fileHash, decision.Category, tags, decision.Action, decision.Reason, runID, metrics); err != nil {
+	if err := db.Record(state.RecordInput{
+		OriginalPath:   src,
+		FinalPath:      dest,
+		SHA256:         fileHash,
+		Category:       decision.Category,
+		Tags:           tags,
+		Action:         decision.Action,
+		Reason:         decision.Reason,
+		RunID:          runID,
+		Metrics:        metrics,
+		OriginalName:   originalName,
+		NewName:        renamedTo,
+		NameQuality:    float64(decision.NameQuality),
+		MediaKind:      fp.MediaKind,
+		PerceptualHash: fp.PerceptualHash,
+		AVSignature:    fp.AVSignature,
+		TextSignature:  fp.TextSignature,
+		HashAlgorithm:  fp.HashAlgorithm,
+	}); err != nil {
 		return "", fmt.Errorf("record history: %w", err)
 	}
 	return dest, nil
+}
+
+// DestinationDir returns the directory a file would be moved to based on the
+// classification decision and configuration, before unique-name resolution.
+// It is exported so callers (e.g. the process worker pool) can serialize
+// applies that target the same destination directory.
+func DestinationDir(decision llm.Decision, src string, cfg *config.Config) string {
+	originalName := filepath.Base(src)
+	reviewBase := datedReviewPath(cfg.ReviewDir, originalName)
+
+	var destDir string
+	if decision.Action == "review" {
+		destDir = filepath.Dir(reviewBase)
+	} else if decision.Destination != "" {
+		destDir = filepath.Dir(expandTilde(decision.Destination))
+	} else if catDir, ok := cfg.Categories[decision.Category]; ok {
+		destDir = expandTilde(catDir)
+	} else {
+		destDir = filepath.Dir(reviewBase)
+	}
+	return destDir
+}
+
+func sanitizeName(newName, original string, cfg *config.Config) (string, bool) {
+	if newName == "" {
+		return "", false
+	}
+	ext := filepath.Ext(original)
+	stem := strings.TrimSuffix(filepath.Base(newName), filepath.Ext(newName))
+	if stem == "" {
+		return "", false
+	}
+	invalid := cfg.RenameInvalidChars
+	if invalid == "" {
+		invalid = "<>:\"/\\\\|?*"
+	}
+	pairs := make([]string, 0, len(invalid)*2)
+	for _, r := range invalid {
+		pairs = append(pairs, string(r), "")
+	}
+	stem = strings.NewReplacer(pairs...).Replace(stem)
+	stem = strings.TrimSpace(stem)
+	if stem == "" {
+		return "", false
+	}
+	maxLen := cfg.RenameMaxLength
+	if maxLen <= 0 {
+		maxLen = 120
+	}
+	minLen := cfg.RenameMinLength
+	if minLen < 0 {
+		minLen = 0
+	}
+	available := maxLen - len(ext)
+	if available < minLen {
+		available = minLen
+	}
+	if len(stem) > available {
+		stem = stem[:available]
+		stem = strings.TrimSpace(stem)
+	}
+	if len(stem) < minLen {
+		return "", false
+	}
+	return stem + ext, true
+}
+
+func uniqueNameWithCounter(dir, name string, fs FS) string {
+	if !fs.Exists(filepath.Join(dir, name)) {
+		return name
+	}
+	ext := filepath.Ext(name)
+	stem := strings.TrimSuffix(name, ext)
+	for i := 1; i < 10000; i++ {
+		candidate := fmt.Sprintf("%s %d%s", stem, i, ext)
+		if !fs.Exists(filepath.Join(dir, candidate)) {
+			return candidate
+		}
+	}
+	return filepath.Base(UniqueDest(filepath.Join(dir, name), fs))
 }
 
 func datedReviewPath(reviewDir, name string) string {

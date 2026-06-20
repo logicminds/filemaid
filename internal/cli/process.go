@@ -35,14 +35,34 @@ var (
 	// replace it with a recording or fake filesystem.
 	processFS actions.FS = actions.NewOSFS()
 
+	// computeHash is the hash implementation used during preprocessing. Tests may
+	// replace it to observe or slow down hashing without touching real files.
+	computeHash = actions.ComputeHash
+
 	// nowFunc returns the current time. Tests may replace it with a fixed clock.
 	nowFunc = time.Now
 )
 
-// defaultProcessWorkers limits how many files are classified and applied
-// concurrently. Classification is the expensive LLM-bound step; apply is
-// mutex-serialized to keep filesystem and history operations deterministic.
-const defaultProcessWorkers = 4
+// noopFS is an actions.FS implementation that performs no side effects. It is
+// used by dry-run mode to compute destinations without moving files.
+type noopFS struct{}
+
+func (n noopFS) Move(src, dest string) error                  { return nil }
+func (n noopFS) MkdirAll(path string) error                   { return nil }
+func (n noopFS) Exists(path string) bool                      { return false }
+func (n noopFS) SetTags(path string, tags []string)           {}
+func (n noopFS) SetFinderComment(path string, comment string) {}
+func (n noopFS) FlushMDImport()                               {}
+func (n noopFS) Trash(path string) error                      { return nil }
+
+// noopRecordRepo wraps a state.Repo and suppresses writes so dry-run mode does
+// not persist history or cached decisions.
+type noopRecordRepo struct {
+	state.Repo
+}
+
+func (n *noopRecordRepo) Record(input state.RecordInput) error                      { return nil }
+func (n *noopRecordRepo) RecordDecision(sha256 string, decision llm.Decision) error { return nil }
 
 // processItem carries the sequential preprocessing state for a single accepted
 // file into the concurrent classify+apply stage.
@@ -97,6 +117,9 @@ var (
 	processFormat string
 	processJSON   bool
 	processQuiet  bool
+	renameEnabled bool
+	renameLevel   int
+	processDryRun bool
 )
 
 // applierFunc matches the signature of actions.Apply so it can be swapped in tests.
@@ -106,7 +129,25 @@ func init() {
 	processCmd.Flags().StringVar(&processFormat, "format", "table", "output format (table|human|json)")
 	processCmd.Flags().BoolVar(&processJSON, "json", false, "output results as JSON (shorthand for --format json)")
 	processCmd.Flags().BoolVar(&processQuiet, "quiet", false, "suppress log output to stderr")
+	processCmd.Flags().BoolVar(&renameEnabled, "rename", false, "enable AI-generated file renaming")
+	processCmd.Flags().IntVar(&renameLevel, "rename-level", 0, "rename detail level (0-3)")
+	processCmd.Flags().BoolVar(&processDryRun, "dry-run", false, "preview changes without moving files")
 	rootCmd.AddCommand(processCmd)
+}
+
+// applyRenameFlags copies CLI flag overrides for rename settings into cfg when
+// the user explicitly provided them. It keeps config-file defaults intact for
+// flags that were not set.
+func applyRenameFlags(cmd *cobra.Command) {
+	if cmd == nil {
+		return
+	}
+	if cmd.Flags().Changed("rename") {
+		cfg.Rename = renameEnabled
+	}
+	if cmd.Flags().Changed("rename-level") {
+		cfg.RenameLevel = renameLevel
+	}
 }
 
 var processCmd = &cobra.Command{
@@ -115,6 +156,7 @@ var processCmd = &cobra.Command{
 	Long:  "Process one or more files: classify them with the configured LLM and apply the resulting move/tag/delete/review decision.",
 	Args:  cobra.MinimumNArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
+		applyRenameFlags(cmd)
 		if err := classifier.Validate(cfg); err != nil {
 			return fmt.Errorf("model validation failed: %w", err)
 		}
@@ -138,13 +180,26 @@ var processCmd = &cobra.Command{
 			defer log.SetStderrEnabled(true)
 		}
 
+		if processDryRun {
+			oldFS := processFS
+			oldDB := db
+			processFS = noopFS{}
+			db = &noopRecordRepo{Repo: oldDB}
+			defer func() {
+				processFS = oldFS
+				db = oldDB
+			}()
+		}
+
 		runID := newRunID()
 		results, err := processPaths(ctx, args, runID)
 		if err != nil {
 			return err
 		}
-		if err := regenerateSmartFolders(); err != nil {
-			slog.Warn("smart folder regeneration failed", "error", err)
+		if !processDryRun {
+			if err := regenerateSmartFolders(); err != nil {
+				slog.Warn("smart folder regeneration failed", "error", err)
+			}
 		}
 		if len(results) == 0 {
 			fmt.Println("No files processed.")
@@ -166,6 +221,8 @@ type processResult struct {
 	Tags             []string `json:"tags"`
 	Action           string   `json:"action"`
 	Result           string   `json:"result"`
+	OriginalName     string   `json:"original_name,omitempty"`
+	NewName          string   `json:"new_name,omitempty"`
 	OK               bool     `json:"ok"`
 	Error            string   `json:"error,omitempty"`
 	DurationMs       int64    `json:"duration_ms"`
@@ -196,13 +253,29 @@ const (
 	maxCatLen    = 16
 	maxTagsLen   = 30
 	maxActionLen = 8
+	maxNameLen   = 32
 	maxResultLen = 48
 )
+
+// formatNameChange returns a compact old -> new name summary for display.
+func formatNameChange(r processResult) string {
+	original := r.OriginalName
+	if original == "" {
+		original = filepath.Base(r.Path)
+	}
+	if r.NewName != "" && r.NewName != original {
+		return fmt.Sprintf("%s -> %s", original, r.NewName)
+	}
+	if r.Action == "skip" || r.Action == "delete" {
+		return "-"
+	}
+	return "kept name"
+}
 
 // formatProcessTable renders process results as a compact ASCII table.
 func formatProcessTable(results []processResult) string {
 	useColor := isTerminal(os.Stdout)
-	headers := []string{"File", "Category", "Tags", "Action", "Result", "Status"}
+	headers := []string{"File", "Category", "Tags", "Action", "Name", "Result", "Status"}
 	rows := make([][]string, 0, len(results))
 	for _, r := range results {
 		status := statusSymbol(r.OK, r.Error, useColor)
@@ -219,6 +292,7 @@ func formatProcessTable(results []processResult) string {
 			truncateTags([]string{category}, maxCatLen),
 			truncateTags(r.Tags, maxTagsLen),
 			truncateTags([]string{action}, maxActionLen),
+			truncateTags([]string{formatNameChange(r)}, maxNameLen),
 			truncatePath(collapseHome(r.Result), maxResultLen),
 			status,
 		})
@@ -246,6 +320,10 @@ func formatHuman(results []processResult) string {
 		}
 		if r.Action != "" {
 			lines = append(lines, fmt.Sprintf("   Action:   %s", r.Action))
+		}
+		nameChange := formatNameChange(r)
+		if nameChange != "-" {
+			lines = append(lines, fmt.Sprintf("   Name:     %s", nameChange))
 		}
 		if r.Result != "" {
 			lines = append(lines, fmt.Sprintf("   Result:   %s", collapseHome(r.Result)))
@@ -307,17 +385,47 @@ func plural(n int) string {
 	return "s"
 }
 
+// dirLockMap provides a mutex for each destination directory so independent
+// apply operations can run concurrently while operations targeting the same
+// directory are serialized.
+type dirLockMap struct {
+	mu    sync.Mutex
+	locks map[string]*sync.Mutex
+}
+
+func newDirLockMap() *dirLockMap {
+	return &dirLockMap{locks: make(map[string]*sync.Mutex)}
+}
+
+// lock acquires the mutex for dir and returns a function that releases it.
+func (d *dirLockMap) lock(dir string) func() {
+	d.mu.Lock()
+	m, ok := d.locks[dir]
+	if !ok {
+		m = &sync.Mutex{}
+		d.locks[dir] = m
+	}
+	d.mu.Unlock()
+	m.Lock()
+	return m.Unlock
+}
+
 // processPaths classifies and applies decisions to each path. It mirrors the
 // Python process_paths behaviour: skip non-existent, non-file, hidden, and
 // out-of-allowed files; honour age rules; detect duplicates; coerce unsafe
 // deletes to review; log the result; and return a displayable result per file.
 func processPaths(ctx context.Context, paths []string, runID string) ([]processResult, error) {
-	// Preprocess sequentially so skipping, hash/duplicate detection, age-rule
-	// matching and their logs remain deterministic and ordered. Skipped paths
-	// still produce a result so the final table is complete.
+	// Preprocess in two stages so that skipping and duplicate detection remain
+	// deterministic while file hashing runs concurrently. Skipped paths still
+	// produce a result so the final table is complete.
 	results := make([]processResult, len(paths))
-	items := make([]processItem, 0, len(paths))
-	seenHashes := make(map[string]bool)
+
+	type candidate struct {
+		pos int
+		src string
+	}
+	candidates := make([]candidate, 0, len(paths))
+
 	for i, raw := range paths {
 		src, err := filepath.Abs(raw)
 		if err != nil {
@@ -348,12 +456,46 @@ func processPaths(ctx context.Context, paths []string, runID string) ([]processR
 			continue
 		}
 
-		fileHash, err := actions.ComputeHash(src)
-		if err != nil {
-			results[i] = skipResult(src, fmt.Sprintf("hash failed: %v", err))
-			slog.Warn("hash failed", "path", src, "error", err)
+		candidates = append(candidates, candidate{pos: i, src: src})
+	}
+
+	// Compute hashes concurrently up to ProcessWorkers goroutines while writing
+	// results back by input position so downstream ordering stays deterministic.
+	fileHashes := make([]string, len(paths))
+	hashErrs := make([]error, len(paths))
+
+	hashWorkers := cfg.ProcessWorkers
+	if hashWorkers < 1 {
+		hashWorkers = 1
+	}
+	hashSem := make(chan struct{}, hashWorkers)
+	var hashWg sync.WaitGroup
+	for _, c := range candidates {
+		hashWg.Add(1)
+		go func(c candidate) {
+			defer hashWg.Done()
+			hashSem <- struct{}{}
+			defer func() { <-hashSem }()
+			h, err := computeHash(c.src)
+			fileHashes[c.pos] = h
+			hashErrs[c.pos] = err
+		}(c)
+	}
+	hashWg.Wait()
+
+	// Sequential post-hash stage preserves ordering for duplicate detection, age
+	// rules, cached decisions, and the final result table.
+	items := make([]processItem, 0, len(candidates))
+	seenHashes := make(map[string]bool)
+	for _, c := range candidates {
+		i := c.pos
+		src := c.src
+		if hashErrs[i] != nil {
+			results[i] = skipResult(src, fmt.Sprintf("hash failed: %v", hashErrs[i]))
+			slog.Warn("hash failed", "path", src, "error", hashErrs[i])
 			continue
 		}
+		fileHash := fileHashes[i]
 
 		rec, err := db.FindByHash(fileHash)
 		if err != nil {
@@ -404,10 +546,16 @@ func processPaths(ctx context.Context, paths []string, runID string) ([]processR
 	}
 
 	var wg sync.WaitGroup
-	sem := make(chan struct{}, defaultProcessWorkers)
-	var applyMu sync.Mutex
+	workers := cfg.ProcessWorkers
+	if workers < 1 {
+		workers = 1
+	}
+	classifySem := make(chan struct{}, workers)
+	applySem := make(chan struct{}, workers)
+	dirLocks := newDirLockMap()
 
 	groups := groupItemsByModel(items)
+
 	for _, model := range sortedModelNames(groups) {
 		groupItems := groups[model]
 		groupCfg := *cfg
@@ -417,9 +565,8 @@ func processPaths(ctx context.Context, paths []string, runID string) ([]processR
 			wg.Add(1)
 			go func(item processItem, cfg *config.Config) {
 				defer wg.Done()
-				sem <- struct{}{}
-				defer func() { <-sem }()
 
+				classifySem <- struct{}{}
 				decision := item.ageDecision
 				metrics := llm.Metrics{}
 				if !item.ageMatched {
@@ -430,27 +577,36 @@ func processPaths(ctx context.Context, paths []string, runID string) ([]processR
 						decision = llm.NewDecision()
 					}
 				}
-
 				decision = coerceDuplicateDecision(decision, item.src, cfg, item.isDuplicate)
+				<-classifySem
 
-				applyMu.Lock()
+				destDir := actions.DestinationDir(decision, item.src, cfg)
+				unlock := dirLocks.lock(destDir)
+				defer unlock()
+
+				applySem <- struct{}{}
+				defer func() { <-applySem }()
+
 				results[item.pos] = applyFile(item.src, item.fileHash, item.isDuplicate, decision, metrics, runID)
-				applyMu.Unlock()
 			}(item, &groupCfg)
 		}
-		wg.Wait()
 	}
+	wg.Wait()
+
+	processFS.FlushMDImport()
+
 	return results, nil
 }
 
 // skipResult builds a processResult for a path that was skipped during preprocessing.
 func skipResult(path string, reason string) processResult {
 	return processResult{
-		Path:   path,
-		Action: "skip",
-		Result: "-",
-		OK:     false,
-		Error:  reason,
+		Path:         path,
+		Action:       "skip",
+		Result:       "-",
+		OriginalName: filepath.Base(path),
+		OK:           false,
+		Error:        reason,
 	}
 }
 
@@ -474,16 +630,18 @@ func coerceDuplicateDecision(decision llm.Decision, src string, cfg *config.Conf
 // applyFile applies a decision to a single file and builds a processResult.
 func applyFile(src, fileHash string, isDuplicate bool, decision llm.Decision, metrics llm.Metrics, runID string) processResult {
 	result, err := applyDecision(decision, src, fileHash, cfg, db, isDuplicate, processFS, runID, metrics)
+	originalName := filepath.Base(src)
 	if err != nil {
 		slog.Error("apply failed", "path", src, "error", err)
 		return processResult{
-			Path:     src,
-			Category: decision.Category,
-			Tags:     processTags(decision),
-			Action:   decision.Action,
-			Result:   "",
-			OK:       false,
-			Error:    err.Error(),
+			Path:         src,
+			Category:     decision.Category,
+			Tags:         processTags(decision),
+			Action:       decision.Action,
+			Result:       "",
+			OriginalName: originalName,
+			OK:           false,
+			Error:        err.Error(),
 		}
 	}
 	slog.Info("processed",
@@ -493,12 +651,18 @@ func applyFile(src, fileHash string, isDuplicate bool, decision llm.Decision, me
 		"action", decision.Action,
 		"reason", decision.Reason,
 	)
+	newName := ""
+	if result != "trash" && filepath.Base(result) != originalName {
+		newName = filepath.Base(result)
+	}
 	return processResult{
 		Path:             src,
 		Category:         decision.Category,
 		Tags:             processTags(decision),
 		Action:           decision.Action,
 		Result:           result,
+		OriginalName:     originalName,
+		NewName:          newName,
 		OK:               true,
 		DurationMs:       metrics.DurationMs,
 		PromptTokens:     metrics.PromptTokens,

@@ -1,11 +1,14 @@
 package state_test
 
 import (
+	"bytes"
 	"database/sql"
 	"errors"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/logicminds/filemaid/internal/llm"
@@ -87,7 +90,7 @@ func TestRecordAndFindByHash(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if err := repo.Record(tc.original, tc.final, tc.sha256, tc.category, tc.tags, tc.action, tc.reason, "", llm.Metrics{}); err != nil {
+			if err := repo.Record(state.RecordInput{OriginalPath: tc.original, FinalPath: tc.final, SHA256: tc.sha256, Category: tc.category, Tags: tc.tags, Action: tc.action, Reason: tc.reason, RunID: "", Metrics: llm.Metrics{}}); err != nil {
 				t.Fatalf("Record failed: %v", err)
 			}
 
@@ -144,10 +147,10 @@ func TestFindByHash_MostRecent(t *testing.T) {
 	defer repo.Close()
 
 	sha := "dupsha"
-	if err := repo.Record("/a/file1.txt", "/b/file1.txt", sha, "A", []string{"a"}, "move", "first", "", llm.Metrics{}); err != nil {
+	if err := repo.Record(state.RecordInput{OriginalPath: "/a/file1.txt", FinalPath: "/b/file1.txt", SHA256: sha, Category: "A", Tags: []string{"a"}, Action: "move", Reason: "first", RunID: "", Metrics: llm.Metrics{}}); err != nil {
 		t.Fatalf("Record failed: %v", err)
 	}
-	if err := repo.Record("/a/file2.txt", "/b/file2.txt", sha, "B", []string{"b"}, "move", "second", "", llm.Metrics{}); err != nil {
+	if err := repo.Record(state.RecordInput{OriginalPath: "/a/file2.txt", FinalPath: "/b/file2.txt", SHA256: sha, Category: "B", Tags: []string{"b"}, Action: "move", Reason: "second", RunID: "", Metrics: llm.Metrics{}}); err != nil {
 		t.Fatalf("Record failed: %v", err)
 	}
 
@@ -185,10 +188,10 @@ func TestFindByHash_NotFound(t *testing.T) {
 func TestFakeRepo_RecordAndFindByHash(t *testing.T) {
 	fake := state.NewFake()
 
-	if err := fake.Record("/src/a.txt", "/dst/a.txt", "hash1", "Cat", []string{"x", "y"}, "move", "reason", "", llm.Metrics{}); err != nil {
+	if err := fake.Record(state.RecordInput{OriginalPath: "/src/a.txt", FinalPath: "/dst/a.txt", SHA256: "hash1", Category: "Cat", Tags: []string{"x", "y"}, Action: "move", Reason: "reason", RunID: "", Metrics: llm.Metrics{}}); err != nil {
 		t.Fatalf("Record failed: %v", err)
 	}
-	if err := fake.Record("/src/b.txt", "", "hash2", "Cat", nil, "delete", "reason", "", llm.Metrics{}); err != nil {
+	if err := fake.Record(state.RecordInput{OriginalPath: "/src/b.txt", FinalPath: "", SHA256: "hash2", Category: "Cat", Tags: nil, Action: "delete", Reason: "reason", RunID: "", Metrics: llm.Metrics{}}); err != nil {
 		t.Fatalf("Record failed: %v", err)
 	}
 
@@ -211,8 +214,8 @@ func TestFakeRepo_RecordAndFindByHash(t *testing.T) {
 func TestFakeRepo_FindByHash_MostRecent(t *testing.T) {
 	fake := state.NewFake()
 
-	_ = fake.Record("/a/1", "/b/1", "sha", "A", nil, "move", "first", "", llm.Metrics{})
-	_ = fake.Record("/a/2", "/b/2", "sha", "B", nil, "move", "second", "", llm.Metrics{})
+	_ = fake.Record(state.RecordInput{OriginalPath: "/a/1", FinalPath: "/b/1", SHA256: "sha", Category: "A", Tags: nil, Action: "move", Reason: "first", RunID: "", Metrics: llm.Metrics{}})
+	_ = fake.Record(state.RecordInput{OriginalPath: "/a/2", FinalPath: "/b/2", SHA256: "sha", Category: "B", Tags: nil, Action: "move", Reason: "second", RunID: "", Metrics: llm.Metrics{}})
 
 	got, err := fake.FindByHash("sha")
 	if err != nil {
@@ -235,8 +238,8 @@ func TestFakeRepo_FindByHash_NotFound(t *testing.T) {
 }
 func TestFakeRepo_Records_Snapshot(t *testing.T) {
 	fake := state.NewFake()
-	_ = fake.Record("/a", "/b", "h1", "C", []string{"t"}, "move", "r", "", llm.Metrics{})
-	_ = fake.Record("/c", "", "h2", "C", nil, "delete", "r", "", llm.Metrics{})
+	_ = fake.Record(state.RecordInput{OriginalPath: "/a", FinalPath: "/b", SHA256: "h1", Category: "C", Tags: []string{"t"}, Action: "move", Reason: "r", RunID: "", Metrics: llm.Metrics{}})
+	_ = fake.Record(state.RecordInput{OriginalPath: "/c", FinalPath: "", SHA256: "h2", Category: "C", Tags: nil, Action: "delete", Reason: "r", RunID: "", Metrics: llm.Metrics{}})
 
 	records := fake.Records()
 	if len(records) != 2 {
@@ -432,10 +435,10 @@ func TestHistory_ByRunID(t *testing.T) {
 	}
 	defer repo.Close()
 
-	if err := repo.Record("/a", "/b", "h1", "C", nil, "move", "r", "run-1", llm.Metrics{DurationMs: 100}); err != nil {
+	if err := repo.Record(state.RecordInput{OriginalPath: "/a", FinalPath: "/b", SHA256: "h1", Category: "C", Tags: nil, Action: "move", Reason: "r", RunID: "run-1", Metrics: llm.Metrics{DurationMs: 100}}); err != nil {
 		t.Fatalf("Record failed: %v", err)
 	}
-	if err := repo.Record("/c", "/d", "h2", "C", nil, "move", "r", "run-2", llm.Metrics{DurationMs: 200}); err != nil {
+	if err := repo.Record(state.RecordInput{OriginalPath: "/c", FinalPath: "/d", SHA256: "h2", Category: "C", Tags: nil, Action: "move", Reason: "r", RunID: "run-2", Metrics: llm.Metrics{DurationMs: 200}}); err != nil {
 		t.Fatalf("Record failed: %v", err)
 	}
 
@@ -456,8 +459,8 @@ func TestHistory_ByRunID(t *testing.T) {
 
 func TestFakeRepo_History(t *testing.T) {
 	fake := state.NewFake()
-	fake.Record("/a", "/b", "h1", "C", nil, "move", "r", "run-1", llm.Metrics{})
-	fake.Record("/c", "/d", "h2", "C", nil, "move", "r", "run-2", llm.Metrics{})
+	fake.Record(state.RecordInput{OriginalPath: "/a", FinalPath: "/b", SHA256: "h1", Category: "C", Tags: nil, Action: "move", Reason: "r", RunID: "run-1", Metrics: llm.Metrics{}})
+	fake.Record(state.RecordInput{OriginalPath: "/c", FinalPath: "/d", SHA256: "h2", Category: "C", Tags: nil, Action: "move", Reason: "r", RunID: "run-2", Metrics: llm.Metrics{}})
 
 	records, err := fake.History(10, "run-1")
 	if err != nil {
@@ -478,16 +481,16 @@ func TestDistinctTags(t *testing.T) {
 	}
 	defer repo.Close()
 
-	if err := repo.Record("/a", "/b", "h1", "C", []string{"work", "filemaid", "  ", "personal"}, "move", "r", "", llm.Metrics{}); err != nil {
+	if err := repo.Record(state.RecordInput{OriginalPath: "/a", FinalPath: "/b", SHA256: "h1", Category: "C", Tags: []string{"work", "filemaid", "  ", "personal"}, Action: "move", Reason: "r", RunID: "", Metrics: llm.Metrics{}}); err != nil {
 		t.Fatalf("Record failed: %v", err)
 	}
-	if err := repo.Record("/c", "/d", "h2", "C", []string{"work", "archive"}, "move", "r", "", llm.Metrics{}); err != nil {
+	if err := repo.Record(state.RecordInput{OriginalPath: "/c", FinalPath: "/d", SHA256: "h2", Category: "C", Tags: []string{"work", "archive"}, Action: "move", Reason: "r", RunID: "", Metrics: llm.Metrics{}}); err != nil {
 		t.Fatalf("Record failed: %v", err)
 	}
-	if err := repo.Record("/e", "/f", "h3", "C", nil, "move", "r", "", llm.Metrics{}); err != nil {
+	if err := repo.Record(state.RecordInput{OriginalPath: "/e", FinalPath: "/f", SHA256: "h3", Category: "C", Tags: nil, Action: "move", Reason: "r", RunID: "", Metrics: llm.Metrics{}}); err != nil {
 		t.Fatalf("Record failed: %v", err)
 	}
-	if err := repo.Record("/g", "/h", "h4", "C", []string{}, "move", "r", "", llm.Metrics{}); err != nil {
+	if err := repo.Record(state.RecordInput{OriginalPath: "/g", FinalPath: "/h", SHA256: "h4", Category: "C", Tags: []string{}, Action: "move", Reason: "r", RunID: "", Metrics: llm.Metrics{}}); err != nil {
 		t.Fatalf("Record failed: %v", err)
 	}
 
@@ -503,16 +506,16 @@ func TestDistinctTags(t *testing.T) {
 
 func TestFakeRepo_DistinctTags(t *testing.T) {
 	fake := state.NewFake()
-	if err := fake.Record("/a", "/b", "h1", "C", []string{"work", "filemaid", "  ", "personal"}, "move", "r", "", llm.Metrics{}); err != nil {
+	if err := fake.Record(state.RecordInput{OriginalPath: "/a", FinalPath: "/b", SHA256: "h1", Category: "C", Tags: []string{"work", "filemaid", "  ", "personal"}, Action: "move", Reason: "r", RunID: "", Metrics: llm.Metrics{}}); err != nil {
 		t.Fatalf("Record failed: %v", err)
 	}
-	if err := fake.Record("/c", "/d", "h2", "C", []string{"work", "archive"}, "move", "r", "", llm.Metrics{}); err != nil {
+	if err := fake.Record(state.RecordInput{OriginalPath: "/c", FinalPath: "/d", SHA256: "h2", Category: "C", Tags: []string{"work", "archive"}, Action: "move", Reason: "r", RunID: "", Metrics: llm.Metrics{}}); err != nil {
 		t.Fatalf("Record failed: %v", err)
 	}
-	if err := fake.Record("/e", "/f", "h3", "C", nil, "move", "r", "", llm.Metrics{}); err != nil {
+	if err := fake.Record(state.RecordInput{OriginalPath: "/e", FinalPath: "/f", SHA256: "h3", Category: "C", Tags: nil, Action: "move", Reason: "r", RunID: "", Metrics: llm.Metrics{}}); err != nil {
 		t.Fatalf("Record failed: %v", err)
 	}
-	if err := fake.Record("/g", "/h", "h4", "C", []string{}, "move", "r", "", llm.Metrics{}); err != nil {
+	if err := fake.Record(state.RecordInput{OriginalPath: "/g", FinalPath: "/h", SHA256: "h4", Category: "C", Tags: []string{}, Action: "move", Reason: "r", RunID: "", Metrics: llm.Metrics{}}); err != nil {
 		t.Fatalf("Record failed: %v", err)
 	}
 
@@ -523,5 +526,249 @@ func TestFakeRepo_DistinctTags(t *testing.T) {
 	want := []string{"archive", "personal", "work"}
 	if !slices.Equal(got, want) {
 		t.Errorf("DistinctTags() = %v, want %v", got, want)
+	}
+}
+func TestOpen_MigratesHistoryColumns(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "legacy.db")
+
+	// Create a database with the pre-rename schema.
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("open legacy db: %v", err)
+	}
+	oldSchema := `
+		CREATE TABLE history (
+			id INTEGER PRIMARY KEY,
+			original_path TEXT NOT NULL,
+			final_path TEXT,
+			sha256 TEXT,
+			category TEXT,
+			tags TEXT,
+			action TEXT,
+			reason TEXT,
+			created_at TEXT DEFAULT CURRENT_TIMESTAMP
+		);
+	`
+	if _, err := db.Exec(oldSchema); err != nil {
+		t.Fatalf("create old schema: %v", err)
+	}
+	if _, err := db.Exec(`INSERT INTO history (original_path, final_path, sha256, category, action, reason) VALUES (?, ?, ?, ?, ?, ?)`,
+		"/old/file.txt", "/new/file.txt", "legacysha", "Documents", "move", "kept"); err != nil {
+		t.Fatalf("insert legacy row: %v", err)
+	}
+	db.Close()
+
+	// Re-open with state.Open; migration should add all new columns.
+	repo, err := state.Open(dbPath)
+	if err != nil {
+		t.Fatalf("Open existing db failed: %v", err)
+	}
+	defer repo.Close()
+
+	db, err = sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("re-open db for inspection: %v", err)
+	}
+	defer db.Close()
+
+	wantColumns := []string{"original_name", "new_name", "name_quality", "media_kind", "perceptual_hash", "av_signature", "text_signature", "hash_algorithm"}
+	for _, col := range wantColumns {
+		var name string
+		err := db.QueryRow("SELECT name FROM pragma_table_info('history') WHERE name = ?", col).Scan(&name)
+		if err != nil {
+			t.Fatalf("column %q missing after migration: %v", col, err)
+		}
+	}
+
+	// Original row must remain queryable.
+	got, err := repo.FindByHash("legacysha")
+	if err != nil {
+		t.Fatalf("FindByHash failed: %v", err)
+	}
+	if got == nil {
+		t.Fatal("legacy row not found after migration")
+	}
+	if got.OriginalPath != "/old/file.txt" || got.FinalPath != "/new/file.txt" {
+		t.Errorf("unexpected legacy row: %+v", got)
+	}
+}
+
+func TestFindDuplicatesByHash(t *testing.T) {
+	repo, err := state.Open(filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+	defer repo.Close()
+
+	sha := "dupsha"
+	if err := repo.Record(state.RecordInput{OriginalPath: "/a/file1.txt", FinalPath: "/b/file1.txt", SHA256: sha, Category: "A", Tags: []string{"a"}, Action: "move", Reason: "first"}); err != nil {
+		t.Fatalf("Record failed: %v", err)
+	}
+	if err := repo.Record(state.RecordInput{OriginalPath: "/a/file2.txt", FinalPath: "/b/file2.txt", SHA256: sha, Category: "B", Tags: []string{"b"}, Action: "move", Reason: "second"}); err != nil {
+		t.Fatalf("Record failed: %v", err)
+	}
+	if err := repo.Record(state.RecordInput{OriginalPath: "/a/file3.txt", FinalPath: "/b/file3.txt", SHA256: "other", Category: "C", Action: "move", Reason: "other"}); err != nil {
+		t.Fatalf("Record failed: %v", err)
+	}
+
+	got, err := repo.FindDuplicatesByHash(sha)
+	if err != nil {
+		t.Fatalf("FindDuplicatesByHash failed: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("expected 2 duplicates, got %d", len(got))
+	}
+	if got[0].OriginalPath != "/a/file2.txt" {
+		t.Errorf("most recent duplicate = %q, want /a/file2.txt", got[0].OriginalPath)
+	}
+	if got[1].OriginalPath != "/a/file1.txt" {
+		t.Errorf("older duplicate = %q, want /a/file1.txt", got[1].OriginalPath)
+	}
+}
+
+func TestFindSimilarByFingerprints(t *testing.T) {
+	repo, err := state.Open(filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+	defer repo.Close()
+
+	if err := repo.Record(state.RecordInput{OriginalPath: "/a/v1.mp4", SHA256: "h1", Category: "Video", Action: "move", Reason: "r", PerceptualHash: "phash1", AVSignature: "av1", TextSignature: "text1"}); err != nil {
+		t.Fatalf("Record failed: %v", err)
+	}
+	if err := repo.Record(state.RecordInput{OriginalPath: "/a/v2.mp4", SHA256: "h2", Category: "Video", Action: "move", Reason: "r", PerceptualHash: "phash1", AVSignature: "av2", TextSignature: "text2"}); err != nil {
+		t.Fatalf("Record failed: %v", err)
+	}
+	if err := repo.Record(state.RecordInput{OriginalPath: "/a/v3.mp4", SHA256: "h3", Category: "Video", Action: "move", Reason: "r", PerceptualHash: "phash3", AVSignature: "av1", TextSignature: "text3"}); err != nil {
+		t.Fatalf("Record failed: %v", err)
+	}
+	if err := repo.Record(state.RecordInput{OriginalPath: "/a/v4.mp4", SHA256: "h4", Category: "Video", Action: "move", Reason: "r", PerceptualHash: "phash4", AVSignature: "av4", TextSignature: "text1"}); err != nil {
+		t.Fatalf("Record failed: %v", err)
+	}
+
+	got, err := repo.FindSimilarByFingerprints("phash1", "", "")
+	if err != nil {
+		t.Fatalf("FindSimilarByFingerprints failed: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("expected 2 similar by perceptual hash, got %d", len(got))
+	}
+
+	got, err = repo.FindSimilarByFingerprints("", "av1", "")
+	if err != nil {
+		t.Fatalf("FindSimilarByFingerprints failed: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("expected 2 similar by av signature, got %d", len(got))
+	}
+
+	got, err = repo.FindSimilarByFingerprints("", "", "text1")
+	if err != nil {
+		t.Fatalf("FindSimilarByFingerprints failed: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("expected 2 similar by text signature, got %d", len(got))
+	}
+
+	got, err = repo.FindSimilarByFingerprints("", "", "")
+	if err != nil {
+		t.Fatalf("FindSimilarByFingerprints failed: %v", err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("expected 0 matches for empty signatures, got %d", len(got))
+	}
+}
+
+func TestFakeRepo_FindDuplicatesByHash(t *testing.T) {
+	fake := state.NewFake()
+	_ = fake.Record(state.RecordInput{OriginalPath: "/a/1", SHA256: "sha", Action: "move", Reason: "first"})
+	_ = fake.Record(state.RecordInput{OriginalPath: "/a/2", SHA256: "sha", Action: "move", Reason: "second"})
+	_ = fake.Record(state.RecordInput{OriginalPath: "/a/3", SHA256: "other", Action: "move", Reason: "other"})
+
+	got, err := fake.FindDuplicatesByHash("sha")
+	if err != nil {
+		t.Fatalf("FindDuplicatesByHash failed: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("expected 2 duplicates, got %d", len(got))
+	}
+	if got[0].OriginalPath != "/a/2" {
+		t.Errorf("most recent duplicate = %q, want /a/2", got[0].OriginalPath)
+	}
+}
+
+func TestFakeRepo_FindSimilarByFingerprints(t *testing.T) {
+	fake := state.NewFake()
+	_ = fake.Record(state.RecordInput{OriginalPath: "/a/1", SHA256: "h1", Action: "move", Reason: "r", PerceptualHash: "phash1"})
+	_ = fake.Record(state.RecordInput{OriginalPath: "/a/2", SHA256: "h2", Action: "move", Reason: "r", PerceptualHash: "phash1"})
+	_ = fake.Record(state.RecordInput{OriginalPath: "/a/3", SHA256: "h3", Action: "move", Reason: "r", AVSignature: "av1"})
+
+	got, err := fake.FindSimilarByFingerprints("phash1", "", "")
+	if err != nil {
+		t.Fatalf("FindSimilarByFingerprints failed: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("expected 2 similar, got %d", len(got))
+	}
+
+	got, err = fake.FindSimilarByFingerprints("", "av1", "")
+	if err != nil {
+		t.Fatalf("FindSimilarByFingerprints failed: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("expected 1 similar, got %d", len(got))
+	}
+
+	got, err = fake.FindSimilarByFingerprints("", "", "")
+	if err != nil {
+		t.Fatalf("FindSimilarByFingerprints failed: %v", err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("expected 0 matches for empty signatures, got %d", len(got))
+	}
+}
+
+func TestOpen_EnableWAL(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "state.db")
+
+	repo, err := state.Open(dbPath)
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+	repo.Close()
+
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("open sqlite directly failed: %v", err)
+	}
+	defer db.Close()
+
+	var mode string
+	if err := db.QueryRow("PRAGMA journal_mode").Scan(&mode); err != nil {
+		t.Fatalf("read journal_mode failed: %v", err)
+	}
+	if mode != "wal" {
+		t.Errorf("journal_mode = %q, want wal", mode)
+	}
+}
+
+func TestOpen_WALUnsupportedContinues(t *testing.T) {
+	var buf bytes.Buffer
+	old := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
+	t.Cleanup(func() { slog.SetDefault(old) })
+
+	// An in-memory database does not support WAL; Open must still succeed and
+	// log a warning instead of returning an error.
+	repo, err := state.Open(":memory:")
+	if err != nil {
+		t.Fatalf("Open failed for unsupported WAL: %v", err)
+	}
+	defer repo.Close()
+
+	if !strings.Contains(buf.String(), "WAL") {
+		t.Errorf("expected WAL warning in logs, got %q", buf.String())
 	}
 }

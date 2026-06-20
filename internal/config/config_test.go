@@ -77,6 +77,63 @@ func TestDefaultsMatchPythonReference(t *testing.T) {
 		t.Errorf("RequestTimeout = %v, want 120s", cfg.RequestTimeout)
 	}
 }
+func TestDefaultsRenameFields(t *testing.T) {
+	cfg := Defaults()
+	if cfg.Rename {
+		t.Errorf("Rename = %v, want false", cfg.Rename)
+	}
+	if cfg.RenameLevel != 2 {
+		t.Errorf("RenameLevel = %d, want 2", cfg.RenameLevel)
+	}
+	if cfg.RenameMaxLength != 120 {
+		t.Errorf("RenameMaxLength = %d, want 120", cfg.RenameMaxLength)
+	}
+	if cfg.RenameMinLength != 20 {
+		t.Errorf("RenameMinLength = %d, want 20", cfg.RenameMinLength)
+	}
+	wantInvalid := "<>:\"/\\\\|?*"
+	if cfg.RenameInvalidChars != wantInvalid {
+		t.Errorf("RenameInvalidChars = %q, want %q", cfg.RenameInvalidChars, wantInvalid)
+	}
+	if cfg.RenameImageSimilarityThreshold != 0.95 {
+		t.Errorf("RenameImageSimilarityThreshold = %v, want 0.95", cfg.RenameImageSimilarityThreshold)
+	}
+	if cfg.RenameAVSimilarityThreshold != 0.90 {
+		t.Errorf("RenameAVSimilarityThreshold = %v, want 0.90", cfg.RenameAVSimilarityThreshold)
+	}
+	if cfg.RenameUseFFmpeg {
+		t.Error("RenameUseFFmpeg = true, want false")
+	}
+	if cfg.ExternalTools.FFmpeg != "ffmpeg" {
+		t.Errorf("ExternalTools.FFmpeg = %q, want ffmpeg", cfg.ExternalTools.FFmpeg)
+	}
+	if cfg.ProcessWorkers != 4 {
+		t.Errorf("ProcessWorkers = %d, want 4", cfg.ProcessWorkers)
+	}
+	if cfg.MaxImageDimension != 1024 {
+		t.Errorf("MaxImageDimension = %d, want 1024", cfg.MaxImageDimension)
+	}
+}
+
+func TestLoadPathOverridesProcessWorkersAndMaxImageDimension(t *testing.T) {
+	tmp := t.TempDir()
+	path := filepath.Join(tmp, "config.json")
+	content := `{"process_workers": 8, "max_image_dimension": 512}`
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := LoadPath(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.ProcessWorkers != 8 {
+		t.Errorf("ProcessWorkers = %d, want 8", cfg.ProcessWorkers)
+	}
+	if cfg.MaxImageDimension != 512 {
+		t.Errorf("MaxImageDimension = %d, want 512", cfg.MaxImageDimension)
+	}
+}
 
 func TestExpandExpandsTilde(t *testing.T) {
 	cfg := Defaults()
@@ -303,6 +360,42 @@ func TestLoadPath(t *testing.T) {
 				}
 				if !strings.HasPrefix(cfg.SmartFoldersDir, home()) || !strings.Contains(cfg.SmartFoldersDir, "Documents/Filemaid") {
 					t.Errorf("SmartFoldersDir not expanded correctly: got %q", cfg.SmartFoldersDir)
+				}
+			},
+		},
+		{
+			name: "rename top-level override",
+			user: `{"rename": true, "rename_level": 3, "rename_max_length": 80, "rename_min_length": 10, "rename_image_similarity_threshold": 0.85}`,
+			want: func(t *testing.T, cfg *Config) {
+				if !cfg.Rename {
+					t.Error("Rename = false, want true")
+				}
+				if cfg.RenameLevel != 3 {
+					t.Errorf("RenameLevel = %d, want 3", cfg.RenameLevel)
+				}
+				if cfg.RenameMaxLength != 80 {
+					t.Errorf("RenameMaxLength = %d, want 80", cfg.RenameMaxLength)
+				}
+				if cfg.RenameMinLength != 10 {
+					t.Errorf("RenameMinLength = %d, want 10", cfg.RenameMinLength)
+				}
+				if cfg.RenameImageSimilarityThreshold != 0.85 {
+					t.Errorf("RenameImageSimilarityThreshold = %v, want 0.85", cfg.RenameImageSimilarityThreshold)
+				}
+				if cfg.RenameInvalidChars == "" {
+					t.Error("RenameInvalidChars default was dropped")
+				}
+			},
+		},
+		{
+			name: "deep merge external_tools keeps defaults",
+			user: `{"external_tools": {"ffmpeg": "~/bin/ffmpeg"}}`,
+			want: func(t *testing.T, cfg *Config) {
+				if !strings.HasPrefix(cfg.ExternalTools.FFmpeg, home()) || !strings.Contains(cfg.ExternalTools.FFmpeg, "bin/ffmpeg") {
+					t.Errorf("ExternalTools.FFmpeg = %q, want expanded ~/bin/ffmpeg", cfg.ExternalTools.FFmpeg)
+				}
+				if cfg.RenameLevel != 2 {
+					t.Errorf("RenameLevel default dropped: got %d", cfg.RenameLevel)
 				}
 			},
 		},

@@ -37,30 +37,46 @@ func (d Duration) MarshalJSON() ([]byte, error) {
 	return json.Marshal(time.Duration(d).String())
 }
 
+// ExternalTools holds paths to optional external binaries used by filemaid.
+type ExternalTools struct {
+	FFmpeg string `json:"ffmpeg"`
+}
+
 // Config holds the filemaid configuration.
 type Config struct {
-	OllamaURL           string                   `json:"ollama_url"`
-	Model               string                   `json:"model"`
-	ImageModel          string                   `json:"image_model"`
-	TextModel           string                   `json:"text_model"`
-	WatchDirs           []string                 `json:"watch_dirs"`
-	AllowedDirs         []string                 `json:"allowed_dirs"`
-	AllowedCleaners     []string                 `json:"allowed_cleaners"`
-	ReviewDir           string                   `json:"review_dir"`
-	LogPath             string                   `json:"log_path"`
-	DBPath              string                   `json:"db_path"`
-	Tags                bool                     `json:"tags"`
-	Comments            bool                     `json:"comments"`
-	SubcategorizeImages bool                     `json:"subcategorize_images"`
-	MinAgeHours         int                      `json:"min_age_hours"`
-	SmartFolders        bool                     `json:"smart_folders"`
-	SmartFoldersDir     string                   `json:"smart_folders_dir"`
-	RequestTimeout      Duration                 `json:"request_timeout"`
-	Categories          map[string]string        `json:"categories"`
-	SafeDeletePatterns  []string                 `json:"safe_delete_patterns"`
-	AgeRules            []AgeRule                `json:"age_rules"`
-	DevCleanup          map[string]CleanerConfig `json:"dev_cleanup"`
-	ReviewCleanup       ReviewCleanupConfig      `json:"review_cleanup"`
+	OllamaURL                      string                   `json:"ollama_url"`
+	Model                          string                   `json:"model"`
+	ImageModel                     string                   `json:"image_model"`
+	TextModel                      string                   `json:"text_model"`
+	WatchDirs                      []string                 `json:"watch_dirs"`
+	AllowedDirs                    []string                 `json:"allowed_dirs"`
+	AllowedCleaners                []string                 `json:"allowed_cleaners"`
+	ReviewDir                      string                   `json:"review_dir"`
+	LogPath                        string                   `json:"log_path"`
+	DBPath                         string                   `json:"db_path"`
+	Tags                           bool                     `json:"tags"`
+	Comments                       bool                     `json:"comments"`
+	SubcategorizeImages            bool                     `json:"subcategorize_images"`
+	MinAgeHours                    int                      `json:"min_age_hours"`
+	SmartFolders                   bool                     `json:"smart_folders"`
+	SmartFoldersDir                string                   `json:"smart_folders_dir"`
+	RequestTimeout                 Duration                 `json:"request_timeout"`
+	Categories                     map[string]string        `json:"categories"`
+	SafeDeletePatterns             []string                 `json:"safe_delete_patterns"`
+	AgeRules                       []AgeRule                `json:"age_rules"`
+	DevCleanup                     map[string]CleanerConfig `json:"dev_cleanup"`
+	ReviewCleanup                  ReviewCleanupConfig      `json:"review_cleanup"`
+	Rename                         bool                     `json:"rename"`
+	RenameLevel                    int                      `json:"rename_level"`
+	RenameMaxLength                int                      `json:"rename_max_length"`
+	RenameMinLength                int                      `json:"rename_min_length"`
+	RenameInvalidChars             string                   `json:"rename_invalid_chars"`
+	RenameImageSimilarityThreshold float64                  `json:"rename_image_similarity_threshold"`
+	RenameAVSimilarityThreshold    float64                  `json:"rename_av_similarity_threshold"`
+	RenameUseFFmpeg                bool                     `json:"rename_use_ffmpeg"`
+	ExternalTools                  ExternalTools            `json:"external_tools"`
+	ProcessWorkers                 int                      `json:"process_workers"`
+	MaxImageDimension              int                      `json:"max_image_dimension"`
 }
 
 // AgeRule describes a pattern-based automatic action.
@@ -130,6 +146,17 @@ func Defaults() *Config {
 			Mode:       "safe",
 			MaxAgeDays: 30,
 		},
+		Rename:                         false,
+		RenameLevel:                    2,
+		RenameMaxLength:                120,
+		RenameMinLength:                20,
+		RenameInvalidChars:             "<>:\"/\\\\|?*",
+		RenameImageSimilarityThreshold: 0.95,
+		RenameAVSimilarityThreshold:    0.90,
+		RenameUseFFmpeg:                false,
+		ProcessWorkers:                 4,
+		MaxImageDimension:              1024,
+		ExternalTools:                  ExternalTools{FFmpeg: "ffmpeg"},
 	}
 }
 
@@ -252,6 +279,7 @@ func (c *Config) expand() {
 	c.ReviewDir = expandPath(c.ReviewDir)
 	c.LogPath = expandPath(c.LogPath)
 	c.DBPath = expandPath(c.DBPath)
+	c.ExternalTools.FFmpeg = expandPath(c.ExternalTools.FFmpeg)
 
 	expandSlice(&c.WatchDirs)
 	expandSlice(&c.AllowedDirs)

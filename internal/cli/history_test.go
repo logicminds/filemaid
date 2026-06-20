@@ -128,8 +128,8 @@ func TestHistoryCommandJSON(t *testing.T) {
 func TestQueryHistoryRespectsRunFilter(t *testing.T) {
 	db = state.NewFake()
 	fake := db.(*state.FakeRepo)
-	fake.Record("/a", "/b", "h1", "C", nil, "move", "r", "run-1", llm.Metrics{})
-	fake.Record("/c", "/d", "h2", "C", nil, "move", "r", "run-2", llm.Metrics{})
+	fake.Record(state.RecordInput{OriginalPath: "/a", FinalPath: "/b", SHA256: "h1", Category: "C", Action: "move", Reason: "r", RunID: "run-1", Metrics: llm.Metrics{}})
+	fake.Record(state.RecordInput{OriginalPath: "/c", FinalPath: "/d", SHA256: "h2", Category: "C", Action: "move", Reason: "r", RunID: "run-2", Metrics: llm.Metrics{}})
 
 	records, runID, err := queryHistory("run-2", false, 100)
 	if err != nil {

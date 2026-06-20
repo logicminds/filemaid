@@ -63,8 +63,9 @@ func toChatResponse(m map[string]any) chatResponse {
 func baseConfig(t *testing.T, tmp string) *config.Config {
 	t.Helper()
 	return &config.Config{
-		OllamaURL: "http://localhost:11434",
-		Model:     "dummy",
+		OllamaURL:         "http://localhost:11434",
+		Model:             "dummy",
+		MaxImageDimension: 1024,
 		Categories: map[string]string{
 			"Screenshots": filepath.Join(tmp, "Screenshots"),
 			"Documents":   filepath.Join(tmp, "Documents"),
@@ -124,7 +125,7 @@ func TestParseResponseGenerateStyle(t *testing.T) {
 	data := map[string]any{
 		"response": `{"category": "Images", "tags": ["a"], "action": "move", "reason": "x"}`,
 	}
-	decision, ok := parseResponse(toChatResponse(data), categorySet(cfg.Categories))
+	decision, ok := parseResponse(toChatResponse(data), categorySet(cfg.Categories), "")
 	if !ok {
 		t.Fatal("expected ok")
 	}
@@ -157,7 +158,7 @@ func TestParseResponseToolCallStyle(t *testing.T) {
 			},
 		},
 	}
-	decision, ok := parseResponse(toChatResponse(data), categorySet(cfg.Categories))
+	decision, ok := parseResponse(toChatResponse(data), categorySet(cfg.Categories), "")
 	if !ok {
 		t.Fatal("expected ok")
 	}
@@ -182,7 +183,7 @@ func TestParseResponseToolCallArgumentsAsString(t *testing.T) {
 			},
 		},
 	}
-	decision, ok := parseResponse(toChatResponse(data), categorySet(cfg.Categories))
+	decision, ok := parseResponse(toChatResponse(data), categorySet(cfg.Categories), "")
 	if !ok {
 		t.Fatal("expected ok")
 	}
@@ -197,7 +198,7 @@ func TestParseResponseMessageContentJSON(t *testing.T) {
 			"content": `{"category": "Images", "subcategory": "cat", "tags": ["photo"], "action": "move", "destination": "", "reason": "photo"}`,
 		},
 	}
-	decision, ok := parseResponse(toChatResponse(data), categorySet(cfg.Categories))
+	decision, ok := parseResponse(toChatResponse(data), categorySet(cfg.Categories), "")
 	if !ok {
 		t.Fatal("expected ok")
 	}
@@ -219,7 +220,7 @@ func TestParseResponseMessageThinkingJSON(t *testing.T) {
 			"thinking": `Some reasoning here... {"category": "Screenshots", "subcategory": "browser", "tags": ["web"], "action": "move", "destination": "", "reason": "webpage screenshot"}`,
 		},
 	}
-	decision, ok := parseResponse(toChatResponse(data), categorySet(cfg.Categories))
+	decision, ok := parseResponse(toChatResponse(data), categorySet(cfg.Categories), "")
 	if !ok {
 		t.Fatal("expected ok")
 	}
@@ -238,7 +239,7 @@ func TestParseResponseMessageContentFencedJSON(t *testing.T) {
 			"content": "```json\n{\"category\": \"Documents\", \"tags\": [\" fenced\"], \"action\": \"move\", \"reason\": \"x\"}\n```",
 		},
 	}
-	decision, ok := parseResponse(toChatResponse(data), categorySet(cfg.Categories))
+	decision, ok := parseResponse(toChatResponse(data), categorySet(cfg.Categories), "")
 	if !ok {
 		t.Fatal("expected ok")
 	}
@@ -252,7 +253,7 @@ func TestParseResponseUnknownCategoryCoerced(t *testing.T) {
 	data := map[string]any{
 		"response": `{"category": "Banana", "tags": [], "action": "move", "reason": "x"}`,
 	}
-	decision, ok := parseResponse(toChatResponse(data), categorySet(cfg.Categories))
+	decision, ok := parseResponse(toChatResponse(data), categorySet(cfg.Categories), "")
 	if !ok {
 		t.Fatal("expected ok")
 	}
@@ -266,7 +267,7 @@ func TestParseResponseInvalidActionCoerced(t *testing.T) {
 	data := map[string]any{
 		"response": `{"category": "Images", "tags": [], "action": "explode", "reason": "x"}`,
 	}
-	decision, ok := parseResponse(toChatResponse(data), categorySet(cfg.Categories))
+	decision, ok := parseResponse(toChatResponse(data), categorySet(cfg.Categories), "")
 	if !ok {
 		t.Fatal("expected ok")
 	}
@@ -280,12 +281,165 @@ func TestParseResponseSubcategory(t *testing.T) {
 	data := map[string]any{
 		"response": `{"category": "Images", "subcategory": "cat", "tags": ["photo"], "action": "move", "reason": "x"}`,
 	}
-	decision, ok := parseResponse(toChatResponse(data), categorySet(cfg.Categories))
+	decision, ok := parseResponse(toChatResponse(data), categorySet(cfg.Categories), "")
 	if !ok {
 		t.Fatal("expected ok")
 	}
 	if decision.Subcategory != "cat" {
 		t.Errorf("Subcategory = %q, want cat", decision.Subcategory)
+	}
+}
+func TestParseResponseNewNameAndQuality(t *testing.T) {
+	cfg := baseConfig(t, t.TempDir())
+	data := map[string]any{
+		"response": `{"category": "Documents", "tags": ["receipt"], "action": "move", "reason": "organized", "new_name": "Grocery Receipt.pdf", "name_quality": 2}`,
+	}
+	decision, ok := parseResponse(toChatResponse(data), categorySet(cfg.Categories), "/tmp/scan.pdf")
+	if !ok {
+		t.Fatal("expected ok")
+	}
+	if decision.NewName != "Grocery Receipt.pdf" {
+		t.Errorf("NewName = %q, want Grocery Receipt.pdf", decision.NewName)
+	}
+	if decision.NameQuality != 2 {
+		t.Errorf("NameQuality = %d, want 2", decision.NameQuality)
+	}
+}
+
+func TestParseResponseNewNameExtensionCorrection(t *testing.T) {
+	cfg := baseConfig(t, t.TempDir())
+	data := map[string]any{
+		"response": `{"category": "Documents", "tags": [], "action": "move", "reason": "x", "new_name": "Report.txt", "name_quality": 1}`,
+	}
+	decision, ok := parseResponse(toChatResponse(data), categorySet(cfg.Categories), "/tmp/Report.PDF")
+	if !ok {
+		t.Fatal("expected ok")
+	}
+	if decision.NewName != "Report.PDF" {
+		t.Errorf("NewName = %q, want Report.PDF", decision.NewName)
+	}
+}
+
+func TestParseResponseNewNameAddsMissingExtension(t *testing.T) {
+	cfg := baseConfig(t, t.TempDir())
+	data := map[string]any{
+		"response": `{"category": "Images", "tags": [], "action": "move", "reason": "x", "new_name": "Birthday", "name_quality": 4}`,
+	}
+	decision, ok := parseResponse(toChatResponse(data), categorySet(cfg.Categories), "/tmp/IMG_1234.JPG")
+	if !ok {
+		t.Fatal("expected ok")
+	}
+	if decision.NewName != "Birthday.JPG" {
+		t.Errorf("NewName = %q, want Birthday.JPG", decision.NewName)
+	}
+}
+
+func TestParseResponseNameQualityClamping(t *testing.T) {
+	cfg := baseConfig(t, t.TempDir())
+	for _, tc := range []struct {
+		in, want int
+	}{
+		{-3, 1},
+		{0, 1},
+		{1, 1},
+		{5, 5},
+		{8, 5},
+		{10, 5},
+	} {
+		data := map[string]any{
+			"response": fmt.Sprintf(`{"category": "Unknown", "tags": [], "action": "review", "reason": "x", "name_quality": %d}`, tc.in),
+		}
+		decision, ok := parseResponse(toChatResponse(data), categorySet(cfg.Categories), "")
+		if !ok {
+			t.Fatalf("expected ok for quality %d", tc.in)
+		}
+		if decision.NameQuality != tc.want {
+			t.Errorf("NameQuality for input %d = %d, want %d", tc.in, decision.NameQuality, tc.want)
+		}
+	}
+}
+
+func TestParseResponseMissingRenameFieldsDefaults(t *testing.T) {
+	cfg := baseConfig(t, t.TempDir())
+	data := map[string]any{
+		"response": `{"category": "Documents", "tags": [], "action": "move", "reason": "x"}`,
+	}
+	decision, ok := parseResponse(toChatResponse(data), categorySet(cfg.Categories), "/tmp/file.txt")
+	if !ok {
+		t.Fatal("expected ok")
+	}
+	if decision.NewName != "" {
+		t.Errorf("NewName = %q, want empty", decision.NewName)
+	}
+	if decision.NameQuality != 0 {
+		t.Errorf("NameQuality = %d, want 0", decision.NameQuality)
+	}
+}
+
+func TestParseResponseInvalidNameQualityIgnored(t *testing.T) {
+	cfg := baseConfig(t, t.TempDir())
+	data := map[string]any{
+		"response": `{"category": "Documents", "tags": [], "action": "move", "reason": "x", "name_quality": "high"}`,
+	}
+	decision, ok := parseResponse(toChatResponse(data), categorySet(cfg.Categories), "")
+	if !ok {
+		t.Fatal("expected ok")
+	}
+	if decision.NameQuality != 0 {
+		t.Errorf("NameQuality = %d, want 0 for invalid type", decision.NameQuality)
+	}
+}
+func TestToolSchemaIncludesRenameFields(t *testing.T) {
+	schema := toolSchema([]string{"Images"})
+	fn, ok := schema["function"].(map[string]any)
+	if !ok {
+		t.Fatal("missing function map")
+	}
+	params, ok := fn["parameters"].(map[string]any)
+	if !ok {
+		t.Fatal("missing parameters map")
+	}
+	props, ok := params["properties"].(map[string]any)
+	if !ok {
+		t.Fatal("missing properties map")
+	}
+	if _, ok := props["new_name"]; !ok {
+		t.Error("missing new_name property")
+	}
+	if q, ok := props["name_quality"].(map[string]any); ok {
+		if q["type"] != "integer" {
+			t.Errorf("name_quality type = %v, want integer", q["type"])
+		}
+		if q["minimum"] != 1 {
+			t.Errorf("name_quality minimum = %v, want 1", q["minimum"])
+		}
+		if q["maximum"] != 5 {
+			t.Errorf("name_quality maximum = %v, want 5", q["maximum"])
+		}
+	} else {
+		t.Error("missing name_quality property")
+	}
+}
+
+func TestPromptIncludesRenameFields(t *testing.T) {
+	tmp := t.TempDir()
+	cfg := baseConfig(t, tmp)
+	path := filepath.Join(tmp, "IMG_0001.jpg")
+	if err := os.WriteFile(path, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	prompt, _, err := buildPrompt(path, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(prompt, "new_name") {
+		t.Error("prompt missing new_name")
+	}
+	if !strings.Contains(prompt, "name_quality") {
+		t.Error("prompt missing name_quality")
+	}
+	if !strings.Contains(prompt, "preserve the original extension") {
+		t.Error("prompt missing extension preservation instruction")
 	}
 }
 
@@ -822,13 +976,101 @@ func TestBuildPromptResizesLargeImage(t *testing.T) {
 		t.Fatal(err)
 	}
 	bounds := resized.Bounds()
-	if bounds.Dx() > maxImageDimension || bounds.Dy() > maxImageDimension {
-		t.Errorf("resized dimensions %dx%d exceed max %d", bounds.Dx(), bounds.Dy(), maxImageDimension)
+	if bounds.Dx() > cfg.MaxImageDimension || bounds.Dy() > cfg.MaxImageDimension {
+		t.Errorf("resized dimensions %dx%d exceed max %d", bounds.Dx(), bounds.Dy(), cfg.MaxImageDimension)
 	}
+
 	// Aspect ratio should be preserved: width still greater than height.
 	if bounds.Dx() <= bounds.Dy() {
 		t.Errorf("aspect ratio not preserved: got %dx%d", bounds.Dx(), bounds.Dy())
 	}
+}
+
+func TestBuildPromptUsesConfiguredMaxImageDimension(t *testing.T) {
+	tmp := t.TempDir()
+	cfg := baseConfig(t, tmp)
+	cfg.MaxImageDimension = 128
+
+	src := image.NewRGBA(image.Rect(0, 0, 400, 200))
+	for i := range src.Pix {
+		src.Pix[i] = byte(i % 256)
+	}
+	img := filepath.Join(tmp, "medium.png")
+	if err := os.WriteFile(img, encodePNG(t, src), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	prompt, images, err := buildPrompt(img, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(images) != 1 {
+		t.Fatalf("images = %v, want 1", images)
+	}
+	if !strings.Contains(prompt, "The image is attached") {
+		t.Errorf("prompt missing image note")
+	}
+
+	decoded, err := base64.StdEncoding.DecodeString(images[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	resized, _, err := image.Decode(bytes.NewReader(decoded))
+	if err != nil {
+		t.Fatal(err)
+	}
+	bounds := resized.Bounds()
+	if bounds.Dx() > 128 || bounds.Dy() > 128 {
+		t.Errorf("resized dimensions %dx%d exceed configured max 128", bounds.Dx(), bounds.Dy())
+	}
+	if bounds.Dx() <= bounds.Dy() {
+		t.Errorf("aspect ratio not preserved: got %dx%d", bounds.Dx(), bounds.Dy())
+	}
+}
+
+func TestBuildPromptEnforcesMinImageDimension(t *testing.T) {
+	tmp := t.TempDir()
+	cfg := baseConfig(t, tmp)
+	cfg.MaxImageDimension = 32 // below sane minimum
+
+	src := image.NewRGBA(image.Rect(0, 0, 400, 200))
+	for i := range src.Pix {
+		src.Pix[i] = byte(i % 256)
+	}
+	img := filepath.Join(tmp, "medium.png")
+	if err := os.WriteFile(img, encodePNG(t, src), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, images, err := buildPrompt(img, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(images) != 1 {
+		t.Fatalf("images = %v, want 1", images)
+	}
+
+	decoded, err := base64.StdEncoding.DecodeString(images[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	resized, _, err := image.Decode(bytes.NewReader(decoded))
+	if err != nil {
+		t.Fatal(err)
+	}
+	bounds := resized.Bounds()
+	if bounds.Dx() > 64 || bounds.Dy() > 64 {
+		t.Errorf("resized dimensions %dx%d exceed enforced min max 64", bounds.Dx(), bounds.Dy())
+	}
+}
+
+func encodePNG(t *testing.T, src image.Image) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	if err := png.Encode(&buf, src); err != nil {
+		t.Fatal(err)
+	}
+	return buf.Bytes()
 }
 
 func TestBuildPromptDoesNotModifySourceImage(t *testing.T) {
@@ -963,7 +1205,7 @@ func TestParseResponseMissingFieldsUsesDefaults(t *testing.T) {
 	data := map[string]any{
 		"response": `{}`,
 	}
-	decision, ok := parseResponse(toChatResponse(data), categorySet(cfg.Categories))
+	decision, ok := parseResponse(toChatResponse(data), categorySet(cfg.Categories), "")
 	if !ok {
 		t.Fatal("expected ok")
 	}

@@ -82,5 +82,20 @@
     "enabled": true,
     "mode": "safe",
     "max_age_days": 30
-  }
+  },
+  "_rename_note": "Set rename=true to let the LLM suggest better filenames. rename_level (1-5) is the minimum name_quality required before a rename is applied. Invalid characters are removed, extensions are preserved, and collisions get a counter suffix.",
+  "rename": false,
+  "rename_level": 2,
+  "rename_max_length": 120,
+  "rename_min_length": 20,
+  "rename_invalid_chars": "<>:\"/\\\\|?*",
+  "rename_image_similarity_threshold": 0.95,
+  "rename_av_similarity_threshold": 0.90,
+  "_ffmpeg_note": "rename_use_ffmpeg enables audio/video fingerprinting via ffmpeg. This improves duplicate/near-duplicate detection but can be slow for large media libraries. Install ffmpeg with 'brew install ffmpeg' and ensure it is on PATH.",
+  "rename_use_ffmpeg": false,
+  "external_tools": {
+    "ffmpeg": "ffmpeg"
+  },
+  "process_workers": 4,
+  "max_image_dimension": 1024
 }
