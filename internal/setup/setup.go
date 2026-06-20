@@ -111,6 +111,23 @@ var modelSpaceRequirements = map[string]uint64{
 	"filemaid-metadata":   1 * 1024 * 1024 * 1024,
 }
 
+// modelBaseNames maps filemaid wrapper model names to the underlying Ollama
+// base model names shown to users during setup.
+var modelBaseNames = map[string]string{
+	"filemaid-gemma4-26b": "gemma4:26b-a4b-it-qat",
+	"filemaid-gemma4-12b": "gemma4:12b-it-qat",
+	"filemaid-metadata":   "qwen2.5:7b",
+}
+
+// baseModelName returns the user-visible base model name for a filemaid model.
+// If the model is unknown, the original name is returned.
+func baseModelName(model string) string {
+	if base, ok := modelBaseNames[model]; ok {
+		return base
+	}
+	return model
+}
+
 // defaultFreeSpace returns the bytes available to the caller on the filesystem
 // that contains path. It uses unix.Statfs and is macOS-specific.
 func defaultFreeSpace(path string) (uint64, error) {
@@ -181,18 +198,18 @@ func selectModel(opts InstallOptions, info *systemInfo, reader *bufio.Reader) (s
 func selectVisionModel(info *systemInfo, reader *bufio.Reader) (string, error) {
 	fmt.Fprintf(os.Stderr, "\nDetected %d GB of memory.\n", info.TotalMemoryGB)
 	fmt.Fprintf(os.Stderr, "filemaid uses two Ollama models:\n")
-	fmt.Fprintf(os.Stderr, "  • Text/documents model: filemaid-metadata (always installed)\n")
+	fmt.Fprintf(os.Stderr, "  • Text/documents model: filemaid-metadata (%s) (always installed)\n", baseModelName("filemaid-metadata"))
 	fmt.Fprintf(os.Stderr, "  • Image/vision model: your choice below\n")
-	fmt.Fprintf(os.Stderr, "Recommended vision model: %s\n", info.Recommended)
+	fmt.Fprintf(os.Stderr, "Recommended vision model: %s (%s)\n", info.Recommended, baseModelName(info.Recommended))
 	fmt.Fprintln(os.Stderr, "Available vision models:")
 	for i, c := range info.VisionChoices {
 		marker := " "
 		if c == info.Recommended {
 			marker = "*"
 		}
-		fmt.Fprintf(os.Stderr, "  %s %d) %s\n", marker, i+1, c)
+		fmt.Fprintf(os.Stderr, "  %s %d) %s (%s)\n", marker, i+1, c, baseModelName(c))
 	}
-	fmt.Fprintf(os.Stderr, "Press Enter to use %s for images, or type 1-%d to choose another vision model: ", info.Recommended, len(info.VisionChoices))
+	fmt.Fprintf(os.Stderr, "Press Enter to use %s (%s) for images, or type 1-%d to choose another vision model: ", info.Recommended, baseModelName(info.Recommended), len(info.VisionChoices))
 
 	line, err := reader.ReadString('\n')
 	if err != nil {
@@ -507,10 +524,10 @@ func (i *Installer) Install(opts InstallOptions) error {
 	}
 
 	if modelName == "filemaid-metadata" {
-		fmt.Fprintf(os.Stderr, "\nUsing filemaid-metadata for both text and images.\n\n")
+		fmt.Fprintf(os.Stderr, "\nUsing filemaid-metadata (%s) for both text and images.\n\n", baseModelName(modelName))
 	} else {
-		fmt.Fprintf(os.Stderr, "\nUsing %s for images.\n", modelName)
-		fmt.Fprintf(os.Stderr, "Using filemaid-metadata for text and documents.\n\n")
+		fmt.Fprintf(os.Stderr, "\nUsing %s (%s) for images.\n", modelName, baseModelName(modelName))
+		fmt.Fprintf(os.Stderr, "Using filemaid-metadata (%s) for text and documents.\n\n", baseModelName("filemaid-metadata"))
 	}
 
 	exe := i.ExecutablePath
@@ -756,20 +773,20 @@ func printRequirementsCheck(info *systemInfo, models []string, allExist bool, fr
 	fmt.Fprintf(os.Stderr, "  %s Memory: %d GB\n", mark(info.TotalMemoryGB > 0), info.TotalMemoryGB)
 
 	if visionModel == textModel {
-		fmt.Fprintf(os.Stderr, "  %s Model for all files: %s", mark(true), visionModel)
+		fmt.Fprintf(os.Stderr, "  %s Model for all files: %s (%s)", mark(true), visionModel, baseModelName(visionModel))
 		if allExist {
 			fmt.Fprintln(os.Stderr, " (already downloaded)")
 		} else {
 			fmt.Fprintln(os.Stderr)
 		}
 	} else {
-		fmt.Fprintf(os.Stderr, "  %s Vision model for images: %s", mark(true), visionModel)
+		fmt.Fprintf(os.Stderr, "  %s Vision model for images: %s (%s)", mark(true), visionModel, baseModelName(visionModel))
 		if allExist {
 			fmt.Fprintln(os.Stderr, " (already downloaded)")
 		} else {
 			fmt.Fprintln(os.Stderr)
 		}
-		fmt.Fprintf(os.Stderr, "  %s Text model for documents: %s (always installed)\n", mark(true), textModel)
+		fmt.Fprintf(os.Stderr, "  %s Text model for documents: %s (%s) (always installed)\n", mark(true), textModel, baseModelName(textModel))
 	}
 
 	if allExist {
