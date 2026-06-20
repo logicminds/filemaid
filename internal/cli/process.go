@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"crypto/rand"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -95,7 +96,7 @@ var (
 )
 
 // applierFunc matches the signature of actions.Apply so it can be swapped in tests.
-type applierFunc func(decision llm.Decision, src string, fileHash string, cfg *config.Config, db state.Repo, isDuplicate bool, fs actions.FS) (string, error)
+type applierFunc func(decision llm.Decision, src string, fileHash string, cfg *config.Config, db state.Repo, isDuplicate bool, fs actions.FS, runID string, metrics llm.Metrics) (string, error)
 
 func init() {
 	processCmd.Flags().StringVar(&processFormat, "format", "table", "output format (table|json)")
@@ -119,7 +120,8 @@ var processCmd = &cobra.Command{
 		if cmd != nil {
 			ctx = cmd.Context()
 		}
-		results, err := processPaths(ctx, args)
+		runID := newRunID()
+		results, err := processPaths(ctx, args, runID)
 		if err != nil {
 			return err
 		}
@@ -142,13 +144,19 @@ var processCmd = &cobra.Command{
 
 // processResult captures the outcome of processing a single file for display.
 type processResult struct {
-	Path     string   `json:"path"`
-	Category string   `json:"category"`
-	Tags     []string `json:"tags"`
-	Action   string   `json:"action"`
-	Result   string   `json:"result"`
-	OK       bool     `json:"ok"`
-	Error    string   `json:"error,omitempty"`
+	Path             string   `json:"path"`
+	Category         string   `json:"category"`
+	Tags             []string `json:"tags"`
+	Action           string   `json:"action"`
+	Result           string   `json:"result"`
+	OK               bool     `json:"ok"`
+	Error            string   `json:"error,omitempty"`
+	DurationMs       int64    `json:"duration_ms"`
+	PromptTokens     int      `json:"prompt_tokens"`
+	CompletionTokens int      `json:"completion_tokens"`
+	TotalTokens      int      `json:"total_tokens"`
+	TokensPerSec     float64  `json:"tokens_per_sec"`
+	ContextSize      int      `json:"context_size"`
 }
 
 // formatProcessResults renders process results as a table or JSON.
@@ -183,7 +191,7 @@ func formatProcessTable(results []processResult) string {
 // Python process_paths behaviour: skip non-existent, non-file, hidden, and
 // out-of-allowed files; honour age rules; detect duplicates; coerce unsafe
 // deletes to review; log the result; and return a displayable result per file.
-func processPaths(ctx context.Context, paths []string) ([]processResult, error) {
+func processPaths(ctx context.Context, paths []string, runID string) ([]processResult, error) {
 	// Preprocess sequentially so skipping, hash/duplicate detection, age-rule
 	// matching and their logs remain deterministic and ordered.
 	items := make([]processItem, 0, len(paths))
@@ -261,9 +269,10 @@ func processPaths(ctx context.Context, paths []string) ([]processResult, error) 
 				defer func() { <-sem }()
 
 				decision := item.ageDecision
+				metrics := llm.Metrics{}
 				if !item.ageMatched {
 					var err error
-					decision, err = classifier.Classify(ctx, item.src, item.fileHash, cfg)
+					decision, metrics, err = classifier.Classify(ctx, item.src, item.fileHash, cfg)
 					if err != nil {
 						slog.Warn("classification failed", "path", item.src, "error", err)
 						decision = llm.NewDecision()
@@ -281,7 +290,7 @@ func processPaths(ctx context.Context, paths []string) ([]processResult, error) 
 				}
 
 				applyMu.Lock()
-				result, err := applyDecision(decision, item.src, item.fileHash, cfg, db, item.isDuplicate, processFS)
+				result, err := applyDecision(decision, item.src, item.fileHash, cfg, db, item.isDuplicate, processFS, runID, metrics)
 				applyMu.Unlock()
 
 				if err != nil {
@@ -306,18 +315,34 @@ func processPaths(ctx context.Context, paths []string) ([]processResult, error) 
 					"reason", decision.Reason,
 				)
 				results[item.pos] = processResult{
-					Path:     item.src,
-					Category: decision.Category,
-					Tags:     processTags(decision),
-					Action:   decision.Action,
-					Result:   result,
-					OK:       true,
+					Path:             item.src,
+					Category:         decision.Category,
+					Tags:             processTags(decision),
+					Action:           decision.Action,
+					Result:           result,
+					OK:               true,
+					DurationMs:       metrics.DurationMs,
+					PromptTokens:     metrics.PromptTokens,
+					CompletionTokens: metrics.CompletionTokens,
+					TotalTokens:      metrics.TotalTokens,
+					TokensPerSec:     metrics.TokensPerSec,
+					ContextSize:      metrics.ContextSize,
 				}
 			}(item, &groupCfg)
 		}
 		wg.Wait()
 	}
 	return results, nil
+}
+
+// newRunID returns a deterministic, unique run identifier.
+func newRunID() string {
+	b := make([]byte, 2)
+	if _, err := rand.Read(b); err != nil {
+		// Fall back to a timestamp-only ID if crypto/rand fails.
+		return fmt.Sprintf("%d", time.Now().UTC().UnixNano())
+	}
+	return fmt.Sprintf("%d-%x", time.Now().UTC().UnixNano(), b)
 }
 
 // processTags returns the tags to display for a decision, including the

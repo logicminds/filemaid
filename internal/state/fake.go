@@ -1,6 +1,7 @@
 package state
 
 import (
+	"database/sql"
 	"sync"
 
 	"github.com/logicminds/filemaid/internal/llm"
@@ -19,7 +20,7 @@ func NewFake() *FakeRepo {
 }
 
 // Record stores a history row in memory.
-func (f *FakeRepo) Record(original, final, sha256, category string, tags []string, action, reason string) error {
+func (f *FakeRepo) Record(original, final, sha256, category string, tags []string, action, reason string, runID string, metrics llm.Metrics) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
@@ -34,15 +35,21 @@ func (f *FakeRepo) Record(original, final, sha256, category string, tags []strin
 	}
 
 	f.records = append(f.records, Record{
-		ID:           int64(len(f.records) + 1),
-		OriginalPath: original,
-		FinalPath:    final,
-		SHA256:       sha256,
-		Category:     category,
-		Tags:         tagsStr,
-		Action:       action,
-		Reason:       reason,
-		CreatedAt:    "",
+		ID:               int64(len(f.records) + 1),
+		OriginalPath:     original,
+		FinalPath:        final,
+		SHA256:           sha256,
+		Category:         category,
+		Tags:             tagsStr,
+		Action:           action,
+		Reason:           reason,
+		RunID:            sql.NullString{String: runID, Valid: runID != ""},
+		LLMDurationMs:    sql.NullInt64{Int64: metrics.DurationMs, Valid: metrics.DurationMs != 0},
+		PromptTokens:     sql.NullInt64{Int64: int64(metrics.PromptTokens), Valid: metrics.PromptTokens != 0},
+		CompletionTokens: sql.NullInt64{Int64: int64(metrics.CompletionTokens), Valid: metrics.CompletionTokens != 0},
+		TotalTokens:      sql.NullInt64{Int64: int64(metrics.TotalTokens), Valid: metrics.TotalTokens != 0},
+		TokensPerSec:     sql.NullFloat64{Float64: metrics.TokensPerSec, Valid: metrics.TokensPerSec != 0},
+		ContextSize:      sql.NullInt64{Int64: int64(metrics.ContextSize), Valid: metrics.ContextSize != 0},
 	})
 	return nil
 }
@@ -110,4 +117,26 @@ func (f *FakeRepo) Records() []Record {
 	out := make([]Record, len(f.records))
 	copy(out, f.records)
 	return out
+}
+
+// History returns up to limit in-memory records ordered by insertion order reversed.
+func (f *FakeRepo) History(limit int, runID string) ([]Record, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	if limit <= 0 {
+		limit = 100
+	}
+	out := make([]Record, 0, limit)
+	for i := len(f.records) - 1; i >= 0; i-- {
+		r := f.records[i]
+		if runID != "" && r.RunID.String != runID {
+			continue
+		}
+		out = append(out, r)
+		if len(out) >= limit {
+			break
+		}
+	}
+	return out, nil
 }

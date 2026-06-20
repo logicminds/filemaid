@@ -110,7 +110,7 @@ func UniqueDest(dest string, fs FS) string {
 //   - Destinations outside cfg.AllowedDirs redirect to the dated review queue.
 //   - If the source file is no longer present (moved by a concurrent process),
 //     Apply returns a "skipped" result without error.
-func Apply(decision llm.Decision, src string, fileHash string, cfg *config.Config, db state.Repo, isDuplicate bool, fs FS) (string, error) {
+func Apply(decision llm.Decision, src string, fileHash string, cfg *config.Config, db state.Repo, isDuplicate bool, fs FS, runID string, metrics llm.Metrics) (string, error) {
 	if len(cfg.AllowedDirs) > 0 && !WithinAllowed(src, cfg.AllowedDirs) {
 		return fmt.Sprintf("skipped (not allowed): %s", src), nil
 	}
@@ -126,11 +126,19 @@ func Apply(decision llm.Decision, src string, fileHash string, cfg *config.Confi
 	}
 
 	if decision.Action == "delete" {
+		safe := MatchesPatterns(src, cfg.SafeDeletePatterns) || isDuplicate
+		if !safe {
+			decision.Action = "review"
+			decision.Reason = fmt.Sprintf("delete refused for safety; original reason: %s", decision.Reason)
+		}
+	}
+
+	if decision.Action == "delete" {
 		if err := fs.Trash(src); err != nil {
 			decision.Action = "review"
 			decision.Reason = fmt.Sprintf("trash failed: %s", err)
 		} else {
-			if dbErr := db.Record(src, "trash", fileHash, decision.Category, decision.Tags, "delete", decision.Reason); dbErr != nil {
+			if dbErr := db.Record(src, "trash", fileHash, decision.Category, decision.Tags, "delete", decision.Reason, runID, metrics); dbErr != nil {
 				return "", fmt.Errorf("record history: %w", dbErr)
 			}
 			return "trash", nil
@@ -181,7 +189,7 @@ func Apply(decision llm.Decision, src string, fileHash string, cfg *config.Confi
 		fs.SetFinderComment(dest, decision.Reason)
 	}
 
-	if err := db.Record(src, dest, fileHash, decision.Category, tags, decision.Action, decision.Reason); err != nil {
+	if err := db.Record(src, dest, fileHash, decision.Category, tags, decision.Action, decision.Reason, runID, metrics); err != nil {
 		return "", fmt.Errorf("record history: %w", err)
 	}
 	return dest, nil

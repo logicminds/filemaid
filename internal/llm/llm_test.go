@@ -464,7 +464,7 @@ func TestClassifyUsesChatEndpoint(t *testing.T) {
 	}
 
 	client := NewClient(transport)
-	decision, err := client.Classify(context.Background(), textFile, "", cfg)
+	decision, _, err := client.Classify(context.Background(), textFile, "", cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -473,6 +473,68 @@ func TestClassifyUsesChatEndpoint(t *testing.T) {
 	}
 	if !strings.HasSuffix(calledURL, "/api/chat") {
 		t.Errorf("URL = %q, want /api/chat suffix", calledURL)
+	}
+}
+
+func TestClassifyReturnsMetrics(t *testing.T) {
+	tmp := t.TempDir()
+	cfg := baseConfig(t, tmp)
+
+	textFile := filepath.Join(tmp, "note.txt")
+	if err := os.WriteFile(textFile, []byte("hello"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	transport := &fakeTransport{
+		handler: func(req *http.Request) (*http.Response, error) {
+			if strings.HasSuffix(req.URL.Path, "/api/tags") {
+				return jsonResponse(map[string]any{"models": []any{map[string]any{"name": "dummy"}}}), nil
+			}
+			return jsonResponse(map[string]any{
+				"message": map[string]any{
+					"tool_calls": []any{
+						map[string]any{
+							"function": map[string]any{
+								"arguments": map[string]any{
+									"category": "Documents",
+									"tags":     []any{"txt"},
+									"action":   "move",
+									"reason":   "text",
+								},
+							},
+						},
+					},
+				},
+				"prompt_eval_count": 10,
+				"eval_count":        5,
+				"eval_duration":     500000000,
+			}), nil
+		},
+	}
+
+	client := NewClient(transport)
+	_, metrics, err := client.Classify(context.Background(), textFile, "", cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if metrics.PromptTokens != 10 {
+		t.Errorf("PromptTokens = %d, want 10", metrics.PromptTokens)
+	}
+	if metrics.CompletionTokens != 5 {
+		t.Errorf("CompletionTokens = %d, want 5", metrics.CompletionTokens)
+	}
+	if metrics.TotalTokens != 15 {
+		t.Errorf("TotalTokens = %d, want 15", metrics.TotalTokens)
+	}
+	if metrics.ContextSize != DefaultContextSize {
+		t.Errorf("ContextSize = %d, want %d", metrics.ContextSize, DefaultContextSize)
+	}
+	wantTPS := 10.0
+	if metrics.TokensPerSec != wantTPS {
+		t.Errorf("TokensPerSec = %v, want %v", metrics.TokensPerSec, wantTPS)
+	}
+	if metrics.DurationMs < 0 {
+		t.Errorf("DurationMs = %d, want non-negative", metrics.DurationMs)
 	}
 }
 
@@ -498,7 +560,7 @@ func TestClassifyDoesNotFallbackToGenerate(t *testing.T) {
 	}
 
 	client := NewClient(transport)
-	decision, err := client.Classify(context.Background(), textFile, "", cfg)
+	decision, _, err := client.Classify(context.Background(), textFile, "", cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -532,7 +594,7 @@ func TestClassifyFallsBackOnError(t *testing.T) {
 	}
 
 	client := NewClient(transport)
-	decision, err := client.Classify(context.Background(), textFile, "", cfg)
+	decision, _, err := client.Classify(context.Background(), textFile, "", cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -588,7 +650,7 @@ func TestClassifyRetriesWithoutImagesOnFailure(t *testing.T) {
 	}
 
 	client := NewClient(transport)
-	decision, err := client.Classify(context.Background(), img, "", cfg)
+	decision, _, err := client.Classify(context.Background(), img, "", cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -627,7 +689,7 @@ func TestClassifyDoesNotRetryWithoutImagesOnGenericError(t *testing.T) {
 	}
 
 	client := NewClient(transport)
-	decision, err := client.Classify(context.Background(), img, "", cfg)
+	decision, _, err := client.Classify(context.Background(), img, "", cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -663,7 +725,7 @@ func TestClassifySkipsHiddenFilesNoSpecialHandling(t *testing.T) {
 	}
 
 	client := NewClient(transport)
-	decision, err := client.Classify(context.Background(), textFile, "", cfg)
+	decision, _, err := client.Classify(context.Background(), textFile, "", cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -869,7 +931,7 @@ func TestClassifierInterface(t *testing.T) {
 	}
 
 	var classifier Classifier = NewClient(transport)
-	decision, err := classifier.Classify(context.Background(), textFile, "", cfg)
+	decision, _, err := classifier.Classify(context.Background(), textFile, "", cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -928,7 +990,7 @@ func TestCheckModelMissingModel(t *testing.T) {
 
 	client := NewClient(transport)
 	cfg := baseConfig(t, t.TempDir())
-	_, err := client.Classify(context.Background(), "", "", cfg)
+	_, _, err := client.Classify(context.Background(), "", "", cfg)
 	if err == nil {
 		t.Fatal("expected error for missing model")
 	}
@@ -1166,10 +1228,10 @@ func TestCheckModelCached(t *testing.T) {
 	}
 
 	client := NewClient(transport)
-	if _, err := client.Classify(context.Background(), textFile, "", cfg); err != nil {
+	if _, _, err := client.Classify(context.Background(), textFile, "", cfg); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := client.Classify(context.Background(), textFile, "", cfg); err != nil {
+	if _, _, err := client.Classify(context.Background(), textFile, "", cfg); err != nil {
 		t.Fatal(err)
 	}
 	if tagsCalls != 1 {
@@ -1200,12 +1262,12 @@ func TestCheckModelCacheInvalidatedOnModelChange(t *testing.T) {
 	}
 
 	client := NewClient(transport)
-	if _, err := client.Classify(context.Background(), textFile, "", cfg); err != nil {
+	if _, _, err := client.Classify(context.Background(), textFile, "", cfg); err != nil {
 		t.Fatal(err)
 	}
 
 	cfg.Model = "other-model"
-	if _, err := client.Classify(context.Background(), textFile, "", cfg); err != nil {
+	if _, _, err := client.Classify(context.Background(), textFile, "", cfg); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1248,7 +1310,7 @@ func TestClassifyHashCache(t *testing.T) {
 	client := NewClient(transport)
 	client.SetDecisionCache(cache)
 
-	decision, err := client.Classify(context.Background(), textFile, "hash1", cfg)
+	decision, _, err := client.Classify(context.Background(), textFile, "hash1", cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1300,7 +1362,7 @@ func TestClassifyRecordsDecisionInCache(t *testing.T) {
 	client := NewClient(transport)
 	client.SetDecisionCache(cache)
 
-	if _, err := client.Classify(context.Background(), textFile, "hash1", cfg); err != nil {
+	if _, _, err := client.Classify(context.Background(), textFile, "hash1", cfg); err != nil {
 		t.Fatal(err)
 	}
 

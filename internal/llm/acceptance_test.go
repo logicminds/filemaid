@@ -3,6 +3,7 @@
 package llm
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"os"
@@ -71,7 +72,7 @@ func TestAcceptanceClassifyRealFiles(t *testing.T) {
 				t.Fatalf("abs path: %v", err)
 			}
 
-			decision, err := client.Classify(path, "", cfg)
+			decision, _, err := client.Classify(context.Background(), path, "", cfg)
 			if err != nil {
 				t.Fatalf("classify %s: %v", path, err)
 			}
@@ -119,7 +120,7 @@ func TestAcceptanceParseableResponse(t *testing.T) {
 			t.Fatalf("abs path: %v", err)
 		}
 
-		decision, err := client.Classify(path, "", cfg)
+		decision, _, err := client.Classify(context.Background(), path, "", cfg)
 		if err != nil {
 			t.Fatalf("classify %s: %v", path, err)
 		}

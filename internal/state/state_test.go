@@ -86,7 +86,7 @@ func TestRecordAndFindByHash(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if err := repo.Record(tc.original, tc.final, tc.sha256, tc.category, tc.tags, tc.action, tc.reason); err != nil {
+			if err := repo.Record(tc.original, tc.final, tc.sha256, tc.category, tc.tags, tc.action, tc.reason, "", llm.Metrics{}); err != nil {
 				t.Fatalf("Record failed: %v", err)
 			}
 
@@ -143,10 +143,10 @@ func TestFindByHash_MostRecent(t *testing.T) {
 	defer repo.Close()
 
 	sha := "dupsha"
-	if err := repo.Record("/a/file1.txt", "/b/file1.txt", sha, "A", []string{"a"}, "move", "first"); err != nil {
+	if err := repo.Record("/a/file1.txt", "/b/file1.txt", sha, "A", []string{"a"}, "move", "first", "", llm.Metrics{}); err != nil {
 		t.Fatalf("Record failed: %v", err)
 	}
-	if err := repo.Record("/a/file2.txt", "/b/file2.txt", sha, "B", []string{"b"}, "move", "second"); err != nil {
+	if err := repo.Record("/a/file2.txt", "/b/file2.txt", sha, "B", []string{"b"}, "move", "second", "", llm.Metrics{}); err != nil {
 		t.Fatalf("Record failed: %v", err)
 	}
 
@@ -184,10 +184,10 @@ func TestFindByHash_NotFound(t *testing.T) {
 func TestFakeRepo_RecordAndFindByHash(t *testing.T) {
 	fake := state.NewFake()
 
-	if err := fake.Record("/src/a.txt", "/dst/a.txt", "hash1", "Cat", []string{"x", "y"}, "move", "reason"); err != nil {
+	if err := fake.Record("/src/a.txt", "/dst/a.txt", "hash1", "Cat", []string{"x", "y"}, "move", "reason", "", llm.Metrics{}); err != nil {
 		t.Fatalf("Record failed: %v", err)
 	}
-	if err := fake.Record("/src/b.txt", "", "hash2", "Cat", nil, "delete", "reason"); err != nil {
+	if err := fake.Record("/src/b.txt", "", "hash2", "Cat", nil, "delete", "reason", "", llm.Metrics{}); err != nil {
 		t.Fatalf("Record failed: %v", err)
 	}
 
@@ -210,8 +210,8 @@ func TestFakeRepo_RecordAndFindByHash(t *testing.T) {
 func TestFakeRepo_FindByHash_MostRecent(t *testing.T) {
 	fake := state.NewFake()
 
-	_ = fake.Record("/a/1", "/b/1", "sha", "A", nil, "move", "first")
-	_ = fake.Record("/a/2", "/b/2", "sha", "B", nil, "move", "second")
+	_ = fake.Record("/a/1", "/b/1", "sha", "A", nil, "move", "first", "", llm.Metrics{})
+	_ = fake.Record("/a/2", "/b/2", "sha", "B", nil, "move", "second", "", llm.Metrics{})
 
 	got, err := fake.FindByHash("sha")
 	if err != nil {
@@ -234,8 +234,8 @@ func TestFakeRepo_FindByHash_NotFound(t *testing.T) {
 }
 func TestFakeRepo_Records_Snapshot(t *testing.T) {
 	fake := state.NewFake()
-	_ = fake.Record("/a", "/b", "h1", "C", []string{"t"}, "move", "r")
-	_ = fake.Record("/c", "", "h2", "C", nil, "delete", "r")
+	_ = fake.Record("/a", "/b", "h1", "C", []string{"t"}, "move", "r", "", llm.Metrics{})
+	_ = fake.Record("/c", "", "h2", "C", nil, "delete", "r", "", llm.Metrics{})
 
 	records := fake.Records()
 	if len(records) != 2 {
@@ -421,5 +421,51 @@ func TestOpen_CreatesDecisionsTable(t *testing.T) {
 	}
 	if name != "decisions" {
 		t.Fatalf("unexpected table name: %q", name)
+	}
+}
+
+func TestHistory_ByRunID(t *testing.T) {
+	repo, err := state.Open(filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+	defer repo.Close()
+
+	if err := repo.Record("/a", "/b", "h1", "C", nil, "move", "r", "run-1", llm.Metrics{DurationMs: 100}); err != nil {
+		t.Fatalf("Record failed: %v", err)
+	}
+	if err := repo.Record("/c", "/d", "h2", "C", nil, "move", "r", "run-2", llm.Metrics{DurationMs: 200}); err != nil {
+		t.Fatalf("Record failed: %v", err)
+	}
+
+	records, err := repo.History(10, "run-2")
+	if err != nil {
+		t.Fatalf("History failed: %v", err)
+	}
+	if len(records) != 1 {
+		t.Fatalf("expected 1 record, got %d", len(records))
+	}
+	if records[0].RunID.String != "run-2" {
+		t.Errorf("RunID = %q, want run-2", records[0].RunID.String)
+	}
+	if records[0].LLMDurationMs.Int64 != 200 {
+		t.Errorf("LLMDurationMs = %d, want 200", records[0].LLMDurationMs.Int64)
+	}
+}
+
+func TestFakeRepo_History(t *testing.T) {
+	fake := state.NewFake()
+	fake.Record("/a", "/b", "h1", "C", nil, "move", "r", "run-1", llm.Metrics{})
+	fake.Record("/c", "/d", "h2", "C", nil, "move", "r", "run-2", llm.Metrics{})
+
+	records, err := fake.History(10, "run-1")
+	if err != nil {
+		t.Fatalf("History failed: %v", err)
+	}
+	if len(records) != 1 {
+		t.Fatalf("expected 1 record, got %d", len(records))
+	}
+	if records[0].RunID.String != "run-1" {
+		t.Errorf("RunID = %q, want run-1", records[0].RunID.String)
 	}
 }

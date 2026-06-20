@@ -36,6 +36,19 @@ type Decision struct {
 	Reason      string   `json:"reason"`
 }
 
+// Metrics holds LLM telemetry for a single classification.
+type Metrics struct {
+	DurationMs       int64   `json:"duration_ms"`
+	PromptTokens     int     `json:"prompt_tokens"`
+	CompletionTokens int     `json:"completion_tokens"`
+	TotalTokens      int     `json:"total_tokens"`
+	TokensPerSec     float64 `json:"tokens_per_sec"`
+	ContextSize      int     `json:"context_size"`
+}
+
+// DefaultContextSize is the num_ctx option sent to Ollama for classification.
+const DefaultContextSize = 4096
+
 // NewDecision returns a Decision with the required default values.
 func NewDecision() Decision {
 	return Decision{
@@ -46,8 +59,8 @@ func NewDecision() Decision {
 
 // Classifier turns a file path into a classification Decision.
 type Classifier interface {
-	// Classify classifies a single file and returns a Decision.
-	Classify(ctx context.Context, path string, fileHash string, cfg *config.Config) (Decision, error)
+	// Classify classifies a single file and returns a Decision and telemetry.
+	Classify(ctx context.Context, path string, fileHash string, cfg *config.Config) (Decision, Metrics, error)
 	// Validate checks that the configured Ollama model is reachable and can
 	// generate a response. Commands that depend on classification should call
 	// Validate before touching any files.
@@ -103,53 +116,58 @@ func (c *Client) SetDecisionCache(cache DecisionCache) {
 }
 
 // Classify classifies a single file using Ollama.
-func (c *Client) Classify(ctx context.Context, path string, fileHash string, cfg *config.Config) (Decision, error) {
+func (c *Client) Classify(ctx context.Context, path string, fileHash string, cfg *config.Config) (Decision, Metrics, error) {
 	if fileHash != "" && c.cache != nil {
 		if d, ok, err := c.cache.FindDecisionByHash(fileHash); err == nil && ok {
-			return d, nil
+			return d, Metrics{}, nil
 		}
 	}
 
 	resolvedModel, err := c.checkModel(ctx, cfg.OllamaURL, cfg.Model)
 	if err != nil {
-		return Decision{}, err
+		return Decision{}, Metrics{}, err
 	}
 
 	prompt, images, err := buildPrompt(path, cfg)
 	if err != nil {
 		d := NewDecision()
 		d.Reason = fmt.Sprintf("build prompt error: %v", err)
-		return d, nil
+		return d, Metrics{}, nil
 	}
 
 	categories := categorySet(cfg.Categories)
 	ollamaURL := strings.TrimRight(cfg.OllamaURL, "/")
 	model := resolvedModel
 
-	tryChat := func(imgs []string) (Decision, error) {
+	tryChat := func(imgs []string) (Decision, chatResponse, error) {
 		resp, err := c.requestChat(ctx, ollamaURL, model, prompt, imgs, categories, time.Duration(cfg.RequestTimeout))
 		if err != nil {
-			return Decision{}, err
+			return Decision{}, chatResponse{}, err
 		}
 		if resp.Error != "" {
-			return Decision{}, errors.New(resp.Error)
+			return Decision{}, resp, errors.New(resp.Error)
 		}
 		if decision, ok := parseResponse(resp, categories); ok {
-			return decision, nil
+			return decision, resp, nil
 		}
-		return Decision{}, errors.New("could not parse model response")
+		return Decision{}, resp, errors.New("could not parse model response")
 	}
 
-	decision, err := tryChat(images)
+	start := time.Now()
+	decision, resp, err := tryChat(images)
 	if err != nil && len(images) > 0 && isImageRelatedError(err) {
-		decision, err = tryChat(nil)
+		decision, resp, err = tryChat(nil)
 	}
+
+	metrics := metricsFromChatResponse(resp)
+	metrics.DurationMs = time.Since(start).Milliseconds()
+	metrics.ContextSize = DefaultContextSize
 
 	if err == nil {
 		if fileHash != "" && c.cache != nil {
 			_ = c.cache.RecordDecision(fileHash, decision)
 		}
-		return decision, nil
+		return decision, metrics, nil
 	}
 
 	d := NewDecision()
@@ -157,7 +175,7 @@ func (c *Client) Classify(ctx context.Context, path string, fileHash string, cfg
 	if fileHash != "" && c.cache != nil {
 		_ = c.cache.RecordDecision(fileHash, d)
 	}
-	return d, nil
+	return d, metrics, nil
 }
 
 // isImageRelatedError reports whether an error from Ollama is likely caused
@@ -602,7 +620,7 @@ func (c *Client) requestGenerate(ctx context.Context, ollamaURL, model, prompt s
 		"options": map[string]any{
 			"temperature": 0.2,
 			"num_predict": 512,
-			"num_ctx":     4096,
+			"num_ctx":     DefaultContextSize,
 		},
 	}
 	if timeout <= 0 {
@@ -641,7 +659,7 @@ func (c *Client) requestChat(ctx context.Context, ollamaURL, model, prompt strin
 		"options": map[string]any{
 			"temperature": 0.2,
 			"num_predict": 512,
-			"num_ctx":     4096,
+			"num_ctx":     DefaultContextSize,
 		},
 	}
 	if timeout <= 0 {
@@ -739,6 +757,13 @@ type chatResponse struct {
 	Error    string      `json:"error"`
 	Response string      `json:"response"`
 	Message  chatMessage `json:"message"`
+
+	PromptEvalCount    int   `json:"prompt_eval_count"`
+	EvalCount          int   `json:"eval_count"`
+	PromptEvalDuration int64 `json:"prompt_eval_duration"`
+	EvalDuration       int64 `json:"eval_duration"`
+	TotalDuration      int64 `json:"total_duration"`
+	LoadDuration       int64 `json:"load_duration"`
 }
 
 func parseResponse(resp chatResponse, categories map[string]bool) (Decision, bool) {
@@ -796,6 +821,25 @@ type functionCall struct {
 type generateResponse struct {
 	Error    string `json:"error"`
 	Response string `json:"response"`
+
+	PromptEvalCount    int   `json:"prompt_eval_count"`
+	EvalCount          int   `json:"eval_count"`
+	PromptEvalDuration int64 `json:"prompt_eval_duration"`
+	EvalDuration       int64 `json:"eval_duration"`
+	TotalDuration      int64 `json:"total_duration"`
+	LoadDuration       int64 `json:"load_duration"`
+}
+
+// metricsFromChatResponse builds Metrics from Ollama timing fields.
+func metricsFromChatResponse(resp chatResponse) Metrics {
+	var m Metrics
+	m.PromptTokens = resp.PromptEvalCount
+	m.CompletionTokens = resp.EvalCount
+	m.TotalTokens = resp.PromptEvalCount + resp.EvalCount
+	if resp.EvalDuration > 0 {
+		m.TokensPerSec = float64(resp.EvalCount) / (float64(resp.EvalDuration) / 1e9)
+	}
+	return m
 }
 
 // parseArguments handles tool-call arguments that may be a JSON object or a

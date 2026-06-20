@@ -99,7 +99,7 @@ func TestProcessPathsSkipsNonexistent(t *testing.T) {
 	processFS = actions.NewOSFS()
 
 	buf := captureSlog(t)
-	processPaths(context.Background(), []string{filepath.Join(t.TempDir(), "nope.txt")})
+	processPaths(context.Background(), []string{filepath.Join(t.TempDir(), "nope.txt")}, "run-test")
 
 	if !bytes.Contains(buf.Bytes(), []byte("path does not exist")) {
 		t.Errorf("expected 'path does not exist' warning, got %q", buf.String())
@@ -117,7 +117,7 @@ func TestProcessPathsSkipsHidden(t *testing.T) {
 	os.WriteFile(hidden, []byte("secret"), 0644)
 
 	buf := captureSlog(t)
-	processPaths(context.Background(), []string{hidden})
+	processPaths(context.Background(), []string{hidden}, "run-test")
 
 	if !bytes.Contains(buf.Bytes(), []byte("skipping hidden file")) {
 		t.Errorf("expected 'skipping hidden file' log, got %q", buf.String())
@@ -134,7 +134,7 @@ func TestProcessPathsSkipsOutsideAllowed(t *testing.T) {
 	os.WriteFile(outside, []byte("outside"), 0644)
 
 	buf := captureSlog(t)
-	processPaths(context.Background(), []string{outside})
+	processPaths(context.Background(), []string{outside}, "run-test")
 
 	if !bytes.Contains(buf.Bytes(), []byte("outside allowed dirs")) {
 		t.Errorf("expected 'outside allowed dirs' warning, got %q", buf.String())
@@ -157,7 +157,7 @@ func TestProcessPathsClassifiesAndApplies(t *testing.T) {
 	os.MkdirAll(filepath.Dir(src), 0755)
 	os.WriteFile(src, []byte("hello"), 0644)
 
-	if _, err := processPaths(context.Background(), []string{src}); err != nil {
+	if _, err := processPaths(context.Background(), []string{src}, "run-test"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -190,7 +190,7 @@ func TestProcessPathsDuplicateForcesReview(t *testing.T) {
 	os.WriteFile(src1, []byte("same"), 0644)
 	os.WriteFile(src2, []byte("same"), 0644)
 
-	if _, err := processPaths(context.Background(), []string{src1, src2}); err != nil {
+	if _, err := processPaths(context.Background(), []string{src1, src2}, "run-test"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -226,12 +226,12 @@ type fakeClassifier struct {
 	validated bool
 }
 
-func (f *fakeClassifier) Classify(ctx context.Context, path string, fileHash string, cfg *config.Config) (llm.Decision, error) {
+func (f *fakeClassifier) Classify(ctx context.Context, path string, fileHash string, cfg *config.Config) (llm.Decision, llm.Metrics, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.calls = append(f.calls, path)
 	f.models = append(f.models, cfg.Model)
-	return f.decision, f.err
+	return f.decision, llm.Metrics{}, f.err
 }
 
 func (f *fakeClassifier) Validate(cfg *config.Config) error {
@@ -309,7 +309,7 @@ func TestProcessPathsFallsBackToReviewOnClassifyError(t *testing.T) {
 	os.MkdirAll(filepath.Dir(src), 0755)
 	os.WriteFile(src, []byte("hello"), 0644)
 
-	if _, err := processPaths(context.Background(), []string{src}); err != nil {
+	if _, err := processPaths(context.Background(), []string{src}, "run-test"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -327,7 +327,7 @@ func TestProcessPathsLogsApplyError(t *testing.T) {
 	cfg = testConfig(tmp)
 	db = state.NewFake()
 	classifier = &fakeClassifier{decision: llm.Decision{Category: "Documents", Action: "move", Reason: "text"}}
-	applyDecision = func(llm.Decision, string, string, *config.Config, state.Repo, bool, actions.FS) (string, error) {
+	applyDecision = func(llm.Decision, string, string, *config.Config, state.Repo, bool, actions.FS, string, llm.Metrics) (string, error) {
 		return "", errors.New("move failed")
 	}
 	t.Cleanup(func() { applyDecision = actions.Apply })
@@ -337,7 +337,7 @@ func TestProcessPathsLogsApplyError(t *testing.T) {
 	os.WriteFile(src, []byte("hello"), 0644)
 
 	buf := captureSlog(t)
-	processPaths(context.Background(), []string{src})
+	processPaths(context.Background(), []string{src}, "run-test")
 
 	if !bytes.Contains(buf.Bytes(), []byte("apply failed")) {
 		t.Errorf("expected 'apply failed' log, got %q", buf.String())
@@ -364,7 +364,7 @@ func TestProcessPathsResultsInInputOrder(t *testing.T) {
 		paths[i] = p
 	}
 
-	results, err := processPaths(context.Background(), paths)
+	results, err := processPaths(context.Background(), paths, "run-test")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -395,7 +395,7 @@ func newBlockingClassifier() *blockingClassifier {
 	return b
 }
 
-func (b *blockingClassifier) Classify(ctx context.Context, path string, fileHash string, cfg *config.Config) (llm.Decision, error) {
+func (b *blockingClassifier) Classify(ctx context.Context, path string, fileHash string, cfg *config.Config) (llm.Decision, llm.Metrics, error) {
 	b.mu.Lock()
 	b.active++
 	if b.active > b.maxActive {
@@ -406,7 +406,8 @@ func (b *blockingClassifier) Classify(ctx context.Context, path string, fileHash
 	}
 	b.active--
 	b.mu.Unlock()
-	return b.fakeClassifier.Classify(ctx, path, fileHash, cfg)
+	decision, _, err := b.fakeClassifier.Classify(ctx, path, fileHash, cfg)
+	return decision, llm.Metrics{}, err
 }
 
 func (b *blockingClassifier) release() {
@@ -437,7 +438,7 @@ func TestProcessPathsProcessesConcurrently(t *testing.T) {
 
 	done := make(chan []processResult)
 	go func() {
-		res, err := processPaths(context.Background(), paths)
+		res, err := processPaths(context.Background(), paths, "run-test")
 		if err != nil {
 			t.Error(err)
 		}
@@ -630,6 +631,41 @@ func TestProcessCommandPrintsJSON(t *testing.T) {
 	}
 }
 
+func TestFormatProcessResultsJSONIncludesMetrics(t *testing.T) {
+	results := []processResult{
+		{
+			Path:             "/tmp/note.txt",
+			Category:         "Documents",
+			Tags:             []string{"txt"},
+			Action:           "move",
+			Result:           "/archive/note.txt",
+			OK:               true,
+			DurationMs:       1234,
+			PromptTokens:     10,
+			CompletionTokens: 5,
+			TotalTokens:      15,
+			TokensPerSec:     10.5,
+			ContextSize:      4096,
+		},
+	}
+	out, err := formatProcessResults(results, "json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		`"duration_ms": 1234`,
+		`"prompt_tokens": 10`,
+		`"completion_tokens": 5`,
+		`"total_tokens": 15`,
+		`"tokens_per_sec": 10.5`,
+		`"context_size": 4096`,
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("json output missing %q:\n%s", want, out)
+		}
+	}
+}
+
 func TestModelForPathRoutesByExtension(t *testing.T) {
 	tmp := t.TempDir()
 	cfg := testConfig(tmp)
@@ -674,7 +710,7 @@ func TestProcessPathsGroupsByModel(t *testing.T) {
 		os.WriteFile(f, []byte(f), 0644)
 	}
 
-	if _, err := processPaths(context.Background(), files); err != nil {
+	if _, err := processPaths(context.Background(), files, "run-test"); err != nil {
 		t.Fatalf("processPaths failed: %v", err)
 	}
 
@@ -727,7 +763,7 @@ func TestProcessPathsFallsBackToModel(t *testing.T) {
 		os.WriteFile(f, []byte(f), 0644)
 	}
 
-	if _, err := processPaths(context.Background(), files); err != nil {
+	if _, err := processPaths(context.Background(), files, "run-test"); err != nil {
 		t.Fatalf("processPaths failed: %v", err)
 	}
 

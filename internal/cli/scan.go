@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -40,14 +41,15 @@ var scanCmd = &cobra.Command{
 		if cmd != nil {
 			ctx = cmd.Context()
 		}
+		runID := newRunID()
 
 		var allResults []processResult
 		var err error
 		if scanDir != "" {
-			allResults, err = runScanDir(ctx, scanDir)
+			allResults, err = runScanDir(ctx, scanDir, runID)
 		} else {
 			for _, d := range cfg.WatchDirs {
-				results, runErr := runScanDir(ctx, d)
+				results, runErr := runScanDir(ctx, d, runID)
 				if runErr != nil {
 					return runErr
 				}
@@ -76,7 +78,7 @@ var scanCmd = &cobra.Command{
 
 // runScanDir scans a single directory for files older than min_age_hours and
 // processes them. It mirrors the Python scan_dir behaviour.
-func runScanDir(ctx context.Context, directory string) ([]processResult, error) {
+func runScanDir(ctx context.Context, directory string, runID string) ([]processResult, error) {
 	root, err := filepath.Abs(directory)
 	if err != nil {
 		return nil, fmt.Errorf("resolve scan directory: %w", err)
@@ -84,14 +86,17 @@ func runScanDir(ctx context.Context, directory string) ([]processResult, error) 
 	root = filepath.Clean(root)
 
 	if len(cfg.AllowedDirs) > 0 && !actions.WithinAllowed(root, cfg.AllowedDirs) {
-		slog.Error("scan directory not allowed", "dir", root)
+		slog.Warn("scan directory not allowed", "dir", root)
 		return nil, nil
 	}
 
 	files, err := scanGetFiles(root)
 	if err != nil {
-		slog.Error("permission denied scanning", "dir", root, "error", err)
-		return nil, nil
+		if errors.Is(err, os.ErrPermission) {
+			slog.Warn("permission denied", "dir", root)
+			return nil, nil
+		}
+		return nil, fmt.Errorf("list scan files: %w", err)
 	}
 
 	cutoff := time.Now().Add(-time.Duration(cfg.MinAgeHours) * time.Hour)
@@ -99,29 +104,27 @@ func runScanDir(ctx context.Context, directory string) ([]processResult, error) 
 	for _, path := range files {
 		info, err := os.Stat(path)
 		if err != nil {
+			slog.Warn("scan file stat failed", "path", path, "error", err)
 			continue
 		}
 		if !info.Mode().IsRegular() {
 			continue
 		}
 		if isHidden(path) {
+			slog.Info("skipping hidden file in scan", "path", path)
 			continue
 		}
-		if info.ModTime().After(cutoff) {
-			continue
+		if info.ModTime().Before(cutoff) {
+			toProcess = append(toProcess, path)
 		}
-		if len(cfg.AllowedDirs) > 0 && !actions.WithinAllowed(path, cfg.AllowedDirs) {
-			continue
-		}
-		toProcess = append(toProcess, path)
 	}
 
 	if len(toProcess) == 0 {
-		slog.Info("no files to scan in", "dir", root)
+		slog.Info("no files older than min_age_hours", "dir", root)
 		return nil, nil
 	}
 
-	return processPaths(ctx, toProcess)
+	return processPaths(ctx, toProcess, runID)
 }
 
 // defaultScanGetFiles lists regular files directly inside dir.
