@@ -83,7 +83,7 @@
     "mode": "safe",
     "max_age_days": 30
   },
-  "_rename_note": "Set rename=true to let the LLM suggest better filenames. rename_level (1-5) is the minimum name_quality required before a rename is applied. Invalid characters are removed, extensions are preserved, and collisions get a counter suffix.",
+  "_rename_note": "Set rename=true to let the LLM suggest better filenames. rename_level (0-5) is the minimum quality threshold a suggested new name must meet before filemaid applies it. 1 = most aggressive (even weak suggestions), 2 = aggressive, 3 = moderate, 4 = conservative, 5 = most conservative (only excellent suggestions). 0 accepts any suggestion. Invalid characters are removed, extensions are preserved, and collisions get a counter suffix.",
   "rename": false,
   "rename_level": 2,
   "rename_max_length": 120,

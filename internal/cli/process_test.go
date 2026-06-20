@@ -1245,16 +1245,12 @@ func TestApplyRenameFlagsOverridesConfig(t *testing.T) {
 	cfg.RenameLevel = 2
 
 	cmd := &cobra.Command{Use: "test"}
-	cmd.Flags().BoolVar(&renameEnabled, "rename", false, "")
-	cmd.Flags().IntVar(&renameLevel, "rename-level", 0, "")
-	renameEnabled = false
-	renameLevel = 0
+	cmd.Flags().StringVar(&renameFlag, "rename", "", "")
+	cmd.Flags().Lookup("rename").NoOptDefVal = "default"
+	renameFlag = ""
 
-	if err := cmd.Flags().Set("rename", "true"); err != nil {
+	if err := cmd.Flags().Set("rename", "default"); err != nil {
 		t.Fatalf("set rename flag: %v", err)
-	}
-	if err := cmd.Flags().Set("rename-level", "4"); err != nil {
-		t.Fatalf("set rename-level flag: %v", err)
 	}
 
 	applyRenameFlags(cmd)
@@ -1262,8 +1258,8 @@ func TestApplyRenameFlagsOverridesConfig(t *testing.T) {
 	if !cfg.Rename {
 		t.Errorf("cfg.Rename = %v, want true", cfg.Rename)
 	}
-	if cfg.RenameLevel != 4 {
-		t.Errorf("cfg.RenameLevel = %d, want 4", cfg.RenameLevel)
+	if cfg.RenameLevel != 2 {
+		t.Errorf("cfg.RenameLevel = %d, want 2", cfg.RenameLevel)
 	}
 }
 
@@ -1274,10 +1270,9 @@ func TestApplyRenameFlagsLeavesDefaultsWhenUnset(t *testing.T) {
 	cfg.RenameLevel = 3
 
 	cmd := &cobra.Command{Use: "test"}
-	cmd.Flags().BoolVar(&renameEnabled, "rename", false, "")
-	cmd.Flags().IntVar(&renameLevel, "rename-level", 0, "")
-	renameEnabled = false
-	renameLevel = 0
+	cmd.Flags().StringVar(&renameFlag, "rename", "", "")
+	cmd.Flags().Lookup("rename").NoOptDefVal = "default"
+	renameFlag = ""
 
 	applyRenameFlags(cmd)
 
@@ -1289,21 +1284,65 @@ func TestApplyRenameFlagsLeavesDefaultsWhenUnset(t *testing.T) {
 	}
 }
 
+func TestApplyRenameFlagsNumericLevel(t *testing.T) {
+	tmp := t.TempDir()
+	cfg = testConfig(tmp)
+	cfg.Rename = false
+	cfg.RenameLevel = 2
+
+	cmd := &cobra.Command{Use: "test"}
+	cmd.Flags().StringVar(&renameFlag, "rename", "", "")
+	cmd.Flags().Lookup("rename").NoOptDefVal = "default"
+	renameFlag = ""
+
+	if err := cmd.Flags().Set("rename", "5"); err != nil {
+		t.Fatalf("set rename flag: %v", err)
+	}
+
+	applyRenameFlags(cmd)
+
+	if !cfg.Rename {
+		t.Errorf("cfg.Rename = %v, want true", cfg.Rename)
+	}
+	if cfg.RenameLevel != 5 {
+		t.Errorf("cfg.RenameLevel = %d, want 5", cfg.RenameLevel)
+	}
+}
+
+func TestApplyRenameFlagsDefaultLevel(t *testing.T) {
+	tmp := t.TempDir()
+	cfg = testConfig(tmp)
+	cfg.Rename = false
+	cfg.RenameLevel = 1
+
+	cmd := &cobra.Command{Use: "test"}
+	cmd.Flags().StringVar(&renameFlag, "rename", "", "")
+	cmd.Flags().Lookup("rename").NoOptDefVal = "default"
+	renameFlag = ""
+
+	if err := cmd.Flags().Set("rename", "default"); err != nil {
+		t.Fatalf("set rename flag: %v", err)
+	}
+
+	applyRenameFlags(cmd)
+
+	if !cfg.Rename {
+		t.Errorf("cfg.Rename = %v, want true", cfg.Rename)
+	}
+	if cfg.RenameLevel != 2 {
+		t.Errorf("cfg.RenameLevel = %d, want 2", cfg.RenameLevel)
+	}
+}
+
 func TestProcessCmdHasRenameFlags(t *testing.T) {
 	if f := processCmd.Flags().Lookup("rename"); f == nil {
 		t.Error("process command missing --rename flag")
-	}
-	if f := processCmd.Flags().Lookup("rename-level"); f == nil {
-		t.Error("process command missing --rename-level flag")
 	}
 }
 
 func TestScanCmdHasRenameFlags(t *testing.T) {
 	if f := scanCmd.Flags().Lookup("rename"); f == nil {
 		t.Error("scan command missing --rename flag")
-	}
-	if f := scanCmd.Flags().Lookup("rename-level"); f == nil {
-		t.Error("scan command missing --rename-level flag")
 	}
 }
 

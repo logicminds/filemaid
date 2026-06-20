@@ -399,7 +399,7 @@ File:
 - modified: %s
 %s
 
-Return a single compact JSON object and nothing else. Leave destination empty. If the current filename is poor or misleading, suggest a better one in "new_name" (preserve the original extension) and rate the current name in "name_quality" (integer 1-5, where 5 is excellent). Omit new_name when the current name is already good.
+Return a single compact JSON object and nothing else. Leave destination empty. If the current filename is poor or misleading, suggest a better one in "new_name" (preserve the original extension) and rate the quality of that suggestion in "name_quality" (integer 1-5, where 5 is excellent). Omit new_name when the current name is already good.
 {"category": "...", "subcategory": "...", "tags": ["..."], "action": "...", "destination": "", "reason": "...", "new_name": "...", "name_quality": 3}`
 
 const subcategoryInstructions = `For image files, also provide a concise subcategory describing the main subject or scene (e.g., cat, dog, baby, kid, woman, wedding, car, nature, food, selfie, document-photo). For screenshots, describe the app or context (e.g., Safari, Terminal, Slack, VS Code: browser, lock-screen, menu-bar). The subcategory will be added as a Finder tag.`
@@ -709,7 +709,7 @@ func toolSchema(categories []string) map[string]any {
 						"type":        "integer",
 						"minimum":     1,
 						"maximum":     5,
-						"description": "Quality rating of the current filename from 1 (poor) to 5 (excellent)",
+						"description": "Quality rating of the suggested new_name from 1 (poor suggestion) to 5 (excellent suggestion); higher values mean the suggested name is more clearly better than the current name",
 					},
 				},
 				"required": []string{"category", "tags", "action", "reason"},

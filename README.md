@@ -265,7 +265,7 @@ The generated configuration is written to `~/.config/filemaid/config.json` and c
     "mode": "safe",
     "max_age_days": 30
   },
-  "_rename_note": "Set rename=true to let the LLM suggest better filenames. rename_level (1-5) is the minimum name_quality required before a rename is applied.",
+  "_rename_note": "Set rename=true to let the LLM suggest better filenames. rename_level (0-5) is the minimum quality threshold a suggested new name must meet before filemaid applies it. 1 = most aggressive (even weak suggestions), 2 = aggressive, 3 = moderate, 4 = conservative, 5 = most conservative (only excellent suggestions). 0 accepts any suggestion. Invalid characters are removed, extensions are preserved, and collisions get a counter suffix.",
   "rename": false,
   "rename_level": 2,
   "rename_max_length": 120,
@@ -305,7 +305,7 @@ The generated configuration is written to `~/.config/filemaid/config.json` and c
 | `dev_cleanup` | Per-cleaner enable/disable and mode (`safe` is the only mode currently). |
 | `review_cleanup` | Enable and set retention for the review-queue cleaner. Set `max_age_days` to `0` to disable. |
 | `rename` | When `true`, the LLM may suggest better filenames. |
-| `rename_level` | Minimum `name_quality` (1-5) required before applying a rename. |
+| `rename_level` | Minimum quality threshold (0-5) a suggested new name must meet. 1 = most aggressive, 5 = most conservative. |
 | `rename_max_length` | Maximum length for a renamed file. |
 | `rename_min_length` | Minimum length below which a rename is not applied. |
 | `rename_invalid_chars` | Characters stripped from suggested names. |
@@ -320,7 +320,7 @@ Changes take effect the next time `filemaid process`, `filemaid scan`, or `filem
 
 ## Rename
 
-When `rename` is enabled, filemaid asks the LLM to suggest a better filename and a `name_quality` score (1-5). If the score is at least `rename_level`, the file is renamed while preserving its extension.
+When `rename` is enabled, filemaid asks the LLM to suggest a better filename and rate the quality of that suggestion from 1 (weak) to 5 (excellent). `rename_level` is the minimum quality threshold the suggestion must meet before it is applied; 1 is the most aggressive (renames even on weak suggestions) and 5 is the most conservative (only excellent suggestions). If the suggested name's rating is at least `rename_level`, the file is renamed while preserving its extension.
 
 Suggested names are sanitized: characters matching `rename_invalid_chars` are stripped, the length is clamped between `rename_min_length` and `rename_max_length`, and collisions are resolved with a counter suffix (e.g., `document-2.pdf`).
 
@@ -445,9 +445,8 @@ Before releasing a rename-related change, run through the following:
 
 - [ ] `go test ./...` passes and coverage stays above 80%.
 - [ ] `go vet ./...` and `gofmt -l .` are clean.
-- [ ] `filemaid process --rename` renames a file when `name_quality` >= `rename_level`.
-- [ ] `filemaid process --rename` keeps the original name when `name_quality` < `rename_level`.
-- [ ] `filemaid process --dry-run` shows proposed names without moving files.
+- [ ] `filemaid process --rename` renames a file when the LLM's suggested name rating is >= `rename_level`.
+- [ ] `filemaid process --rename` keeps the original name when the LLM's suggested name rating is < `rename_level`.
 - [ ] `filemaid scan --dry-run` shows proposed names without moving files.
 - [ ] Duplicate files (same SHA-256) are routed to review instead of renamed.
 - [ ] Similar images above `rename_image_similarity_threshold` are routed to review.

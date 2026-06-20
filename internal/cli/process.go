@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -117,7 +118,7 @@ var (
 	processFormat string
 	processJSON   bool
 	processQuiet  bool
-	renameEnabled bool
+	renameFlag    string
 	renameLevel   int
 	processDryRun bool
 )
@@ -129,8 +130,8 @@ func init() {
 	processCmd.Flags().StringVar(&processFormat, "format", "table", "output format (table|human|json)")
 	processCmd.Flags().BoolVar(&processJSON, "json", false, "output results as JSON (shorthand for --format json)")
 	processCmd.Flags().BoolVar(&processQuiet, "quiet", false, "suppress log output to stderr")
-	processCmd.Flags().BoolVar(&renameEnabled, "rename", false, "enable AI-generated file renaming")
-	processCmd.Flags().IntVar(&renameLevel, "rename-level", 0, "rename detail level (0-3)")
+	processCmd.Flags().StringVar(&renameFlag, "rename", "", "rename files using the LLM; optionally set minimum quality threshold 1-5 (e.g. --rename=3); 1=most aggressive, 5=most conservative, default is 2")
+	processCmd.Flags().Lookup("rename").NoOptDefVal = "default"
 	processCmd.Flags().BoolVar(&processDryRun, "dry-run", false, "preview changes without moving files")
 	rootCmd.AddCommand(processCmd)
 }
@@ -142,14 +143,26 @@ func applyRenameFlags(cmd *cobra.Command) {
 	if cmd == nil {
 		return
 	}
+
+	const defaultRenameLevel = 2
+
+	// --rename (with or without a value) enables renaming.
 	if cmd.Flags().Changed("rename") {
-		cfg.Rename = renameEnabled
-	}
-	if cmd.Flags().Changed("rename-level") {
-		cfg.RenameLevel = renameLevel
+		cfg.Rename = true
+		switch renameFlag {
+		case "", "default":
+			cfg.RenameLevel = defaultRenameLevel
+		default:
+			if n, err := strconv.Atoi(renameFlag); err == nil && n >= 0 && n <= 5 {
+				cfg.RenameLevel = n
+			} else {
+				cfg.RenameLevel = defaultRenameLevel
+			}
+		}
 	}
 }
 
+// processCmd handles file processing.
 var processCmd = &cobra.Command{
 	Use:   "process <paths...>",
 	Short: "Classify and apply decisions to files",
