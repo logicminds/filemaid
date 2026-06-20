@@ -2,11 +2,40 @@ package config
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
 )
+
+// Duration is a time.Duration that can be unmarshaled from either a JSON
+// number (nanoseconds) or a JSON string accepted by time.ParseDuration.
+type Duration time.Duration
+
+// UnmarshalJSON supports "120s", "2m", or a nanosecond integer.
+func (d *Duration) UnmarshalJSON(data []byte) error {
+	var s string
+	if err := json.Unmarshal(data, &s); err == nil {
+		parsed, err := time.ParseDuration(s)
+		if err != nil {
+			return fmt.Errorf("invalid request_timeout %q: %w", s, err)
+		}
+		*d = Duration(parsed)
+		return nil
+	}
+	var n int64
+	if err := json.Unmarshal(data, &n); err != nil {
+		return fmt.Errorf("request_timeout must be a duration string or nanosecond integer: %w", err)
+	}
+	*d = Duration(n)
+	return nil
+}
+
+// MarshalJSON emits a human-readable duration string.
+func (d Duration) MarshalJSON() ([]byte, error) {
+	return json.Marshal(time.Duration(d).String())
+}
 
 // Config holds the filemaid configuration.
 type Config struct {
@@ -24,7 +53,7 @@ type Config struct {
 	Comments            bool                     `json:"comments"`
 	SubcategorizeImages bool                     `json:"subcategorize_images"`
 	MinAgeHours         int                      `json:"min_age_hours"`
-	RequestTimeout      time.Duration            `json:"request_timeout"`
+	RequestTimeout      Duration                 `json:"request_timeout"`
 	Categories          map[string]string        `json:"categories"`
 	SafeDeletePatterns  []string                 `json:"safe_delete_patterns"`
 	AgeRules            []AgeRule                `json:"age_rules"`
@@ -68,7 +97,7 @@ func Defaults() *Config {
 		Comments:            true,
 		SubcategorizeImages: true,
 		MinAgeHours:         0,
-		RequestTimeout:      120 * time.Second,
+		RequestTimeout:      Duration(120 * time.Second),
 		Categories: map[string]string{
 			"Screenshots": "~/Documents/Archive/Screenshots",
 			"Documents":   "~/Documents/Archive/Documents",

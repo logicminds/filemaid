@@ -1,11 +1,13 @@
 package config
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestDefaultsMatchPythonReference(t *testing.T) {
@@ -64,6 +66,9 @@ func TestDefaultsMatchPythonReference(t *testing.T) {
 	}
 	if cfg.ReviewCleanup.MaxAgeDays != 30 {
 		t.Errorf("ReviewCleanup.MaxAgeDays = %d, want 30", cfg.ReviewCleanup.MaxAgeDays)
+	}
+	if time.Duration(cfg.RequestTimeout) != 120*time.Second {
+		t.Errorf("RequestTimeout = %v, want 120s", cfg.RequestTimeout)
 	}
 }
 
@@ -295,5 +300,84 @@ func TestLoadPathInvalidJSON(t *testing.T) {
 	}
 	if _, err := LoadPath(path); err == nil {
 		t.Error("expected error for invalid JSON")
+	}
+}
+
+func TestDurationUnmarshalJSON(t *testing.T) {
+	tests := []struct {
+		name    string
+		input   string
+		want    time.Duration
+		wantErr bool
+	}{
+		{"string seconds", `"120s"`, 120 * time.Second, false},
+		{"string minutes", `"2m"`, 2 * time.Minute, false},
+		{"nanoseconds", `120000000000`, 120 * time.Second, false},
+		{"zero string", `"0s"`, 0, false},
+		{"zero number", `0`, 0, false},
+		{"negative string", `"-30s"`, -30 * time.Second, false},
+		{"invalid string", `"not-a-duration"`, 0, true},
+		{"invalid type", `true`, 0, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var d Duration
+			err := json.Unmarshal([]byte(tt.input), &d)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("UnmarshalJSON(%q) error = %v, wantErr %v", tt.input, err, tt.wantErr)
+			}
+			if !tt.wantErr && time.Duration(d) != tt.want {
+				t.Errorf("UnmarshalJSON(%q) = %v, want %v", tt.input, time.Duration(d), tt.want)
+			}
+		})
+	}
+}
+
+func TestDurationMarshalJSON(t *testing.T) {
+	var d Duration = Duration(120 * time.Second)
+	b, err := json.Marshal(d)
+	if err != nil {
+		t.Fatalf("MarshalJSON: %v", err)
+	}
+	if string(b) != `"2m0s"` {
+		t.Errorf("MarshalJSON = %s, want \"2m0s\"", b)
+	}
+}
+
+func TestLoadPathRequestTimeout(t *testing.T) {
+	tests := []struct {
+		name    string
+		user    string
+		want    time.Duration
+		wantErr bool
+	}{
+		{"default", "", 120 * time.Second, false},
+		{"string override", `{"request_timeout": "30s"}`, 30 * time.Second, false},
+		{"numeric override", `{"request_timeout": 30000000000}`, 30 * time.Second, false},
+		{"zero", `{"request_timeout": "0s"}`, 0, false},
+		{"negative", `{"request_timeout": "-10s"}`, -10 * time.Second, false},
+		{"invalid string", `{"request_timeout": "abc"}`, 0, true},
+		{"invalid type", `{"request_timeout": true}`, 0, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			path := filepath.Join(dir, "config.json")
+			if tt.user != "" {
+				if err := os.WriteFile(path, []byte(tt.user), 0640); err != nil {
+					t.Fatalf("write user config: %v", err)
+				}
+			}
+			cfg, err := LoadPath(path)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("LoadPath error = %v, wantErr %v", err, tt.wantErr)
+			}
+			if tt.wantErr {
+				return
+			}
+			if time.Duration(cfg.RequestTimeout) != tt.want {
+				t.Errorf("RequestTimeout = %v, want %v", cfg.RequestTimeout, tt.want)
+			}
+		})
 	}
 }

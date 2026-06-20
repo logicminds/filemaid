@@ -127,7 +127,7 @@ func (c *Client) Classify(ctx context.Context, path string, fileHash string, cfg
 	model := resolvedModel
 
 	tryChat := func(imgs []string) (Decision, error) {
-		resp, err := c.requestChat(ctx, ollamaURL, model, prompt, imgs, categories, cfg.RequestTimeout)
+		resp, err := c.requestChat(ctx, ollamaURL, model, prompt, imgs, categories, time.Duration(cfg.RequestTimeout))
 		if err != nil {
 			return Decision{}, err
 		}
@@ -291,7 +291,7 @@ func (c *Client) Validate(cfg *config.Config) error {
 		}
 	}
 
-	timeout := cfg.RequestTimeout
+	timeout := time.Duration(cfg.RequestTimeout)
 	if timeout <= 0 {
 		timeout = 60 * time.Second
 	}
