@@ -258,7 +258,6 @@ func (f *fakeClassifier) Models() []string {
 	return out
 }
 
-
 func testConfig(tmpDir string) *config.Config {
 	reviewDir := filepath.Join(tmpDir, "review")
 	desktop := filepath.Join(tmpDir, "Desktop")
@@ -269,13 +268,13 @@ func testConfig(tmpDir string) *config.Config {
 		os.MkdirAll(d, 0755)
 	}
 	return &config.Config{
-		Model:               "text-model",
-		ImageModel:          "image-model",
-		TextModel:           "text-model",
-		AllowedDirs:         []string{desktop, downloads, images, documents, reviewDir},
-		ReviewDir:           reviewDir,
-		Tags:                false,
-		SafeDeletePatterns:  []string{},
+		Model:              "text-model",
+		ImageModel:         "image-model",
+		TextModel:          "text-model",
+		AllowedDirs:        []string{desktop, downloads, images, documents, reviewDir},
+		ReviewDir:          reviewDir,
+		Tags:               false,
+		SafeDeletePatterns: []string{},
 		Categories: map[string]string{
 			"Images":    images,
 			"Documents": documents,
