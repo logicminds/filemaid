@@ -24,7 +24,7 @@ jobs:
         run: go test ./...
 
       - name: Build release binary
-        run: go build -ldflags="-s -w" -o filemaid ./cmd/filemaid
+        run: go build -ldflags="-s -w -X github.com/logicminds/filemaid/internal/cli.Version=${{ github.ref_name }} -X github.com/logicminds/filemaid/internal/cli.Commit=${{ github.sha }}" -o filemaid ./cmd/filemaid
 
       - name: Create GitHub Release
         env:
