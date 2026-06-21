@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -35,7 +36,7 @@ func TestScanDirProcessesFiles(t *testing.T) {
 	}
 	t.Cleanup(func() { scanGetFiles = defaultScanGetFiles })
 
-	if _, err := runScanDir(context.Background(), filepath.Join(tmp, "Desktop"), "run-test"); err != nil {
+	if _, err := runScanDir(context.Background(), filepath.Join(tmp, "Desktop"), "run-test", io.Discard, ""); err != nil {
 		t.Fatal(err)
 	}
 
@@ -51,7 +52,7 @@ func TestScanDirRejectsNotAllowed(t *testing.T) {
 	db = state.NewFake()
 
 	buf := captureSlog(t)
-	_, _ = runScanDir(context.Background(), filepath.Join(tmp, "NotAllowed"), "run-test")
+	_, _ = runScanDir(context.Background(), filepath.Join(tmp, "NotAllowed"), "run-test", io.Discard, "")
 
 	if !bytes.Contains(buf.Bytes(), []byte("scan directory not allowed")) {
 		t.Errorf("expected 'scan directory not allowed' log, got %q", buf.String())
@@ -69,7 +70,7 @@ func TestScanDirPermissionError(t *testing.T) {
 	t.Cleanup(func() { scanGetFiles = defaultScanGetFiles })
 
 	buf := captureSlog(t)
-	_, _ = runScanDir(context.Background(), filepath.Join(tmp, "Desktop"), "run-test")
+	_, _ = runScanDir(context.Background(), filepath.Join(tmp, "Desktop"), "run-test", io.Discard, "")
 
 	if !bytes.Contains(buf.Bytes(), []byte("permission denied")) {
 		t.Errorf("expected 'permission denied' log, got %q", buf.String())

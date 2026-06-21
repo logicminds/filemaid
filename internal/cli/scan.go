@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -70,14 +71,18 @@ var scanCmd = &cobra.Command{
 				db = oldDB
 			}()
 		}
+		var out io.Writer = os.Stdout
+		if cmd != nil {
+			out = cmd.OutOrStdout()
+		}
 
 		var allResults []processResult
 		var err error
 		if scanDir != "" {
-			allResults, err = runScanDir(ctx, scanDir, runID)
+			allResults, err = runScanDir(ctx, scanDir, runID, out, format)
 		} else {
 			for _, d := range cfg.WatchDirs {
-				results, runErr := runScanDir(ctx, d, runID)
+				results, runErr := runScanDir(ctx, d, runID, out, format)
 				if runErr != nil {
 					return runErr
 				}
@@ -93,21 +98,26 @@ var scanCmd = &cobra.Command{
 			}
 		}
 		if len(allResults) == 0 {
-			fmt.Println("No files to process.")
+			fmt.Fprintln(out, "No files to process.")
 			return nil
 		}
-		out, err := formatProcessResults(allResults, format)
-		if err != nil {
-			return err
+		if format == "json" {
+			outBytes, err := formatProcessResults(allResults, format)
+			if err != nil {
+				return err
+			}
+			fmt.Fprintln(out, outBytes)
+			return nil
 		}
-		fmt.Println(out)
+		if format == "table" {
+			writeProcessTableFooter(out)
+		}
+		fmt.Fprintln(out, formatSummary(allResults, isTerminal(os.Stdout)))
 		return nil
 	},
 }
 
-// runScanDir scans a single directory for files older than min_age_hours and
-// processes them. It mirrors the Python scan_dir behaviour.
-func runScanDir(ctx context.Context, directory string, runID string) ([]processResult, error) {
+func runScanDir(ctx context.Context, directory string, runID string, w io.Writer, format string) ([]processResult, error) {
 	root, err := filepath.Abs(directory)
 	if err != nil {
 		return nil, fmt.Errorf("resolve scan directory: %w", err)
@@ -153,7 +163,7 @@ func runScanDir(ctx context.Context, directory string, runID string) ([]processR
 		return nil, nil
 	}
 
-	return processPaths(ctx, toProcess, runID)
+	return processPaths(ctx, toProcess, runID, w, format)
 }
 
 // defaultScanGetFiles lists regular files directly inside dir.

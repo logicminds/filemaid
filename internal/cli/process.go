@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -199,7 +200,6 @@ var processCmd = &cobra.Command{
 			ctx = cmd.Context()
 		}
 
-
 		format := processFormat
 		if processJSON {
 			format = "json"
@@ -224,7 +224,11 @@ var processCmd = &cobra.Command{
 		}
 
 		runID := newRunID()
-		results, err := processPaths(ctx, args, runID)
+		var out io.Writer = os.Stdout
+		if cmd != nil {
+			out = cmd.OutOrStdout()
+		}
+		results, err := processPaths(ctx, args, runID, out, format)
 		if err != nil {
 			return err
 		}
@@ -234,14 +238,21 @@ var processCmd = &cobra.Command{
 			}
 		}
 		if len(results) == 0 {
-			fmt.Println("No files processed.")
+			fmt.Fprintln(out, "No files processed.")
 			return nil
 		}
-		out, err := formatProcessResults(results, format)
-		if err != nil {
-			return err
+		if format == "json" {
+			outBytes, err := formatProcessResults(results, format)
+			if err != nil {
+				return err
+			}
+			fmt.Fprintln(out, outBytes)
+			return nil
 		}
-		fmt.Println(out)
+		if format == "table" {
+			writeProcessTableFooter(out)
+		}
+		fmt.Fprintln(out, formatSummary(results, isTerminal(os.Stdout)))
 		return nil
 	},
 }
@@ -417,6 +428,104 @@ func plural(n int) string {
 	return "s"
 }
 
+// processStreamer writes human-readable progress lines for each result as it
+// becomes available. JSON output is batched by the caller, so the streamer
+// ignores the "json" format.
+type processStreamer struct {
+	w             io.Writer
+	format        string
+	mu            sync.Mutex
+	headerPrinted bool
+}
+
+func newProcessStreamer(w io.Writer, format string) *processStreamer {
+	return &processStreamer{w: w, format: format}
+}
+
+func (s *processStreamer) writeResult(r processResult) {
+	if s == nil || s.w == nil || s.format == "" || s.format == "json" {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	useColor := isTerminal(os.Stdout)
+	switch s.format {
+	case "human":
+		s.writeHumanResult(r, useColor)
+	default:
+		s.writeTableResult(r, useColor)
+	}
+}
+
+func (s *processStreamer) writeHumanResult(r processResult, useColor bool) {
+	name := filepath.Base(r.Path)
+	status := statusSymbol(r.OK, r.Error, useColor)
+	fmt.Fprintf(s.w, "%s  %s\n", status, colorize(name, colorBold, useColor))
+	if r.Category != "" {
+		fmt.Fprintf(s.w, "   Category: %s\n", r.Category)
+	}
+	if len(r.Tags) > 0 {
+		fmt.Fprintf(s.w, "   Tags:     %s\n", strings.Join(r.Tags, ", "))
+	}
+	if r.Action != "" {
+		fmt.Fprintf(s.w, "   Action:   %s\n", r.Action)
+	}
+	nameChange := formatNameChange(r)
+	if nameChange != "-" {
+		fmt.Fprintf(s.w, "   Name:     %s\n", nameChange)
+	}
+	if r.Result != "" {
+		fmt.Fprintf(s.w, "   Result:   %s\n", collapseHome(r.Result))
+	}
+	if r.Error != "" {
+		fmt.Fprintf(s.w, "%s\n", colorize(fmt.Sprintf("   Error:    %s", r.Error), colorRed, useColor))
+	}
+}
+
+func (s *processStreamer) writeTableResult(r processResult, useColor bool) {
+	headers := []string{"File", "Category", "Tags", "Action", "Name", "Result", "Status"}
+	statusWidth := max(len("Status"), max(len(statusSymbol(true, "", useColor)), max(len(statusSymbol(false, "", useColor)), len(statusSymbol(false, "err", useColor)))))
+	widths := []int{maxFileLen, maxCatLen, maxTagsLen, maxActionLen, maxNameLen, maxResultLen, statusWidth}
+
+	if !s.headerPrinted {
+		sep := "+" + strings.Join(mapSlice(widths, func(w int) string { return strings.Repeat("-", w+2) }), "+") + "+"
+		fmt.Fprintln(s.w, sep)
+		fmt.Fprintln(s.w, "| "+strings.Join(mapSliceIndex(headers, widths, func(h string, w int) string { return padRight(h, w) }), " | ")+" |")
+		fmt.Fprintln(s.w, sep)
+		s.headerPrinted = true
+	}
+
+	status := statusSymbol(r.OK, r.Error, useColor)
+	action := r.Action
+	if action == "" {
+		action = "-"
+	}
+	category := r.Category
+	if category == "" {
+		category = "-"
+	}
+	row := []string{
+		truncatePath(collapseHome(r.Path), maxFileLen),
+		truncateTags([]string{category}, maxCatLen),
+		truncateTags(r.Tags, maxTagsLen),
+		truncateTags([]string{action}, maxActionLen),
+		truncateTags([]string{formatNameChange(r)}, maxNameLen),
+		truncatePath(collapseHome(r.Result), maxResultLen),
+		status,
+	}
+	fmt.Fprintln(s.w, "| "+strings.Join(mapSliceIndex(row, widths, func(cell string, w int) string { return padRight(cell, w) }), " | ")+" |")
+}
+
+// writeProcessTableFooter prints the closing separator for a streamed table.
+func writeProcessTableFooter(w io.Writer) {
+	useColor := isTerminal(os.Stdout)
+	statusWidth := max(len("Status"), max(len(statusSymbol(true, "", useColor)), max(len(statusSymbol(false, "", useColor)), len(statusSymbol(false, "err", useColor)))))
+	widths := []int{maxFileLen, maxCatLen, maxTagsLen, maxActionLen, maxNameLen, maxResultLen, statusWidth}
+	sep := "+" + strings.Join(mapSlice(widths, func(w int) string { return strings.Repeat("-", w+2) }), "+") + "+"
+	fmt.Fprintln(w, sep)
+}
+
 // dirLockMap provides a mutex for each destination directory so independent
 // apply operations can run concurrently while operations targeting the same
 // directory are serialized.
@@ -446,7 +555,9 @@ func (d *dirLockMap) lock(dir string) func() {
 // Python process_paths behaviour: skip non-existent, non-file, hidden, and
 // out-of-allowed files; honour age rules; detect duplicates; coerce unsafe
 // deletes to review; log the result; and return a displayable result per file.
-func processPaths(ctx context.Context, paths []string, runID string) ([]processResult, error) {
+func processPaths(ctx context.Context, paths []string, runID string, w io.Writer, format string) ([]processResult, error) {
+	streamer := newProcessStreamer(w, format)
+
 	// Preprocess in two stages so that skipping and duplicate detection remain
 	// deterministic while file hashing runs concurrently. Skipped paths still
 	// produce a result so the final table is complete.
@@ -462,6 +573,7 @@ func processPaths(ctx context.Context, paths []string, runID string) ([]processR
 		src, err := filepath.Abs(raw)
 		if err != nil {
 			results[i] = skipResult(raw, fmt.Sprintf("path normalization failed: %v", err))
+			streamer.writeResult(results[i])
 			slog.Warn("path normalization failed", "path", raw, "error", err)
 			continue
 		}
@@ -469,21 +581,25 @@ func processPaths(ctx context.Context, paths []string, runID string) ([]processR
 		info, err := os.Stat(src)
 		if err != nil {
 			results[i] = skipResult(src, "path does not exist")
+			streamer.writeResult(results[i])
 			slog.Warn("path does not exist", "path", raw)
 			continue
 		}
 		if !info.Mode().IsRegular() {
 			results[i] = skipResult(src, "not a regular file")
+			streamer.writeResult(results[i])
 			slog.Warn("not a file", "path", src)
 			continue
 		}
 		if isHidden(src) {
 			results[i] = skipResult(src, "hidden file")
+			streamer.writeResult(results[i])
 			slog.Info("skipping hidden file", "path", src)
 			continue
 		}
 		if len(cfg.AllowedDirs) > 0 && !actions.WithinAllowed(src, cfg.AllowedDirs) {
 			results[i] = skipResult(src, "outside allowed dirs")
+			streamer.writeResult(results[i])
 			slog.Warn("skipping file outside allowed dirs", "path", src)
 			continue
 		}
@@ -524,6 +640,7 @@ func processPaths(ctx context.Context, paths []string, runID string) ([]processR
 		src := c.src
 		if hashErrs[i] != nil {
 			results[i] = skipResult(src, fmt.Sprintf("hash failed: %v", hashErrs[i]))
+			streamer.writeResult(results[i])
 			slog.Warn("hash failed", "path", src, "error", hashErrs[i])
 			continue
 		}
@@ -547,6 +664,7 @@ func processPaths(ctx context.Context, paths []string, runID string) ([]processR
 			if cached, ok, err := db.FindDecisionByHash(fileHash); err == nil && ok {
 				decision := coerceDuplicateDecision(cached, src, cfg, isDuplicate)
 				results[i] = applyFile(src, fileHash, isDuplicate, decision, llm.Metrics{}, runID)
+				streamer.writeResult(results[i])
 				continue
 			}
 		}
@@ -563,6 +681,7 @@ func processPaths(ctx context.Context, paths []string, runID string) ([]processR
 			}
 			decision = coerceDuplicateDecision(decision, src, cfg, isDuplicate)
 			results[i] = applyFile(src, fileHash, isDuplicate, decision, llm.Metrics{}, runID)
+			streamer.writeResult(results[i])
 			continue
 		}
 
@@ -620,6 +739,7 @@ func processPaths(ctx context.Context, paths []string, runID string) ([]processR
 				defer func() { <-applySem }()
 
 				results[item.pos] = applyFile(item.src, item.fileHash, item.isDuplicate, decision, metrics, runID)
+				streamer.writeResult(results[item.pos])
 			}(item, &groupCfg)
 		}
 	}

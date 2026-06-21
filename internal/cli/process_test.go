@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -100,7 +101,7 @@ func TestProcessPathsSkipsNonexistent(t *testing.T) {
 	processFS = actions.NewOSFS()
 
 	buf := captureSlog(t)
-	processPaths(context.Background(), []string{filepath.Join(t.TempDir(), "nope.txt")}, "run-test")
+	processPaths(context.Background(), []string{filepath.Join(t.TempDir(), "nope.txt")}, "run-test", io.Discard, "")
 
 	if !bytes.Contains(buf.Bytes(), []byte("path does not exist")) {
 		t.Errorf("expected 'path does not exist' warning, got %q", buf.String())
@@ -118,7 +119,7 @@ func TestProcessPathsSkipsHidden(t *testing.T) {
 	os.WriteFile(hidden, []byte("secret"), 0644)
 
 	buf := captureSlog(t)
-	processPaths(context.Background(), []string{hidden}, "run-test")
+	processPaths(context.Background(), []string{hidden}, "run-test", io.Discard, "")
 
 	if !bytes.Contains(buf.Bytes(), []byte("skipping hidden file")) {
 		t.Errorf("expected 'skipping hidden file' log, got %q", buf.String())
@@ -135,7 +136,7 @@ func TestProcessPathsSkipsOutsideAllowed(t *testing.T) {
 	os.WriteFile(outside, []byte("outside"), 0644)
 
 	buf := captureSlog(t)
-	processPaths(context.Background(), []string{outside}, "run-test")
+	processPaths(context.Background(), []string{outside}, "run-test", io.Discard, "")
 
 	if !bytes.Contains(buf.Bytes(), []byte("outside allowed dirs")) {
 		t.Errorf("expected 'outside allowed dirs' warning, got %q", buf.String())
@@ -158,7 +159,7 @@ func TestProcessPathsClassifiesAndApplies(t *testing.T) {
 	os.MkdirAll(filepath.Dir(src), 0755)
 	os.WriteFile(src, []byte("hello"), 0644)
 
-	if _, err := processPaths(context.Background(), []string{src}, "run-test"); err != nil {
+	if _, err := processPaths(context.Background(), []string{src}, "run-test", io.Discard, ""); err != nil {
 		t.Fatal(err)
 	}
 
@@ -191,7 +192,7 @@ func TestProcessPathsDuplicateForcesReview(t *testing.T) {
 	os.WriteFile(src1, []byte("same"), 0644)
 	os.WriteFile(src2, []byte("same"), 0644)
 
-	if _, err := processPaths(context.Background(), []string{src1, src2}, "run-test"); err != nil {
+	if _, err := processPaths(context.Background(), []string{src1, src2}, "run-test", io.Discard, ""); err != nil {
 		t.Fatal(err)
 	}
 
@@ -311,7 +312,7 @@ func TestProcessPathsFallsBackToReviewOnClassifyError(t *testing.T) {
 	os.MkdirAll(filepath.Dir(src), 0755)
 	os.WriteFile(src, []byte("hello"), 0644)
 
-	if _, err := processPaths(context.Background(), []string{src}, "run-test"); err != nil {
+	if _, err := processPaths(context.Background(), []string{src}, "run-test", io.Discard, ""); err != nil {
 		t.Fatal(err)
 	}
 
@@ -329,7 +330,9 @@ func TestProcessPathsLogsApplyError(t *testing.T) {
 	cfg = testConfig(tmp)
 	db = state.NewFake()
 	classifier = &fakeClassifier{decision: llm.Decision{Category: "Documents", Action: "move", Reason: "text"}}
-	applyDecision = func(llm.Decision, string, string, *config.Config, state.Repo, bool, actions.FS, string, llm.Metrics, bool) (string, error) { return "", errors.New("move failed") }
+	applyDecision = func(llm.Decision, string, string, *config.Config, state.Repo, bool, actions.FS, string, llm.Metrics, bool) (string, error) {
+		return "", errors.New("move failed")
+	}
 	t.Cleanup(func() { applyDecision = actions.Apply })
 
 	src := filepath.Join(tmp, "Desktop", "note.txt")
@@ -337,7 +340,7 @@ func TestProcessPathsLogsApplyError(t *testing.T) {
 	os.WriteFile(src, []byte("hello"), 0644)
 
 	buf := captureSlog(t)
-	processPaths(context.Background(), []string{src}, "run-test")
+	processPaths(context.Background(), []string{src}, "run-test", io.Discard, "")
 
 	if !bytes.Contains(buf.Bytes(), []byte("apply failed")) {
 		t.Errorf("expected 'apply failed' log, got %q", buf.String())
@@ -364,7 +367,7 @@ func TestProcessPathsResultsInInputOrder(t *testing.T) {
 		paths[i] = p
 	}
 
-	results, err := processPaths(context.Background(), paths, "run-test")
+	results, err := processPaths(context.Background(), paths, "run-test", io.Discard, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -438,7 +441,7 @@ func TestProcessPathsProcessesConcurrently(t *testing.T) {
 
 	done := make(chan []processResult)
 	go func() {
-		res, err := processPaths(context.Background(), paths, "run-test")
+		res, err := processPaths(context.Background(), paths, "run-test", io.Discard, "")
 		if err != nil {
 			t.Error(err)
 		}
@@ -494,7 +497,7 @@ func TestProcessPathsUsesConfiguredWorkers(t *testing.T) {
 
 	done := make(chan []processResult)
 	go func() {
-		res, err := processPaths(context.Background(), paths, "run-test")
+		res, err := processPaths(context.Background(), paths, "run-test", io.Discard, "")
 		if err != nil {
 			t.Error(err)
 		}
@@ -611,7 +614,7 @@ func TestProcessPathsAppliesConcurrentlyForDifferentDirs(t *testing.T) {
 
 	done := make(chan []processResult)
 	go func() {
-		res, err := processPaths(context.Background(), paths, "run-test")
+		res, err := processPaths(context.Background(), paths, "run-test", io.Discard, "")
 		if err != nil {
 			t.Error(err)
 		}
@@ -668,7 +671,7 @@ func TestProcessPathsAppliesSeriallyForSameDir(t *testing.T) {
 
 	done := make(chan []processResult)
 	go func() {
-		res, err := processPaths(context.Background(), paths, "run-test")
+		res, err := processPaths(context.Background(), paths, "run-test", io.Discard, "")
 		if err != nil {
 			t.Error(err)
 		}
@@ -823,7 +826,7 @@ func TestProcessPathsIncludesSkippedResults(t *testing.T) {
 	os.WriteFile(valid, []byte("hello"), 0644)
 	missing := filepath.Join(tmp, "Desktop", "gone.txt")
 
-	results, err := processPaths(context.Background(), []string{valid, missing}, "run-test")
+	results, err := processPaths(context.Background(), []string{valid, missing}, "run-test", io.Discard, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -975,7 +978,7 @@ func TestProcessPathsGroupsByModel(t *testing.T) {
 		os.WriteFile(f, []byte(f), 0644)
 	}
 
-	if _, err := processPaths(context.Background(), files, "run-test"); err != nil {
+	if _, err := processPaths(context.Background(), files, "run-test", io.Discard, ""); err != nil {
 		t.Fatalf("processPaths failed: %v", err)
 	}
 
@@ -1028,7 +1031,7 @@ func TestProcessPathsFallsBackToModel(t *testing.T) {
 		os.WriteFile(f, []byte(f), 0644)
 	}
 
-	if _, err := processPaths(context.Background(), files, "run-test"); err != nil {
+	if _, err := processPaths(context.Background(), files, "run-test", io.Discard, ""); err != nil {
 		t.Fatalf("processPaths failed: %v", err)
 	}
 
@@ -1064,7 +1067,7 @@ func TestProcessPathsUsesCachedDecisionWithoutClassifying(t *testing.T) {
 		Reason:   "from cache",
 	})
 
-	if _, err := processPaths(context.Background(), []string{src}, "run-test"); err != nil {
+	if _, err := processPaths(context.Background(), []string{src}, "run-test", io.Discard, ""); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1102,7 +1105,7 @@ func TestProcessPathsDuplicateSkipsClassification(t *testing.T) {
 	os.WriteFile(src1, []byte("same"), 0644)
 	os.WriteFile(src2, []byte("same"), 0644)
 
-	if _, err := processPaths(context.Background(), []string{src1, src2}, "run-test"); err != nil {
+	if _, err := processPaths(context.Background(), []string{src1, src2}, "run-test", io.Discard, ""); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1153,7 +1156,7 @@ func TestProcessPathsDuplicateWithSafeDeleteStillClassifies(t *testing.T) {
 	os.WriteFile(src1, []byte("same"), 0644)
 	os.WriteFile(src2, []byte("same"), 0644)
 
-	if _, err := processPaths(context.Background(), []string{src1, src2}, "run-test"); err != nil {
+	if _, err := processPaths(context.Background(), []string{src1, src2}, "run-test", io.Discard, ""); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1211,7 +1214,7 @@ func TestProcessPathsCachedDecisionCoercedForDuplicate(t *testing.T) {
 		Reason:   "from cache",
 	})
 
-	if _, err := processPaths(context.Background(), []string{src1, src2}, "run-test"); err != nil {
+	if _, err := processPaths(context.Background(), []string{src1, src2}, "run-test", io.Discard, ""); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1412,7 +1415,7 @@ func TestProcessPathsHashesConcurrently(t *testing.T) {
 
 	done := make(chan []processResult)
 	go func() {
-		res, err := processPaths(context.Background(), paths, "run-test")
+		res, err := processPaths(context.Background(), paths, "run-test", io.Discard, "")
 		if err != nil {
 			t.Error(err)
 		}
