@@ -4,6 +4,8 @@ All notable changes to filemaid are documented in this file.
 
 ## Unreleased
 
+## [0.5.1]
+
 ### Added
 
 * **Install script** — `install.sh` downloads the latest Apple Silicon release from GitHub, verifies its SHA-256 checksum, and installs it to `~/.local/bin/filemaid`. Unsupported operating systems and architectures are rejected with a clear error.
@@ -88,6 +90,7 @@ All notable changes to filemaid are documented in this file.
 - Initial Go rewrite of filemaid.
 - Local Ollama classification, file moves, Finder tags, review queue, and dev-cache cleaners.
 [0.5.0]: https://github.com/logicminds/filemaid/releases/tag/v0.5.0
+[0.5.1]: https://github.com/logicminds/filemaid/releases/tag/v0.5.1
 [0.4.0]: https://github.com/logicminds/filemaid/releases/tag/v0.4.0
 [0.3.0]: https://github.com/logicminds/filemaid/releases/tag/v0.3.0
 [0.2.0]: https://github.com/logicminds/filemaid/releases/tag/v0.2.0
