@@ -4,6 +4,8 @@ All notable changes to filemaid are documented in this file.
 
 ## Unreleased
 
+## [0.5.0]
+
 ### Added
 
 - **Filemaid hub and Smart Folders** — `filemaid process` and `filemaid scan` now rebuild a `~/Documents/Filemaid` hub after each run. The hub contains:
@@ -76,8 +78,7 @@ All notable changes to filemaid are documented in this file.
 
 - Initial Go rewrite of filemaid.
 - Local Ollama classification, file moves, Finder tags, review queue, and dev-cache cleaners.
-- Single self-contained Go binary with embedded config and Modelfiles.
-
+[0.5.0]: https://github.com/logicminds/filemaid/releases/tag/v0.5.0
 [0.4.0]: https://github.com/logicminds/filemaid/releases/tag/v0.4.0
 [0.3.0]: https://github.com/logicminds/filemaid/releases/tag/v0.3.0
 [0.2.0]: https://github.com/logicminds/filemaid/releases/tag/v0.2.0
