@@ -76,7 +76,7 @@ type Decision struct {
 | Dry-run cleaners | `~/.local/bin/filemaid cleanup --dry-run` |
 | Run cleaners now | `~/.local/bin/filemaid cleanup` |
 | View/approve review queue | `~/.local/bin/filemaid review` or `~/.local/bin/filemaid review --open` |
-| Process with smart rename | `~/.local/bin/filemaid process --rename --rename-level 3 <paths>` |
+| Process with smart rename | `~/.local/bin/filemaid process --rename=3 <paths>` |
 | Preview renames (dry run) | `~/.local/bin/filemaid process --dry-run <paths>` |
 | Scan with rename preview | `~/.local/bin/filemaid scan --dry-run` |
 | Tail logs | `~/.local/bin/filemaid logs --tail 50` |

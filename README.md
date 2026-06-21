@@ -9,6 +9,8 @@ A local, AI-powered file organizer for macOS. It watches your `Desktop` and `Dow
 > **⚠️ Experimental:** This project is under active development and may not work reliably in all environments. File movements, classifications, and cleanups can have side effects. Please review the code before running it on important data. Bug reports, issues, and pull requests are welcome to improve behavior.
 
 > **Feedback:** If something breaks or behaves unexpectedly, [file an issue](https://github.com/logicminds/filemaid/issues) or [open a pull request](https://github.com/logicminds/filemaid/pulls).
+>
+> **Changelog:** See [CHANGELOG.md](CHANGELOG.md) for a version-by-version summary of new features and breaking changes.
 
 ## Features
 
@@ -17,6 +19,7 @@ A local, AI-powered file organizer for macOS. It watches your `Desktop` and `Dow
 - **Review-before-delete** — anything uncertain goes to `~/.filemaid/review/`; deletions only happen for explicitly safe patterns or duplicates.
 - **Dev cache cleanup** — scheduled cleanup for Docker, npm, cargo, pip, Homebrew, and Xcode.
 - **Smart rename** — optionally renames files based on LLM-suggested names when the suggested name quality meets your threshold, with duplicate and near-duplicate detection.
+- **Smart Folders + Finder hub** — automatically builds a `~/Documents/Filemaid` hub with per-category Smart Folders, Archive/Review aliases, and a Finder sidebar pin.
 - **Private & offline** — no cloud services; everything runs locally via Ollama.
 - **Single Go binary** — one self-contained binary; only Cobra is used for the CLI.
 
@@ -92,6 +95,7 @@ After setup you will have:
 - `~/.config/filemaid/config.json` — user configuration
 - `~/.local/share/filemaid/` — logs and SQLite database
 - `~/.filemaid/review/` — quarantine folder
+- `~/Documents/Filemaid/` — Finder hub with Smart Folders, aliases, and sidebar pin (when `smart_folders` is enabled)
 - `~/Library/LaunchAgents/biz.logicminds.filemaid.*.plist` — background agents (only when `setup --agents` is used)
 - Custom Ollama models (`filemaid-gemma4-26b`, `filemaid-gemma4-12b`, `filemaid-metadata`) — created automatically if Ollama is installed
 
@@ -100,11 +104,11 @@ For instant per-file processing without background agents, use the Shortcuts fol
 ## Usage
 
 ```zsh
-# Process files manually (table output, auto-quiet in a terminal)
+# Process files manually (human-readable list output is default)
 ./bin/filemaid process ~/Desktop/Screenshot*.png ~/Downloads/receipt.pdf
 
-# Process files with a more readable list format
-./bin/filemaid process --format human ~/Desktop/Screenshot*.png
+# Process files as a table
+./bin/filemaid process --format table ~/Desktop/Screenshot*.png
 
 # Get process results as JSON
 ./bin/filemaid process --json ~/Desktop/Screenshot*.png
@@ -115,8 +119,17 @@ For instant per-file processing without background agents, use the Shortcuts fol
 # Scan watch directories
 ./bin/filemaid scan
 
-# Process with smart rename enabled for this run
-./bin/filemaid process --rename --rename-level 3 ~/Desktop/*.pdf
+# Scan a single directory
+./bin/filemaid scan --dir ~/Downloads
+
+# Process with smart rename enabled for this run (uses rename_level from config)
+./bin/filemaid process --rename ~/Desktop/*.pdf
+
+# Rename with an inline quality threshold (1=most aggressive, 5=most conservative)
+./bin/filemaid process --rename=3 ~/Desktop/*.pdf
+
+# Force processing even if a file looks like a duplicate or similar to history
+./bin/filemaid process --force ~/Desktop/*.png
 
 # Preview renames without moving files
 ./bin/filemaid process --dry-run ~/Desktop/*.png
@@ -141,6 +154,19 @@ For instant per-file processing without background agents, use the Shortcuts fol
 
 # Open the review queue in Finder
 ./bin/filemaid review --open
+
+# Approve or reject a review item by its relative path
+./bin/filemaid review --approve "Screenshots/old-screenshot.png"
+./bin/filemaid review --reject "Documents/unwanted-receipt.pdf"
+
+# Show recent processing history
+./bin/filemaid history
+
+# Show the last run with a count summary
+./bin/filemaid history --last
+
+# Regenerate the Filemaid hub (Smart Folders, aliases, sidebar pin)
+./bin/filemaid smart-folders
 
 # Tail logs
 ./bin/filemaid logs --tail 50
@@ -213,6 +239,25 @@ To add a new category, add it to the `categories` map in `~/.config/filemaid/con
 
 The next time filemaid runs, the model may classify matching files into `~/Documents/Archive/Presentations`.
 
+## Filemaid Hub and Smart Folders
+
+When `smart_folders` is enabled (the default), filemaid builds a Finder hub at `~/Documents/Filemaid` every time files are processed or scanned. The hub contains:
+
+- **Smart Folders** — one `.savedSearch` per configured category and per unique Finder tag filemaid has ever applied. These are live Spotlight searches scoped to files tagged `filemaid`.
+- **Archive alias** — a Finder alias pointing to the root of your categorized archive.
+- **Review alias** — a Finder alias pointing to `~/.filemaid/review`.
+- **Finder sidebar pin** — the hub folder is added to Finder's Favorites for quick access.
+
+The hub is recreated automatically after each `process` and `scan` run. To regenerate it manually:
+
+```zsh
+filemaid smart-folders
+```
+
+Smart Folders rely on Spotlight indexing. If they appear empty, see the [FAQ](FAQ.md) for troubleshooting steps.
+
+To disable the hub, set `smart_folders` to `false` in `~/.config/filemaid/config.json`. To change the hub location, edit `smart_folders_dir`.
+
 ## Configuration
 
 `filemaid setup` runs an interactive interview that asks for watch directories, archive location, Finder tags, dev cleaners, review-queue retention, and safe-delete patterns. Press `Enter` at each prompt to accept the default. To skip the interview and use the shipped defaults, run:
@@ -229,14 +274,21 @@ The generated configuration is written to `~/.config/filemaid/config.json` and c
 {
   "ollama_url": "http://localhost:11434",
   "model": "filemaid-gemma4-26b",
+  "image_model": "filemaid-gemma4-26b",
+  "text_model": "filemaid-metadata",
   "watch_dirs": ["~/Desktop", "~/Downloads"],
   "allowed_dirs": ["~/Desktop", "~/Downloads", "~/Documents/Archive", "~/.filemaid/review"],
   "allowed_cleaners": ["docker", "npm", "cargo", "pip", "brew", "xcode", "review"],
   "review_dir": "~/.filemaid/review",
+  "log_path": "~/.local/share/filemaid/filemaid.log",
+  "db_path": "~/.local/share/filemaid/filemaid.db",
   "tags": true,
   "comments": true,
   "subcategorize_images": true,
+  "smart_folders": true,
+  "smart_folders_dir": "~/Documents/Filemaid",
   "min_age_hours": 0,
+  "request_timeout": "120s",
   "categories": {
     "Screenshots": "~/Documents/Archive/Screenshots",
     "Documents": "~/Documents/Archive/Documents",
@@ -288,7 +340,9 @@ The generated configuration is written to `~/.config/filemaid/config.json` and c
 | Key | Purpose |
 |-----|---------|
 | `ollama_url` | URL of the local Ollama server. |
-| `model` | Ollama model tag. Non-vision models fall back to metadata-only image classification. |
+| `model` | Default Ollama model tag. Used for all files unless `image_model` or `text_model` is set. |
+| `image_model` | Model used for image files. Falls back to `model` when empty. |
+| `text_model` | Model used for non-image files. Falls back to `model` when empty. |
 | `watch_dirs` | Directories scanned by `filemaid scan`. |
 | `allowed_dirs` | Files outside these directories are ignored; also gates destination paths. |
 | `allowed_cleaners` | Which dev cleaners may run. Must include `"review"` to enable review-queue cleanup. |
@@ -298,7 +352,10 @@ The generated configuration is written to `~/.config/filemaid/config.json` and c
 | `tags` | Whether to apply Finder tags to organized files. |
 | `comments` | Whether to write the classification reason as a Finder comment. |
 | `subcategorize_images` | When `true`, images and screenshots receive a subject/app subcategory that is also added as a Finder tag. |
+| `smart_folders` | When `true`, build the Filemaid hub with Smart Folders, aliases, and sidebar pin. |
+| `smart_folders_dir` | Directory for the Filemaid hub. |
 | `min_age_hours` | Minimum file age before processing (0 = process immediately). |
+| `request_timeout` | Per-request timeout for Ollama calls (e.g. `120s`, `2m`). |
 | `categories` | Destination folders for each classification. The model may only return categories defined here. |
 | `safe_delete_patterns` | Glob patterns for files allowed to be deleted without review. |
 | `age_rules` | Patterns + age that force a specific action, e.g. old `.dmg` installers become `review`. |
@@ -321,6 +378,16 @@ Changes take effect the next time `filemaid process`, `filemaid scan`, or `filem
 ## Rename
 
 When `rename` is enabled, filemaid asks the LLM to suggest a better filename and rate the quality of that suggestion from 1 (weak) to 5 (excellent). `rename_level` is the minimum quality threshold the suggestion must meet before it is applied; 1 is the most aggressive (renames even on weak suggestions) and 5 is the most conservative (only excellent suggestions). If the suggested name's rating is at least `rename_level`, the file is renamed while preserving its extension.
+
+Enable renaming for a single run with `--rename`. With no value it uses `rename_level` from config; pass a number inline to override the threshold for that run:
+
+```zsh
+# Use config rename_level
+./bin/filemaid process --rename ~/Desktop/*.pdf
+
+# Override threshold for this run only
+./bin/filemaid process --rename=3 ~/Desktop/*.pdf
+```
 
 Suggested names are sanitized: characters matching `rename_invalid_chars` are stripped, the length is clamped between `rename_min_length` and `rename_max_length`, and collisions are resolved with a counter suffix (e.g., `document-2.pdf`).
 
@@ -376,16 +443,21 @@ filemaid process <paths>
        -> internal/llm.Classify()  → Decision
        -> internal/actions.Apply()
        -> internal/state.Record()
+       -> internal/hub.Build()     → Smart Folders, aliases, sidebar pin
 ```
 
-- `internal/cli/` — Cobra root command and subcommands (`process`, `scan`, `cleanup`, `review`, `logs`, `config`, `setup`, `uninstall`).
+- `internal/cli/` — Cobra root command and subcommands (`process`, `scan`, `cleanup`, `review`, `history`, `logs`, `config`, `setup`, `smart-folders`, `uninstall`).
 - `internal/llm/` — Ollama classifier and `Decision` value object.
 - `internal/actions/` — Applies decisions: whitelist, moves, tags, trash, review.
-- `internal/state/` — SQLite history and duplicate detection.
+- `internal/state/` — SQLite history, duplicate detection, and cached decisions.
 - `internal/config/` — Config loading with defaults and `~` expansion.
+- `internal/smartfolder/` — macOS `.savedSearch` (Smart Folder) generation.
+- `internal/hub/` — Builds the Filemaid hub: Smart Folders, archive/review aliases, and Finder sidebar pin.
 - `internal/cleaners/` — Plugin registry for dev-artifact cleanup.
 - `internal/setup/` — Installation and uninstallation of binary, config, and launchd agents.
 - `cmd/filemaid/main.go` — CLI entry point.
+
+Recent performance improvements cache decisions by file hash and skip LLM classification for duplicates that cannot be safely deleted, so already-seen files are applied instantly.
 
 ## Scheduling
 
@@ -408,7 +480,7 @@ Use `--no-scan` with `--agents` to install only the cleanup agent. If you do not
 filemaid uninstall
 ```
 
-This removes the LaunchAgents and the `~/.local/bin/filemaid` binary. It does not remove your config, logs, database, or review queue.
+This removes the LaunchAgents and the `~/.local/bin/filemaid` binary. It does not remove your config, logs, database, review queue, or the Filemaid hub in `~/Documents/Filemaid`.
 
 ## Troubleshooting
 

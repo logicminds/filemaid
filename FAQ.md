@@ -4,7 +4,7 @@
 
 ### What is filemaid?
 
-filemaid is a local, macOS-only file organizer. It classifies files dropped on `~/Desktop` or in `~/Downloads` using a local Ollama LLM, moves them into categorized archive folders, applies Finder tags, and quarantines uncertain items for review.
+filemaid is a local, macOS-only file organizer. It classifies files dropped on `~/Desktop` or in `~/Downloads` using a local Ollama LLM, moves them into categorized archive folders, applies Finder tags, writes the classification reason as a Finder comment, and quarantines uncertain items for review. It also builds a `~/Documents/Filemaid` hub with Smart Folders, Archive/Review aliases, and a Finder sidebar pin, and cleans up stale development artifacts on a schedule.
 
 ## Finder Tags and Comments
 
@@ -73,6 +73,22 @@ Then regenerate Smart Folders:
 filemaid smart-folders
 ```
 
+### Where is the Filemaid hub?
+
+The hub is created at `~/Documents/Filemaid` by default. You can change the location with `smart_folders_dir` in `~/.config/filemaid/config.json`. The hub contains:
+
+- One Smart Folder per configured category and per unique Finder tag.
+- Finder aliases named `Archive` and `Review`.
+- A pinned favorite in Finder's sidebar (added on first build).
+
+To regenerate the hub manually:
+
+```bash
+filemaid smart-folders
+```
+
+To remove the sidebar pin, open Finder → Settings → Sidebar and uncheck `Filemaid`.
+
 ## Processing and Scanning
 
 ### How do I process files manually?
@@ -81,12 +97,28 @@ filemaid smart-folders
 ~/.local/bin/filemaid process ~/Desktop/foo.png ~/Downloads/bar.pdf
 ```
 
+The default output is a human-readable list. Use `--format table` or `--json` for other formats.
+
 ### How do I run a dry run?
 
 ```bash
 ~/.local/bin/filemaid process --dry-run <paths>
 ~/.local/bin/filemaid scan --dry-run
 ```
+
+### How do I enable smart rename for one run?
+
+```bash
+# Use rename_level from config
+~/.local/bin/filemaid process --rename <paths>
+
+# Override the threshold for this run (1=most aggressive, 5=most conservative)
+~/.local/bin/filemaid process --rename=3 <paths>
+```
+
+### What does --force do?
+
+`--force` tells filemaid to process a file even if it looks like a duplicate or is similar to something already in history. Duplicates and similar files are normally routed to review to avoid accidental overwrites or data loss.
 
 ### Why did nothing happen during a scan?
 
