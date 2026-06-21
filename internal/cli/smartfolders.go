@@ -5,7 +5,7 @@ import (
 	"os"
 	"sort"
 
-	"github.com/logicminds/filemaid/internal/smartfolder"
+	"github.com/logicminds/filemaid/internal/hub"
 
 	"github.com/spf13/cobra"
 )
@@ -16,7 +16,7 @@ func init() {
 
 var smartFoldersCmd = &cobra.Command{
 	Use:   "smart-folders",
-	Short: "Regenerate macOS Smart Folders",
+	Short: "Regenerate the Filemaid hub (Smart Folders, aliases, and sidebar)",
 	RunE: func(cmd *cobra.Command, args []string) error {
 		if !cfg.SmartFolders {
 			return fmt.Errorf("smart folders are disabled in configuration")
@@ -25,9 +25,16 @@ var smartFoldersCmd = &cobra.Command{
 	},
 }
 
-// regenerateSmartFolders rebuilds the configured Smart Folders directory from
-// the current categories, tags, and allowed scopes. It is a no-op when Smart
-// Folders are disabled.
+// hubBuilder builds the Filemaid hub. It is overridable in tests so CLI
+// commands can verify smart folder generation without touching the Finder
+// sidebar or creating real aliases.
+var hubBuilder interface {
+	Build(hub.Options) error
+} = hub.New()
+
+// regenerateSmartFolders rebuilds the Filemaid hub, including Smart Folders,
+// archive/review aliases, and the Finder sidebar entry. It is a no-op when
+// Smart Folders are disabled.
 func regenerateSmartFolders() error {
 	if !cfg.SmartFolders {
 		return nil
@@ -53,5 +60,12 @@ func regenerateSmartFolders() error {
 		scopes = []string{home}
 	}
 
-	return smartfolder.Build(categories, tags, scopes, cfg.SmartFoldersDir)
+	return hubBuilder.Build(hub.Options{
+		HubDir:     cfg.SmartFoldersDir,
+		ArchiveDir: hub.ArchiveRoot(cfg.Categories),
+		ReviewDir:  cfg.ReviewDir,
+		Categories: categories,
+		Tags:       tags,
+		Scopes:     scopes,
+	})
 }

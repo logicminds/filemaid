@@ -407,6 +407,8 @@ func TestSmokeEndToEnd(t *testing.T) {
 func TestSmokeSmartFoldersRegeneration(t *testing.T) {
 	resetGlobals(t)
 
+	setHubBuilder(t, &fakeHubBuilder{})
+
 	tmp := t.TempDir()
 	cfg = testConfig(tmp)
 	cfg.Tags = true

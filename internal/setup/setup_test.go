@@ -14,8 +14,14 @@ import (
 	"testing"
 	"time"
 
+	"github.com/logicminds/filemaid/internal/hub"
 	"github.com/logicminds/filemaid/internal/setup/assets"
 )
+
+// noopHubBuilder prevents setup tests from touching the Finder sidebar.
+type noopHubBuilder struct{}
+
+func (noopHubBuilder) Build(hub.Options) error { return nil }
 
 func latestModel(name string) string {
 	return name + ":latest"
@@ -131,6 +137,7 @@ func newTestInstaller(t *testing.T, exe string) (*Installer, *fakeRunner, string
 		ExecutablePath: exe,
 		Sleep:          func(time.Duration) {},
 		FreeSpace:      func(string) (uint64, error) { return 100 * 1024 * 1024 * 1024, nil },
+		HubBuilder:     noopHubBuilder{},
 	}
 	return inst, runner, home
 }

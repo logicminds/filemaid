@@ -15,11 +15,14 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strconv"
 	"strings"
 	"text/template"
 	"time"
 
+	"github.com/logicminds/filemaid/internal/config"
+	"github.com/logicminds/filemaid/internal/hub"
 	"github.com/logicminds/filemaid/internal/setup/assets"
 	"golang.org/x/sys/unix"
 )
@@ -392,6 +395,11 @@ type Installer struct {
 	// FreeSpace returns the bytes available on the filesystem containing path.
 	// Defaults to defaultFreeSpace. Tests may override it.
 	FreeSpace func(path string) (uint64, error)
+	// HubBuilder creates the Filemaid hub after config is installed. Defaults
+	// to hub.New(). Tests may override it with a no-op.
+	HubBuilder interface {
+		Build(hub.Options) error
+	}
 }
 
 const (
@@ -428,6 +436,7 @@ func newDefaultInstaller() (*Installer, error) {
 		Sleep:          time.Sleep,
 		Reader:         bufio.NewReader(os.Stdin),
 		FreeSpace:      defaultFreeSpace,
+		HubBuilder:     hub.New(),
 	}, nil
 }
 
@@ -566,6 +575,36 @@ func (i *Installer) Install(opts InstallOptions) error {
 	}
 	if err := i.copyDefaultConfig(dstConfig, overrides); err != nil {
 		return fmt.Errorf("copy config: %w", err)
+	}
+	// Build the Filemaid hub so users have a single Finder sidebar entry
+	// containing Smart Folders, the archive, and the review queue.
+	if i.HubBuilder != nil {
+		cfg, loadErr := config.Load()
+		if loadErr != nil {
+			slog.Warn("failed to load config for hub setup", "error", loadErr)
+		} else if cfg.SmartFolders {
+			categories := make([]string, 0, len(cfg.Categories))
+			for name := range cfg.Categories {
+				categories = append(categories, name)
+			}
+			sort.Strings(categories)
+
+			scopes := cfg.AllowedDirs
+			if len(scopes) == 0 {
+				scopes = []string{i.Home}
+			}
+
+			if err := i.HubBuilder.Build(hub.Options{
+				HubDir:     cfg.SmartFoldersDir,
+				ArchiveDir: hub.ArchiveRoot(cfg.Categories),
+				ReviewDir:  cfg.ReviewDir,
+				Categories: categories,
+				Tags:       nil,
+				Scopes:     scopes,
+			}); err != nil {
+				slog.Warn("hub setup failed", "error", err)
+			}
+		}
 	}
 
 	models := dedupeStrings([]string{modelName, "filemaid-metadata"})

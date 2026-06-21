@@ -52,12 +52,11 @@ type Decision struct {
 | `internal/cli/` | Cobra root command and subcommands. |
 | `internal/llm/` | Ollama classifier and `Decision` value object. |
 | `internal/actions/` | Applies decisions: whitelist, duplicates, moves, tags, trash, review. |
-| `internal/state/` | SQLite history and duplicate detection. |
 | `internal/config/` | Config loading with defaults and `~` expansion. |
 | `internal/cleaners/` | Plugin registry for dev-artifact and review-queue cleanup. |
+| `internal/hub/` | Builds the Filemaid hub: Smart Folders, archive/review aliases, and Finder sidebar pin. |
 | `internal/setup/` | Installation and uninstallation of binary, config, and launchd agents. |
 | `internal/log/` | `log/slog` setup. |
-| Project root | `go.mod`, `Makefile`, default config (`config.json`), Ollama Modelfiles (`modelfiles/`), and the implementation plan. |
 
 ## Development Commands
 
@@ -102,7 +101,7 @@ type Decision struct {
   where `CleanupResult` lives in `internal/cleaners/result.go` and carries `Name`, `Status`, `Saved` (bytes), `SavedHuman`, `Detail`, and `Command`.
 - **Embedded assets.** The default `config.json` and `modelfiles/` are embedded into the binary under `internal/setup/assets`, so `filemaid setup` is self-contained and works from a single portable binary.
 - **Subprocess calls are fire-and-forget.** External-tool failures are logged but do not abort moves.
-- **macOS-specific integration.** Finder tags are written via `xattr` + `mdimport`; trash uses `osascript` "Finder delete".
+- **macOS-specific integration.** Finder tags are written via `xattr` + `mdimport`; trash uses `osascript` "Finder delete"; the Filemaid hub (Smart Folders, archive/review aliases, and Finder sidebar pin) is managed via `internal/hub`.
 - **Dry-run mode.** `process` and `scan` support `--dry-run`, which records no history, performs no moves, and previews renames in output.
 
 ## Important Files

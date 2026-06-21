@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bytes"
+	"errors"
 	"os"
 	"path/filepath"
 	"slices"
@@ -10,9 +11,31 @@ import (
 
 	"github.com/logicminds/filemaid/internal/actions"
 	"github.com/logicminds/filemaid/internal/config"
+	"github.com/logicminds/filemaid/internal/hub"
 	"github.com/logicminds/filemaid/internal/llm"
+	"github.com/logicminds/filemaid/internal/smartfolder"
 	"github.com/logicminds/filemaid/internal/state"
 )
+
+// fakeHubBuilder records hub builds and optionally delegates to smartfolder.Build.
+type fakeHubBuilder struct {
+	buildErr error
+	opts     []hub.Options
+}
+
+func (f *fakeHubBuilder) Build(opts hub.Options) error {
+	f.opts = append(f.opts, opts)
+	if f.buildErr != nil {
+		return f.buildErr
+	}
+	return smartfolder.Build(opts.Categories, opts.Tags, opts.Scopes, opts.HubDir)
+}
+
+func setHubBuilder(t *testing.T, b interface{ Build(hub.Options) error }) {
+	old := hubBuilder
+	hubBuilder = b
+	t.Cleanup(func() { hubBuilder = old })
+}
 
 func TestRegenerateSmartFolders_Disabled(t *testing.T) {
 	cfg = &config.Config{SmartFolders: false}
@@ -38,6 +61,9 @@ func TestRegenerateSmartFolders_BuildsSavedSearches(t *testing.T) {
 	desktop := filepath.Join(tmp, "Desktop")
 	os.MkdirAll(desktop, 0755)
 
+	fakeHub := &fakeHubBuilder{}
+	setHubBuilder(t, fakeHub)
+
 	cfg = &config.Config{
 		SmartFolders:    true,
 		SmartFoldersDir: smartDir,
@@ -55,6 +81,13 @@ func TestRegenerateSmartFolders_BuildsSavedSearches(t *testing.T) {
 
 	if err := regenerateSmartFolders(); err != nil {
 		t.Fatalf("regenerateSmartFolders failed: %v", err)
+	}
+
+	if len(fakeHub.opts) != 1 {
+		t.Fatalf("hub build calls = %d, want 1", len(fakeHub.opts))
+	}
+	if fakeHub.opts[0].HubDir != smartDir {
+		t.Fatalf("hub dir = %q, want %q", fakeHub.opts[0].HubDir, smartDir)
 	}
 
 	entries, err := os.ReadDir(smartDir)
@@ -79,6 +112,8 @@ func TestProcessCommand_RegeneratesSmartFoldersAndWarnsOnFailure(t *testing.T) {
 	cfg.SmartFoldersDir = "/dev/null/invalid-smart-folders"
 	db = state.NewFake()
 	processFS = actions.NewRecordingFS()
+
+	setHubBuilder(t, &fakeHubBuilder{buildErr: errors.New("hub fail")})
 
 	buf := captureSlog(t)
 
@@ -109,6 +144,8 @@ func TestScanCommand_RegeneratesSmartFoldersAndWarnsOnFailure(t *testing.T) {
 	cfg.SmartFoldersDir = "/dev/null/invalid-smart-folders"
 	db = state.NewFake()
 	processFS = actions.NewRecordingFS()
+
+	setHubBuilder(t, &fakeHubBuilder{buildErr: errors.New("hub fail")})
 
 	buf := captureSlog(t)
 
