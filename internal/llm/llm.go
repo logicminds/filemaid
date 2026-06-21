@@ -391,6 +391,11 @@ var textExts = map[string]bool{
 const promptTemplate = `Classify this file into exactly one category from: %s.
 %s
 
+Choose the action based on confidence:
+- Use "move" when the category is clearly a good fit.
+- Use "delete" only for obvious trash, installers, or duplicates.
+- Use "review" when the file is ambiguous, sensitive, personal, or cannot be classified.
+
 File:
 - path: %s
 - name: %s
@@ -697,8 +702,9 @@ func toolSchema(categories []string) map[string]any {
 						"items": map[string]any{"type": "string"},
 					},
 					"action": map[string]any{
-						"type": "string",
-						"enum": []string{"move", "delete", "review"},
+						"type":        "string",
+						"enum":        []string{"move", "delete", "review"},
+						"description": "move = clearly classifiable, delete = obvious trash/duplicate, review = ambiguous/sensitive/unknown",
 					},
 					"reason": map[string]any{"type": "string"},
 					"new_name": map[string]any{
