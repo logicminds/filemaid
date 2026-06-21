@@ -128,7 +128,7 @@ var (
 type applierFunc func(decision llm.Decision, src string, fileHash string, cfg *config.Config, db state.Repo, isDuplicate bool, fs actions.FS, runID string, metrics llm.Metrics, force bool) (string, error)
 
 func init() {
-	processCmd.Flags().StringVar(&processFormat, "format", "table", "output format (table|human|json)")
+	processCmd.Flags().StringVar(&processFormat, "format", "human", "output format (table|human|json)")
 	processCmd.Flags().BoolVar(&processJSON, "json", false, "output results as JSON (shorthand for --format json)")
 	processCmd.Flags().BoolVar(&processQuiet, "quiet", false, "suppress log output to stderr")
 	processCmd.Flags().StringVar(&renameFlag, "rename", "", "rename files using the LLM; optionally set minimum quality threshold 1-5 (e.g. --rename=3); 1=most aggressive, 5=most conservative, default is 2")

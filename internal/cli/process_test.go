@@ -860,6 +860,9 @@ func TestProcessCommandPrintsTable(t *testing.T) {
 	os.MkdirAll(filepath.Dir(src), 0755)
 	os.WriteFile(src, []byte("hello"), 0644)
 
+	processFormat = "table"
+	t.Cleanup(func() { processFormat = "human" })
+
 	out := captureStdout(t, func() {
 		if err := processCmd.RunE(nil, []string{src}); err != nil {
 			t.Fatalf("process failed: %v", err)
