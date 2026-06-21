@@ -227,7 +227,18 @@ func TestWriteSavedSearch(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "test.savedSearch")
 
-	if err := writeSavedSearch(path, "test", `(kMDItemUserTags == "filemaid"cd)`, []string{"/Users/test"}); err != nil {
+	slices := []criteriaSlice{
+		filemaidTagSlice(),
+		{
+			DisplayValues: []string{"Any of the following are true"},
+			RowType:       rowTypeGroup,
+			Subrows: []criteriaSlice{
+				nameContainsSlice("test"),
+			},
+		},
+	}
+
+	if err := writeSavedSearch(path, "test", `(kMDItemUserTags == "filemaid"cd)`, []string{"/Users/test"}, slices); err != nil {
 		t.Fatalf("writeSavedSearch failed: %v", err)
 	}
 
@@ -247,6 +258,11 @@ func TestWriteSavedSearch(t *testing.T) {
 		"SearchCriteria",
 		"CurrentFolderPath",
 		"FXScopeArrayOfPaths",
+		"FXCriteriaSlices",
+		"criteria",
+		"displayValues",
+		"rowType",
+		"subrows",
 	} {
 		if !strings.Contains(content, want) {
 			t.Errorf("saved search missing %q", want)
@@ -291,5 +307,114 @@ func TestBuildSkipsTagWhenCategoryCollides(t *testing.T) {
 	}
 	if !strings.Contains(string(data), "kMDItemTextContent") {
 		t.Errorf("Documents.savedSearch missing category predicate content clause")
+	}
+}
+
+func TestCategoryCriteria(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		empty bool
+	}{
+		{name: "documents", input: "Documents", empty: false},
+		{name: "empty", input: "", empty: true},
+		{name: "whitespace only", input: "   ", empty: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := categoryCriteria(tt.input)
+			if tt.empty {
+				if len(got) != 0 {
+					t.Fatalf("categoryCriteria(%q) = %v, want empty", tt.input, got)
+				}
+				return
+			}
+
+			if len(got) != 2 {
+				t.Fatalf("categoryCriteria(%q) = %d slices, want 2", tt.input, len(got))
+			}
+
+			if got[0].DisplayValues[2] != "filemaid" {
+				t.Errorf("first slice missing filemaid tag: %v", got[0].DisplayValues)
+			}
+
+			if got[1].RowType != rowTypeGroup {
+				t.Errorf("second slice RowType = %d, want group %d", got[1].RowType, rowTypeGroup)
+			}
+
+			if len(got[1].Subrows) != 4 {
+				t.Errorf("OR group has %d subrows, want 4", len(got[1].Subrows))
+			}
+
+			required := []string{"kMDItemUserTags", "kMDItemFSName", "kMDItemFinderComment", "kMDItemTextContent"}
+			for i, key := range required {
+				if got[1].Subrows[i].Criteria[0].Str != key {
+					t.Errorf("subrow %d attribute = %q, want %q", i, got[1].Subrows[i].Criteria[0].Str, key)
+				}
+			}
+		})
+	}
+}
+
+func TestTagCriteria(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		empty bool
+	}{
+		{name: "work", input: "work", empty: false},
+		{name: "empty", input: "", empty: true},
+		{name: "whitespace only", input: "   ", empty: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := tagCriteria(tt.input)
+			if tt.empty {
+				if len(got) != 0 {
+					t.Fatalf("tagCriteria(%q) = %v, want empty", tt.input, got)
+				}
+				return
+			}
+
+			if len(got) != 2 {
+				t.Fatalf("tagCriteria(%q) = %d slices, want 2", tt.input, len(got))
+			}
+
+			if got[0].DisplayValues[2] != "filemaid" {
+				t.Errorf("first slice missing filemaid tag: %v", got[0].DisplayValues)
+			}
+
+			if got[1].DisplayValues[2] != tt.input {
+				t.Errorf("second slice tag = %q, want %q", got[1].DisplayValues[2], tt.input)
+			}
+
+			for _, s := range got {
+				if s.RowType != rowTypeCriterion {
+					t.Errorf("slice %v RowType = %d, want criterion", s.DisplayValues, s.RowType)
+				}
+			}
+		})
+	}
+}
+
+func TestCriteriaValueXML(t *testing.T) {
+	tests := []struct {
+		name string
+		v    criteriaValue
+		want string
+	}{
+		{name: "string", v: criteriaValue{Str: "kMDItemUserTags"}, want: "<string>kMDItemUserTags</string>"},
+		{name: "escaped string", v: criteriaValue{Str: "a&b"}, want: "<string>a&amp;b</string>"},
+		{name: "integer", v: criteriaValue{Int: 104, IsInt: true}, want: "<integer>104</integer>"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.v.XML(); got != tt.want {
+				t.Errorf("XML() = %q, want %q", got, tt.want)
+			}
+		})
 	}
 }

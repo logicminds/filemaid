@@ -50,7 +50,7 @@ func Build(categories, tags, scopes []string, dir string) error {
 		name := normalizeFileName(category)
 		categoryNames[name] = struct{}{}
 		path := filepath.Join(dir, name+".savedSearch")
-		if err := writeSavedSearch(path, name, query, scopes); err != nil && firstErr == nil {
+		if err := writeSavedSearch(path, name, query, scopes, categoryCriteria(category)); err != nil && firstErr == nil {
 			firstErr = err
 		}
 	}
@@ -72,7 +72,7 @@ func Build(categories, tags, scopes []string, dir string) error {
 		}
 
 		path := filepath.Join(dir, name+".savedSearch")
-		if err := writeSavedSearch(path, name, query, scopes); err != nil && firstErr == nil {
+		if err := writeSavedSearch(path, name, query, scopes, tagCriteria(tag)); err != nil && firstErr == nil {
 			firstErr = err
 		}
 	}

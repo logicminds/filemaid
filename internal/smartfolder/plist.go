@@ -36,31 +36,53 @@ const savedSearchTemplate = `<?xml version="1.0" encoding="UTF-8"?>
 		<array>
 {{range .Scopes}}			<string>{{.}}</string>
 {{end}}		</array>
+		<key>FXCriteriaSlices</key>
+		<array>
+{{range .Slices}}{{template "criteriaSlice" .}}{{end}}		</array>
 	</dict>
 </dict>
 </plist>
+{{define "criteriaSlice"}}
+			<dict>
+				<key>criteria</key>
+				<array>
+{{range .Criteria}}					{{.XML}}
+{{end}}				</array>
+				<key>displayValues</key>
+				<array>
+{{range .DisplayValues}}					<string>{{. | xmlEscape}}</string>
+{{end}}				</array>
+				<key>rowType</key>
+				<integer>{{.RowType}}</integer>
+				<key>subrows</key>
+				<array>
+{{range .Subrows}}{{template "criteriaSlice" .}}{{end}}				</array>
+			</dict>
+{{end}}
 `
 
 // writeSavedSearch writes a macOS Finder Smart Folder .savedSearch plist to path.
-// The file contains the supplied display name, raw Spotlight query, and search
-// scopes. No third-party plist libraries are used; output is generated with
-// text/template.
-func writeSavedSearch(path, name, rawQuery string, scopes []string) error {
-	type tmplData struct {
-		Name     string
-		RawQuery string
-		Scopes   []string
-	}
-
-	tmpl, err := template.New("savedSearch").Parse(savedSearchTemplate)
+// The file contains the supplied display name, raw Spotlight query, search
+// scopes, and Finder-editable criteria slices. No third-party plist libraries
+// are used; output is generated with text/template.
+func writeSavedSearch(path, name, rawQuery string, scopes []string, slices []criteriaSlice) error {
+	tmpl, err := template.New("savedSearch").Funcs(template.FuncMap{
+		"xmlEscape": xmlEscape,
+	}).Parse(savedSearchTemplate)
 	if err != nil {
 		return fmt.Errorf("parse saved search template: %w", err)
 	}
 
-	data := tmplData{
+	data := struct {
+		Name     string
+		RawQuery string
+		Scopes   []string
+		Slices   []criteriaSlice
+	}{
 		Name:     name,
 		RawQuery: xmlEscape(rawQuery),
 		Scopes:   xmlEscapeSlice(scopes),
+		Slices:   slices,
 	}
 
 	f, err := os.Create(path)
