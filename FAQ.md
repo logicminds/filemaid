@@ -94,7 +94,7 @@ To remove the sidebar pin, open Finder → Settings → Sidebar and uncheck `Fil
 ### How do I process files manually?
 
 ```bash
-~/.local/bin/filemaid process ~/Desktop/foo.png ~/Downloads/bar.pdf
+filemaid process ~/Desktop/foo.png ~/Downloads/bar.pdf
 ```
 
 The default output is a human-readable list. Use `--format table` or `--json` for other formats.
@@ -102,18 +102,18 @@ The default output is a human-readable list. Use `--format table` or `--json` fo
 ### How do I run a dry run?
 
 ```bash
-~/.local/bin/filemaid process --dry-run <paths>
-~/.local/bin/filemaid scan --dry-run
+filemaid process --dry-run <paths>
+filemaid scan --dry-run
 ```
 
 ### How do I enable smart rename for one run?
 
 ```bash
 # Use rename_level from config
-~/.local/bin/filemaid process --rename <paths>
+filemaid process --rename <paths>
 
 # Override the threshold for this run (1=most aggressive, 5=most conservative)
-~/.local/bin/filemaid process --rename=3 <paths>
+filemaid process --rename=3 <paths>
 ```
 
 ### What does --force do?
@@ -125,7 +125,7 @@ The default output is a human-readable list. Use `--format table` or `--json` fo
 The scan command only processes files matching configured rules and age thresholds. If a file was recently processed or does not match any rule, it will be skipped. Check the logs:
 
 ```bash
-~/.local/bin/filemaid logs --tail 50
+filemaid logs --tail 50
 ```
 
 ## Setup and Permissions
@@ -136,6 +136,14 @@ Only the optional background scan LaunchAgent typically needs Full Disk Access t
 
 ### How do I install or reinstall filemaid?
 
+The easiest way is the install script:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/logicminds/filemaid/main/install.sh | bash
+```
+
+Or build from source (requires Go):
+
 ```bash
 make build
 ./bin/filemaid setup
@@ -144,13 +152,13 @@ make build
 To also install background agents:
 
 ```bash
-./bin/filemaid setup --agents
+filemaid setup --agents
 ```
 
 To use Shortcuts automation instead:
 
 ```bash
-./bin/filemaid setup --shortcuts
+filemaid setup --shortcuts
 ```
 
 ## Troubleshooting
@@ -158,7 +166,7 @@ To use Shortcuts automation instead:
 ### Where are the logs?
 
 ```bash
-~/.local/bin/filemaid logs --tail 50
+filemaid logs --tail 50
 ```
 
 Logs are stored in `~/.local/share/filemaid/filemaid.log` by default.
@@ -166,7 +174,7 @@ Logs are stored in `~/.local/share/filemaid/filemaid.log` by default.
 ### How do I check the current configuration?
 
 ```bash
-~/.local/bin/filemaid config
+filemaid config
 ```
 
 Configuration is loaded from `~/.config/filemaid/config.json` and merged with defaults.

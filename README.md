@@ -25,7 +25,7 @@ A local, AI-powered file organizer for macOS. It watches your `Desktop` and `Dow
 
 ## Requirements
 
-- macOS 13+ (uses `launchctl`, `xattr`, `mdimport`, `osascript`)
+- macOS 13+ on Apple Silicon (uses `launchctl`, `xattr`, `mdimport`, `osascript`)
 - [Homebrew](https://brew.sh) — package manager for macOS. Install it with:
   ```zsh
   /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
@@ -34,7 +34,86 @@ A local, AI-powered file organizer for macOS. It watches your `Desktop` and `Dow
 
 ## Quick Start
 
-Build locally and run setup:
+Install the latest release with the install script (no Go required):
+
+```zsh
+curl -fsSL https://raw.githubusercontent.com/logicminds/filemaid/main/install.sh | bash
+```
+
+The script downloads the Apple Silicon binary from the [GitHub releases page](https://github.com/logicminds/filemaid/releases), verifies its checksum, and installs it to `~/.local/bin/filemaid`. Only macOS on Apple Silicon (arm64) is supported; the script reports an error on any other platform.
+
+To install to a different directory, set `INSTALL_DIR`:
+
+```zsh
+curl -fsSL https://raw.githubusercontent.com/logicminds/filemaid/main/install.sh | INSTALL_DIR=/usr/local/bin bash
+```
+
+Or download the release manually:
+
+1. Go to the [latest release](https://github.com/logicminds/filemaid/releases/latest).
+2. Download `filemaid-darwin-arm64` and `filemaid-darwin-arm64.sha256`.
+3. Verify the checksum:
+   ```zsh
+   shasum -a 256 -c filemaid-darwin-arm64.sha256
+   ```
+4. Move the binary to a directory on your PATH, for example `~/.local/bin/filemaid`, and make it executable:
+   ```zsh
+   chmod +x ~/.local/bin/filemaid
+   ```
+
+After installing, run setup:
+
+```zsh
+filemaid setup
+```
+
+`setup` checks for Ollama, detects your Mac's RAM, recommends a model, and runs a short configuration interview:
+
+* 24 GB+ RAM → `filemaid-gemma4-26b`
+* 16 GB+ RAM → `filemaid-gemma4-12b`
+* less RAM → `filemaid-metadata`
+
+Press `Enter` to accept each recommendation or default, or type a custom value when prompted.
+
+To skip the model prompt, pass `--model`:
+
+```zsh
+filemaid setup --model filemaid-gemma4-12b
+```
+
+To skip the configuration interview and use the shipped defaults, pass `--no-interactive`:
+
+```zsh
+filemaid setup --no-interactive
+```
+
+To install the background launchd agents (disabled by default):
+
+```zsh
+filemaid setup --agents
+```
+
+To skip the scheduled scan agent when using `--agents`:
+
+```zsh
+filemaid setup --agents --no-scan
+```
+
+To see the macOS Shortcuts folder-automation steps:
+
+```zsh
+filemaid setup --shortcuts
+```
+
+Or install the latest release directly with `go install` (requires Go):
+
+```zsh
+go install github.com/logicminds/filemaid/cmd/filemaid@latest
+```
+
+Make sure `$(go env GOPATH)/bin` is on your `PATH` to run the installed binary as `filemaid`.
+
+Or build locally from source (requires Go):
 
 ```zsh
 git clone https://github.com/logicminds/filemaid.git ~/Projects/filemaid
@@ -42,52 +121,6 @@ cd ~/Projects/filemaid
 go build -o bin/filemaid ./cmd/filemaid
 ./bin/filemaid setup
 ```
-
-`setup` checks for Ollama, detects your Mac's RAM, recommends a model, and runs a short configuration interview:
-
-- 24 GB+ RAM → `filemaid-gemma4-26b`
-- 16 GB+ RAM → `filemaid-gemma4-12b`
-- less RAM → `filemaid-metadata`
-
-Press `Enter` to accept each recommendation or default, or type a custom value when prompted.
-
-To skip the model prompt, pass `--model`:
-
-```zsh
-./bin/filemaid setup --model filemaid-gemma4-12b
-```
-
-To skip the configuration interview and use the shipped defaults, pass `--no-interactive`:
-
-```zsh
-./bin/filemaid setup --no-interactive
-```
-
-To install the background launchd agents (disabled by default):
-
-```zsh
-./bin/filemaid setup --agents
-```
-
-To skip the scheduled scan agent when using `--agents`:
-
-```zsh
-./bin/filemaid setup --agents --no-scan
-```
-
-To see the macOS Shortcuts folder-automation steps:
-
-```zsh
-./bin/filemaid setup --shortcuts
-```
-
-Or install the latest release directly with `go install`:
-
-```zsh
-go install github.com/logicminds/filemaid/cmd/filemaid@latest
-```
-
-Make sure `$(go env GOPATH)/bin` is on your `PATH` to run the installed binary as `filemaid`.
 
 After setup you will have:
 
@@ -105,83 +138,83 @@ For instant per-file processing without background agents, use the Shortcuts fol
 
 ```zsh
 # Process files manually (human-readable list output is default)
-./bin/filemaid process ~/Desktop/Screenshot*.png ~/Downloads/receipt.pdf
+filemaid process ~/Desktop/Screenshot*.png ~/Downloads/receipt.pdf
 
 # Process files as a table
-./bin/filemaid process --format table ~/Desktop/Screenshot*.png
+filemaid process --format table ~/Desktop/Screenshot*.png
 
 # Get process results as JSON
-./bin/filemaid process --json ~/Desktop/Screenshot*.png
+filemaid process --json ~/Desktop/Screenshot*.png
 
 # Suppress JSON log lines on stderr
-./bin/filemaid process --quiet ~/Desktop/Screenshot*.png ~/Downloads/receipt.pdf
+filemaid process --quiet ~/Desktop/Screenshot*.png ~/Downloads/receipt.pdf
 
 # Scan watch directories
-./bin/filemaid scan
+filemaid scan
 
 # Scan a single directory
-./bin/filemaid scan --dir ~/Downloads
+filemaid scan --dir ~/Downloads
 
 # Process with smart rename enabled for this run (uses rename_level from config)
-./bin/filemaid process --rename ~/Desktop/*.pdf
+filemaid process --rename ~/Desktop/*.pdf
 
 # Rename with an inline quality threshold (1=most aggressive, 5=most conservative)
-./bin/filemaid process --rename=3 ~/Desktop/*.pdf
+filemaid process --rename=3 ~/Desktop/*.pdf
 
 # Force processing even if a file looks like a duplicate or similar to history
-./bin/filemaid process --force ~/Desktop/*.png
+filemaid process --force ~/Desktop/*.png
 
 # Preview renames without moving files
-./bin/filemaid process --dry-run ~/Desktop/*.png
+filemaid process --dry-run ~/Desktop/*.png
 
 # Scan with rename preview
-./bin/filemaid scan --dry-run
+filemaid scan --dry-run
 
 # Run cleaners in dry-run mode
-./bin/filemaid cleanup --dry-run
+filemaid cleanup --dry-run
 
 # Run cleaners for real (table output is default)
-./bin/filemaid cleanup
+filemaid cleanup
 
 # Get cleaner results as JSON
-./bin/filemaid cleanup --format json
+filemaid cleanup --format json
 
 # Run cleaners and see estimated space that would be freed
-./bin/filemaid cleanup --dry-run --format table
+filemaid cleanup --dry-run --format table
 
 # View the review queue
-./bin/filemaid review
+filemaid review
 
 # Open the review queue in Finder
-./bin/filemaid review --open
+filemaid review --open
 
 # Approve or reject a review item by its relative path
-./bin/filemaid review --approve "Screenshots/old-screenshot.png"
-./bin/filemaid review --reject "Documents/unwanted-receipt.pdf"
+filemaid review --approve "Screenshots/old-screenshot.png"
+filemaid review --reject "Documents/unwanted-receipt.pdf"
 
 # Show recent processing history
-./bin/filemaid history
+filemaid history
 
 # Show the last run with a count summary
-./bin/filemaid history --last
+filemaid history --last
 
 # Regenerate the Filemaid hub (Smart Folders, aliases, sidebar pin)
-./bin/filemaid smart-folders
+filemaid smart-folders
 
 # Tail logs
-./bin/filemaid logs --tail 50
+filemaid logs --tail 50
 
 # Show resolved configuration
-./bin/filemaid config
+filemaid config
 
 # Install background launchd agents
-./bin/filemaid setup --agents
+filemaid setup --agents
 
 # Output macOS Shortcuts folder-automation steps
-./bin/filemaid setup --shortcuts
+filemaid setup --shortcuts
 ```
 
-If you installed via `go install`, use `filemaid` instead of `./bin/filemaid`.
+If you are running from a local clone, use `./bin/filemaid` instead of `filemaid`.
 
 ## Shortcuts Setup
 
@@ -202,7 +235,7 @@ For instant per-file processing, add a Shortcuts folder automation:
    - Pass input: **As arguments**
    - Command:
      ```zsh
-     export PATH="$(go env GOPATH)/bin:/usr/local/bin:/opt/homebrew/bin:$PATH"
+     export PATH="$HOME/.local/bin:$(go env GOPATH)/bin:/usr/local/bin:/opt/homebrew/bin:$PATH"
      filemaid process "$@"
      ```
      If you are running from a local clone, use the binary path instead:
@@ -383,10 +416,10 @@ Enable renaming for a single run with `--rename`. With no value it uses `rename_
 
 ```zsh
 # Use config rename_level
-./bin/filemaid process --rename ~/Desktop/*.pdf
+filemaid process --rename ~/Desktop/*.pdf
 
 # Override threshold for this run only
-./bin/filemaid process --rename=3 ~/Desktop/*.pdf
+filemaid process --rename=3 ~/Desktop/*.pdf
 ```
 
 Suggested names are sanitized: characters matching `rename_invalid_chars` are stripped, the length is clamped between `rename_min_length` and `rename_max_length`, and collisions are resolved with a counter suffix (e.g., `document-2.pdf`).
@@ -402,7 +435,7 @@ Duplicate or near-duplicate files are routed to the review queue instead of bein
 Use `--dry-run` to preview suggested names without moving or renaming files:
 
 ```zsh
-./bin/filemaid process --rename --dry-run ~/Desktop/*.pdf
+filemaid process --rename --dry-run ~/Desktop/*.pdf
 ```
 
 | Rename level | Typical behavior |
@@ -527,7 +560,7 @@ Before releasing a rename-related change, run through the following:
 - [ ] `filemaid review --approve` moves a review item to its category.
 - [ ] `filemaid review --reject` trashes a review item.
 - [ ] Finder tags and Smart Folders still regenerate after rename operations.
--
+
 ### Scan agent cannot read Desktop/Downloads
 
 The background scan agent may need Full Disk Access for the `filemaid` binary:

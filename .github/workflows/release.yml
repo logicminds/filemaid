@@ -24,12 +24,15 @@ jobs:
         run: go test ./...
 
       - name: Build release binary
-        run: go build -ldflags="-s -w -X github.com/logicminds/filemaid/internal/cli.Version=${{ github.ref_name }} -X github.com/logicminds/filemaid/internal/cli.Commit=${{ github.sha }}" -o filemaid ./cmd/filemaid
+        run: |
+          go build -ldflags="-s -w -X github.com/logicminds/filemaid/internal/cli.Version=${{ github.ref_name }} -X github.com/logicminds/filemaid/internal/cli.Commit=${{ github.sha }}" -o filemaid-darwin-arm64 ./cmd/filemaid
+          shasum -a 256 filemaid-darwin-arm64 > filemaid-darwin-arm64.sha256
 
       - name: Create GitHub Release
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: >
-          gh release create "${{ github.ref_name }}" ./filemaid
+          gh release create "${{ github.ref_name }}"
+          ./filemaid-darwin-arm64 ./filemaid-darwin-arm64.sha256
           --title "filemaid ${{ github.ref_name }}"
           --generate-notes

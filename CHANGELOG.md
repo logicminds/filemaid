@@ -4,6 +4,15 @@ All notable changes to filemaid are documented in this file.
 
 ## Unreleased
 
+### Added
+
+* **Install script** — `install.sh` downloads the latest Apple Silicon release from GitHub, verifies its SHA-256 checksum, and installs it to `~/.local/bin/filemaid`. Unsupported operating systems and architectures are rejected with a clear error.
+* **Named release asset** — GitHub releases now publish `filemaid-darwin-arm64` plus `filemaid-darwin-arm64.sha256` for verified installs.
+
+### Changed
+
+* **README quick start** — installation instructions now lead with the curl-to-bash install script and manual GitHub releases download; building from source and `go install` are listed as alternatives.
+
 ## [0.5.0]
 
 ### Added
