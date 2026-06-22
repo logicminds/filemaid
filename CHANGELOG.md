@@ -4,6 +4,10 @@ All notable changes to filemaid are documented in this file.
 
 ## Unreleased
 
+### Added
+
+- **`--include-dirs` flag for `scan` and `process`** — opt-in flag that treats immediate subdirectories as analysis candidates. `scan --include-dirs` enumerates subdirectories alongside files, and `process --include-dirs <dir>` accepts directory arguments. Directory candidates bypass file moves, renames, deletes, and history recording; they are surfaced as read-only `review` results with `kind: directory`. Guardrails for `allowed_dirs`, hidden-directory skipping, and `min_age_hours` are applied to directories in `scan`.
+
 ## [0.5.1]
 
 ### Added

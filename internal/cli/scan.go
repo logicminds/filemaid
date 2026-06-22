@@ -17,10 +17,11 @@ import (
 )
 
 var scanDir string
+var includeDirs bool
 var (
-	// scanGetFiles returns the candidate files in a scan directory. Tests may
-	// replace it to avoid filesystem dependencies.
-	scanGetFiles func(dir string) ([]string, error) = defaultScanGetFiles
+	// scanGetCandidates returns the candidate files and immediate subdirectories
+	// in a scan directory. Tests may replace it to avoid filesystem dependencies.
+	scanGetCandidates func(dir string) ([]string, []string, error) = defaultScanGetCandidates
 )
 
 func init() {
@@ -32,6 +33,7 @@ func init() {
 	scanCmd.Flags().Lookup("rename").NoOptDefVal = "default"
 	scanCmd.Flags().BoolVar(&processForce, "force", false, "force processing even if the file is a duplicate or similar to existing history")
 	scanCmd.Flags().BoolVar(&processDryRun, "dry-run", false, "preview changes without moving files")
+	scanCmd.Flags().BoolVar(&includeDirs, "include-dirs", false, "include immediate subdirectories as analysis candidates")
 	rootCmd.AddCommand(scanCmd)
 }
 
@@ -129,7 +131,7 @@ func runScanDir(ctx context.Context, directory string, runID string, w io.Writer
 		return nil, nil
 	}
 
-	files, err := scanGetFiles(root)
+	files, dirs, err := scanGetCandidates(root)
 	if err != nil {
 		if errors.Is(err, os.ErrPermission) {
 			slog.Warn("permission denied", "dir", root)
@@ -158,26 +160,56 @@ func runScanDir(ctx context.Context, directory string, runID string, w io.Writer
 		}
 	}
 
+	if includeDirs {
+		for _, path := range dirs {
+			info, err := os.Stat(path)
+			if err != nil {
+				slog.Warn("scan directory stat failed", "path", path, "error", err)
+				continue
+			}
+			if !info.IsDir() {
+				continue
+			}
+			if isHidden(path) {
+				slog.Info("skipping hidden directory in scan", "path", path)
+				continue
+			}
+			if info.ModTime().Before(cutoff) {
+				toProcess = append(toProcess, path)
+			}
+		}
+	}
+
 	if len(toProcess) == 0 {
 		slog.Info("no files older than min_age_hours", "dir", root)
 		return nil, nil
 	}
 
+	processIncludeDirs = includeDirs
 	return processPaths(ctx, toProcess, runID, w, format)
 }
 
-// defaultScanGetFiles lists regular files directly inside dir.
-func defaultScanGetFiles(dir string) ([]string, error) {
+// defaultScanGetCandidates lists regular files and immediate subdirectories
+// directly inside dir.
+func defaultScanGetCandidates(dir string) ([]string, []string, error) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	out := make([]string, 0, len(entries))
+	files := make([]string, 0, len(entries))
+	dirs := make([]string, 0, len(entries))
 	for _, e := range entries {
 		if e.IsDir() {
+			dirs = append(dirs, filepath.Join(dir, e.Name()))
 			continue
 		}
-		out = append(out, filepath.Join(dir, e.Name()))
+		info, err := e.Info()
+		if err != nil {
+			continue
+		}
+		if info.Mode().IsRegular() {
+			files = append(files, filepath.Join(dir, e.Name()))
+		}
 	}
-	return out, nil
+	return files, dirs, nil
 }

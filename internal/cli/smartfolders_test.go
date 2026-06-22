@@ -161,10 +161,10 @@ func TestScanCommand_RegeneratesSmartFoldersAndWarnsOnFailure(t *testing.T) {
 	os.MkdirAll(filepath.Dir(src), 0755)
 	os.WriteFile(src, []byte("hello"), 0644)
 
-	scanGetFiles = func(dir string) ([]string, error) {
-		return []string{src}, nil
+	scanGetCandidates = func(dir string) ([]string, []string, error) {
+		return []string{src}, nil, nil
 	}
-	t.Cleanup(func() { scanGetFiles = defaultScanGetFiles })
+	t.Cleanup(func() { scanGetCandidates = defaultScanGetCandidates })
 
 	scanDir = filepath.Join(tmp, "Desktop")
 	t.Cleanup(func() { scanDir = "" })

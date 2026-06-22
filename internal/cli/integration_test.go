@@ -43,7 +43,7 @@ func resetGlobals(t *testing.T) {
 	oldClassifier := classifier
 	oldApply := applyDecision
 	oldFS := processFS
-	oldScanGetFiles := scanGetFiles
+	oldScanGetCandidates := scanGetCandidates
 	oldRegistry := cleanerRegistry
 	oldNow := nowFunc
 
@@ -51,7 +51,7 @@ func resetGlobals(t *testing.T) {
 		classifier = oldClassifier
 		applyDecision = oldApply
 		processFS = oldFS
-		scanGetFiles = oldScanGetFiles
+		scanGetCandidates = oldScanGetCandidates
 		cleanerRegistry = oldRegistry
 		nowFunc = oldNow
 	})
@@ -142,8 +142,8 @@ func TestSmokeScanCommand(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	scanGetFiles = func(dir string) ([]string, error) {
-		return []string{src}, nil
+	scanGetCandidates = func(dir string) ([]string, []string, error) {
+		return []string{src}, nil, nil
 	}
 	scanDir = filepath.Join(tmp, "Desktop")
 
@@ -156,7 +156,7 @@ func TestSmokeScanCommand(t *testing.T) {
 	}
 }
 
-func TestSmokeDefaultScanGetFiles(t *testing.T) {
+func TestSmokeDefaultScanGetCandidates(t *testing.T) {
 	tmp := t.TempDir()
 	if err := os.WriteFile(filepath.Join(tmp, "a.txt"), []byte("a"), 0644); err != nil {
 		t.Fatal(err)
@@ -168,12 +168,15 @@ func TestSmokeDefaultScanGetFiles(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	files, err := defaultScanGetFiles(tmp)
+	files, dirs, err := defaultScanGetCandidates(tmp)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(files) != 2 {
 		t.Fatalf("expected 2 files, got %d", len(files))
+	}
+	if len(dirs) != 1 {
+		t.Fatalf("expected 1 directory, got %d", len(dirs))
 	}
 }
 
@@ -196,8 +199,8 @@ func TestSmokeScanRespectsMinAge(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	scanGetFiles = func(dir string) ([]string, error) {
-		return []string{src}, nil
+	scanGetCandidates = func(dir string) ([]string, []string, error) {
+		return []string{src}, nil, nil
 	}
 
 	if _, err := runScanDir(context.Background(), filepath.Join(tmp, "Desktop"), "run-test", io.Discard, ""); err != nil {
@@ -388,8 +391,8 @@ func TestSmokeEndToEnd(t *testing.T) {
 	// Scan the same directory; nothing should be re-processed because the file
 	// is already gone.
 	nowFunc = func() time.Time { return time.Now().Add(2 * time.Hour) }
-	scanGetFiles = func(dir string) ([]string, error) {
-		return []string{}, nil
+	scanGetCandidates = func(dir string) ([]string, []string, error) {
+		return []string{}, nil, nil
 	}
 	if _, err := runScanDir(context.Background(), filepath.Join(tmp, "Desktop"), "run-test", io.Discard, ""); err != nil {
 		t.Fatalf("scan failed: %v", err)
@@ -445,5 +448,181 @@ func TestSmokeSmartFoldersRegeneration(t *testing.T) {
 	want := []string{"Documents.savedSearch", "Images.savedSearch", "Unknown.savedSearch", "receipt.savedSearch", "work.savedSearch"}
 	if !slices.Equal(names, want) {
 		t.Fatalf("saved searches = %v, want %v", names, want)
+	}
+}
+
+// TestAcceptanceProcessIncludeDirs verifies that `filemaid process --include-dirs`
+// accepts a directory argument, treats it as a read-only candidate, and does not
+// move or modify the directory or its contents.
+func TestAcceptanceProcessIncludeDirs(t *testing.T) {
+	resetGlobals(t)
+
+	tmp := t.TempDir()
+	cfg = testConfig(tmp)
+	db = state.NewFake()
+	processFS = actions.NewRecordingFS()
+	classifier = &fakeClassifier{decision: llm.Decision{
+		Category: "Documents",
+		Tags:     []string{},
+		Action:   "move",
+		Reason:   "text",
+	}}
+
+	dirPath := filepath.Join(tmp, "Desktop", "project-folder")
+	if err := os.MkdirAll(dirPath, 0755); err != nil {
+		t.Fatal(err)
+	}
+	child := filepath.Join(dirPath, "child.txt")
+	if err := os.WriteFile(child, []byte("hello"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	processIncludeDirs = true
+	t.Cleanup(func() { processIncludeDirs = false })
+
+	results, err := processPaths(context.Background(), []string{dirPath}, "run-test", io.Discard, "")
+	if err != nil {
+		t.Fatalf("process failed: %v", err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("expected 1 result, got %d", len(results))
+	}
+	r := results[0]
+	if r.Kind != "directory" {
+		t.Errorf("kind = %q, want directory", r.Kind)
+	}
+	if r.Action != "review" {
+		t.Errorf("action = %q, want review", r.Action)
+	}
+	if _, err := os.Stat(dirPath); err != nil {
+		t.Fatalf("directory was modified or removed: %v", err)
+	}
+	if _, err := os.Stat(child); err != nil {
+		t.Fatalf("directory contents were modified or removed: %v", err)
+	}
+	records := db.(*state.FakeRepo).Records()
+	if len(records) != 0 {
+		t.Errorf("expected no history records for directory candidates, got %d", len(records))
+	}
+}
+
+// TestAcceptanceScanIncludeDirs verifies that `filemaid scan --include-dirs`
+// enumerates immediate subdirectories and surfaces them as directory candidates
+// without modifying their contents.
+func TestAcceptanceScanIncludeDirs(t *testing.T) {
+	resetGlobals(t)
+
+	tmp := t.TempDir()
+	cfg = testConfig(tmp)
+	db = state.NewFake()
+	processFS = actions.NewRecordingFS()
+	classifier = &fakeClassifier{decision: llm.Decision{
+		Category: "Documents",
+		Tags:     []string{},
+		Action:   "move",
+		Reason:   "text",
+	}}
+
+	desktop := filepath.Join(tmp, "Desktop")
+	dirPath := filepath.Join(desktop, "project-folder")
+	if err := os.MkdirAll(dirPath, 0755); err != nil {
+		t.Fatal(err)
+	}
+	child := filepath.Join(dirPath, "child.txt")
+	if err := os.WriteFile(child, []byte("hello"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	includeDirs = true
+	t.Cleanup(func() { includeDirs = false })
+	scanDir = desktop
+	t.Cleanup(func() { scanDir = "" })
+
+	if err := scanCmd.RunE(nil, []string{}); err != nil {
+		t.Fatalf("scan failed: %v", err)
+	}
+
+	if _, err := os.Stat(dirPath); err != nil {
+		t.Fatalf("directory was modified or removed: %v", err)
+	}
+	if _, err := os.Stat(child); err != nil {
+		t.Fatalf("directory contents were modified or removed: %v", err)
+	}
+	records := db.(*state.FakeRepo).Records()
+	if len(records) != 0 {
+		t.Errorf("expected no history records for directory candidates, got %d", len(records))
+	}
+}
+
+// TestAcceptanceScanIncludeDirsRespectsGuardrails verifies that hidden
+// directories and directories outside allowed_dirs are skipped during scan.
+func TestAcceptanceScanIncludeDirsRespectsGuardrails(t *testing.T) {
+	resetGlobals(t)
+
+	tmp := t.TempDir()
+	cfg = testConfig(tmp)
+	db = state.NewFake()
+	processFS = actions.NewRecordingFS()
+	classifier = &fakeClassifier{decision: llm.Decision{
+		Category: "Documents",
+		Tags:     []string{},
+		Action:   "move",
+		Reason:   "text",
+	}}
+
+	desktop := filepath.Join(tmp, "Desktop")
+	hiddenDir := filepath.Join(desktop, ".hidden")
+	normalDir := filepath.Join(desktop, "normal")
+	if err := os.MkdirAll(hiddenDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(normalDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	includeDirs = true
+	t.Cleanup(func() { includeDirs = false })
+	scanDir = desktop
+	t.Cleanup(func() { scanDir = "" })
+
+	results, err := runScanDir(context.Background(), desktop, "run-test", io.Discard, "")
+	if err != nil {
+		t.Fatalf("scan failed: %v", err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("expected 1 result, got %d", len(results))
+	}
+	if !strings.Contains(results[0].Path, "normal") {
+		t.Errorf("expected normal directory, got %s", results[0].Path)
+	}
+}
+
+// TestAcceptanceAppBundleTreatedAsDirectory verifies that `.app` bundles,
+// which are directories on macOS, are treated as directory candidates.
+func TestAcceptanceAppBundleTreatedAsDirectory(t *testing.T) {
+	resetGlobals(t)
+
+	tmp := t.TempDir()
+	cfg = testConfig(tmp)
+	db = state.NewFake()
+	processFS = actions.NewRecordingFS()
+
+	appBundle := filepath.Join(tmp, "Desktop", "MyApp.app")
+	if err := os.MkdirAll(appBundle, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	processIncludeDirs = true
+	t.Cleanup(func() { processIncludeDirs = false })
+
+	results, err := processPaths(context.Background(), []string{appBundle}, "run-test", io.Discard, "")
+	if err != nil {
+		t.Fatalf("process failed: %v", err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("expected 1 result, got %d", len(results))
+	}
+	if results[0].Kind != "directory" {
+		t.Errorf("kind = %q, want directory", results[0].Kind)
 	}
 }
