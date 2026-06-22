@@ -116,12 +116,13 @@ func sortedModelNames(groups map[string][]processItem) []string {
 }
 
 var (
-	processFormat string
-	processJSON   bool
-	processQuiet  bool
-	renameFlag    string
-	processDryRun bool
-	processForce  bool
+	processFormat      string
+	processJSON        bool
+	processQuiet       bool
+	renameFlag         string
+	processDryRun      bool
+	processForce       bool
+	processIncludeDirs bool
 )
 
 // applierFunc matches the signature of actions.Apply so it can be swapped in tests.
@@ -135,6 +136,7 @@ func init() {
 	processCmd.Flags().Lookup("rename").NoOptDefVal = "default"
 	processCmd.Flags().BoolVar(&processForce, "force", false, "force processing even if the file is a duplicate or similar to existing history")
 	processCmd.Flags().BoolVar(&processDryRun, "dry-run", false, "preview changes without moving files")
+	processCmd.Flags().BoolVar(&processIncludeDirs, "include-dirs", false, "treat directories as analysis candidates")
 	rootCmd.AddCommand(processCmd)
 }
 
@@ -257,7 +259,7 @@ var processCmd = &cobra.Command{
 	},
 }
 
-// processResult captures the outcome of processing a single file for display.
+// processResult captures the outcome of processing a single candidate for display.
 type processResult struct {
 	Path             string   `json:"path"`
 	Category         string   `json:"category"`
@@ -274,6 +276,7 @@ type processResult struct {
 	TotalTokens      int      `json:"total_tokens"`
 	TokensPerSec     float64  `json:"tokens_per_sec"`
 	ContextSize      int      `json:"context_size"`
+	Kind             string   `json:"kind,omitempty"` // "file" or "directory"
 }
 
 // formatProcessResults renders process results as a table, human-readable list, or JSON.
@@ -586,6 +589,31 @@ func processPaths(ctx context.Context, paths []string, runID string, w io.Writer
 			continue
 		}
 		if !info.Mode().IsRegular() {
+			if processIncludeDirs && info.IsDir() {
+				if isHidden(src) {
+					results[i] = skipResult(src, "hidden directory")
+					streamer.writeResult(results[i])
+					slog.Info("skipping hidden directory", "path", src)
+					continue
+				}
+				if len(cfg.AllowedDirs) > 0 && !actions.WithinAllowed(src, cfg.AllowedDirs) {
+					results[i] = skipResult(src, "outside allowed dirs")
+					streamer.writeResult(results[i])
+					slog.Warn("skipping directory outside allowed dirs", "path", src)
+					continue
+				}
+				results[i] = processResult{
+					Path:         src,
+					Kind:         "directory",
+					Action:       "review",
+					Result:       "-",
+					OK:           true,
+					OriginalName: filepath.Base(src),
+				}
+				streamer.writeResult(results[i])
+				slog.Info("directory candidate", "path", src)
+				continue
+			}
 			results[i] = skipResult(src, "not a regular file")
 			streamer.writeResult(results[i])
 			slog.Warn("not a file", "path", src)

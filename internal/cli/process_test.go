@@ -1572,3 +1572,140 @@ func TestProcessCommandDryRunShowsRename(t *testing.T) {
 		t.Errorf("dry-run should not move files, got %d moves", len(fs.Moved))
 	}
 }
+
+func TestProcessPathsAcceptsDirectoryWhenFlagSet(t *testing.T) {
+	tmp := t.TempDir()
+	cfg = testConfig(tmp)
+	db = state.NewFake()
+	processFS = actions.NewRecordingFS()
+
+	dirPath := filepath.Join(tmp, "Desktop", "project-folder")
+	if err := os.MkdirAll(dirPath, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	processIncludeDirs = true
+	t.Cleanup(func() { processIncludeDirs = false })
+
+	results, err := processPaths(context.Background(), []string{dirPath}, "run-test", io.Discard, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("expected 1 result, got %d", len(results))
+	}
+	if results[0].Kind != "directory" {
+		t.Errorf("kind = %q, want directory", results[0].Kind)
+	}
+	if results[0].Action != "review" {
+		t.Errorf("action = %q, want review", results[0].Action)
+	}
+	if !results[0].OK {
+		t.Errorf("expected directory result to be OK")
+	}
+	records := db.(*state.FakeRepo).Records()
+	if len(records) != 0 {
+		t.Errorf("expected no history records for directory candidates, got %d", len(records))
+	}
+}
+
+func TestProcessPathsSkipsDirectoryWhenFlagNotSet(t *testing.T) {
+	tmp := t.TempDir()
+	cfg = testConfig(tmp)
+	db = state.NewFake()
+	processFS = actions.NewRecordingFS()
+
+	dirPath := filepath.Join(tmp, "Desktop", "project-folder")
+	if err := os.MkdirAll(dirPath, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	processIncludeDirs = false
+
+	results, err := processPaths(context.Background(), []string{dirPath}, "run-test", io.Discard, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("expected 1 result, got %d", len(results))
+	}
+	if results[0].Kind != "" {
+		t.Errorf("kind = %q, want empty", results[0].Kind)
+	}
+	if results[0].Action != "skip" {
+		t.Errorf("action = %q, want skip", results[0].Action)
+	}
+	if results[0].Error != "not a regular file" {
+		t.Errorf("error = %q, want not a regular file", results[0].Error)
+	}
+}
+
+func TestProcessPathsSkipsHiddenDirectory(t *testing.T) {
+	tmp := t.TempDir()
+	cfg = testConfig(tmp)
+	db = state.NewFake()
+	processFS = actions.NewRecordingFS()
+
+	dirPath := filepath.Join(tmp, "Desktop", ".hidden-dir")
+	if err := os.MkdirAll(dirPath, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	processIncludeDirs = true
+	t.Cleanup(func() { processIncludeDirs = false })
+
+	results, err := processPaths(context.Background(), []string{dirPath}, "run-test", io.Discard, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("expected 1 result, got %d", len(results))
+	}
+	if results[0].Action != "skip" {
+		t.Errorf("action = %q, want skip", results[0].Action)
+	}
+	if results[0].Error != "hidden directory" {
+		t.Errorf("error = %q, want hidden directory", results[0].Error)
+	}
+}
+
+func TestProcessPathsSkipsDirectoryOutsideAllowedDirs(t *testing.T) {
+	tmp := t.TempDir()
+	cfg = testConfig(tmp)
+	db = state.NewFake()
+	processFS = actions.NewRecordingFS()
+
+	dirPath := filepath.Join(tmp, "Outside", "project-folder")
+	if err := os.MkdirAll(dirPath, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	processIncludeDirs = true
+	t.Cleanup(func() { processIncludeDirs = false })
+
+	results, err := processPaths(context.Background(), []string{dirPath}, "run-test", io.Discard, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("expected 1 result, got %d", len(results))
+	}
+	if results[0].Action != "skip" {
+		t.Errorf("action = %q, want skip", results[0].Action)
+	}
+	if results[0].Error != "outside allowed dirs" {
+		t.Errorf("error = %q, want outside allowed dirs", results[0].Error)
+	}
+}
+
+func TestProcessCommandIncludeDirsFlagExists(t *testing.T) {
+	if processCmd.Flags().Lookup("include-dirs") == nil {
+		t.Fatal("expected --include-dirs flag on process command")
+	}
+}
+
+func TestScanCommandIncludeDirsFlagExists(t *testing.T) {
+	if scanCmd.Flags().Lookup("include-dirs") == nil {
+		t.Fatal("expected --include-dirs flag on scan command")
+	}
+}
