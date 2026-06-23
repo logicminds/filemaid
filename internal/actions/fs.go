@@ -105,6 +105,7 @@ func (o *OSFS) Move(src, dest string) error {
 	}
 	return nil
 }
+
 // isCrossDeviceError reports whether err is a cross-device link/rename error.
 func isCrossDeviceError(err error) bool {
 	return errors.Is(err, syscall.EXDEV)

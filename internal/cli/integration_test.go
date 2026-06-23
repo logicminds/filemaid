@@ -152,8 +152,9 @@ func TestSmokeScanCommand(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	scanGetCandidates = func(ctx context.Context, dir string, depth int) ([]processInput, []processInput, error) { return []processInput{{path: src}}, nil, nil
- }
+	scanGetCandidates = func(ctx context.Context, dir string, depth int) ([]processInput, []processInput, error) {
+		return []processInput{{path: src}}, nil, nil
+	}
 	scanDir = filepath.Join(tmp, "Desktop")
 
 	if err := scanCmd.RunE(scanCmd, nil); err != nil {
@@ -208,8 +209,9 @@ func TestSmokeScanRespectsMinAge(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	scanGetCandidates = func(ctx context.Context, dir string, depth int) ([]processInput, []processInput, error) { return []processInput{{path: src}}, nil, nil
- }
+	scanGetCandidates = func(ctx context.Context, dir string, depth int) ([]processInput, []processInput, error) {
+		return []processInput{{path: src}}, nil, nil
+	}
 
 	if _, err := runScanDir(context.Background(), filepath.Join(tmp, "Desktop"), "run-test", io.Discard, ""); err != nil {
 		t.Fatal(err)
@@ -399,8 +401,9 @@ func TestSmokeEndToEnd(t *testing.T) {
 	// Scan the same directory; nothing should be re-processed because the file
 	// is already gone.
 	nowFunc = func() time.Time { return time.Now().Add(2 * time.Hour) }
-	scanGetCandidates = func(ctx context.Context, dir string, depth int) ([]processInput, []processInput, error) { return nil, nil, nil
- }
+	scanGetCandidates = func(ctx context.Context, dir string, depth int) ([]processInput, []processInput, error) {
+		return nil, nil, nil
+	}
 	if _, err := runScanDir(context.Background(), filepath.Join(tmp, "Desktop"), "run-test", io.Discard, ""); err != nil {
 		t.Fatalf("scan failed: %v", err)
 	}
@@ -633,6 +636,7 @@ func TestAcceptanceAppBundleTreatedAsDirectory(t *testing.T) {
 		t.Errorf("kind = %q, want directory", results[0].Kind)
 	}
 }
+
 // TestIntegrationProjectDirectoryMoveAndUndo verifies that a directory
 // classified as a project is moved whole to the review queue by
 // `process --depth --move-projects` and restored to its original path by
