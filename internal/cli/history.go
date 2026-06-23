@@ -43,6 +43,8 @@ var historyCmd = &cobra.Command{
 			return nil
 		}
 
+		// Print a leading and trailing copy of the run summary so the run ID is
+		// visible both at the top (for context) and at the bottom (after scrolling).
 		if historyLast && len(records) > 0 {
 			fmt.Printf("%d files processed in run %s\n\n", len(records), runID)
 		}
@@ -51,6 +53,9 @@ var historyCmd = &cobra.Command{
 			if r.PromptTokens.Int64 > 0 || r.CompletionTokens.Int64 > 0 {
 				fmt.Printf("  tokens=%d/%d (%.1f tok/s) duration=%dms ctx=%d\n", r.PromptTokens.Int64, r.CompletionTokens.Int64, r.TokensPerSec.Float64, r.LLMDurationMs.Int64, r.ContextSize.Int64)
 			}
+		}
+		if historyLast && len(records) > 0 {
+			fmt.Printf("\nRun ID: %s (use with `filemaid undo --run %s`)\n", runID, runID)
 		}
 		return nil
 	},
