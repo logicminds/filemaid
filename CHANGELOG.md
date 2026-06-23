@@ -6,8 +6,17 @@ All notable changes to filemaid are documented in this file.
 
 ### Added
 
-- **`--include-dirs` flag for `scan` and `process`** — opt-in flag that treats immediate subdirectories as analysis candidates. `scan --include-dirs` enumerates subdirectories alongside files, and `process --include-dirs <dir>` accepts directory arguments. Directory candidates bypass file moves, renames, deletes, and history recording; they are surfaced as read-only `review` results with `kind: directory`. Guardrails for `allowed_dirs`, hidden-directory skipping, and `min_age_hours` are applied to directories in `scan`.
+- **Directory-aware deep classification and in-place renaming** — `--depth` is now an optional integer depth flag. `scan --depth` and `process --depth` descend up to N levels, detect project markers, classify directories read-only, and include directory context in file prompts.
+- **`project_markers` config option** — built-in markers (`.git`, `node_modules`, `.venv`, `vendor`, `.terraform`, `build`) stop recursion; user-provided markers are merged additively.
+- **Bounded directory metadata gathering** — `internal/directory.Gather` produces a capped snapshot of immediate children, extension counts, and detected markers; `.app` bundles are treated as opaque directories.
+- **Directory-specific LLM classifier** — new `DirectoryDecision` type and `ClassifyDirectory` method return `keep|review|trash|archive` recommendations; cached in a dedicated SQLite table keyed by content digest.
+- **Directory context in file prompts** — files discovered inside descended directories include ancestor path, depth, and detected project marker in the classification prompt; cache keys incorporate context.
+- **In-place file renaming** — files inside project-marker directories can be renamed within their source directory when the LLM suggests a better name and rename is enabled.
+- **Updated output formatters** — table/human/JSON output distinguishes directory rows with `dir:`/`[dir]` markers and recommendations, and in-place renames are labeled with the new absolute path; summary counts split files and directories.
 
+### Changed
+
+- `--depth` changed from a boolean flag (`--include-dirs`) to an optional integer (`--depth` = depth 1, `--depth=N` = depth N).
 ## [0.5.1]
 
 ### Added

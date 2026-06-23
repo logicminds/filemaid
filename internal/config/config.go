@@ -77,6 +77,9 @@ type Config struct {
 	Force                          bool                     `json:"force"`
 	ProcessWorkers                 int                      `json:"process_workers"`
 	MaxImageDimension              int                      `json:"max_image_dimension"`
+	ProjectMarkers                 []string                 `json:"project_markers"`
+	MaxDirSampleEntries            int                      `json:"max_dir_sample_entries"`
+	MaxDirSampleBytes              int                      `json:"max_dir_sample_bytes"`
 	ExternalTools                  ExternalTools            `json:"external_tools"`
 }
 
@@ -158,6 +161,9 @@ func Defaults() *Config {
 		Force:                          false,
 		ProcessWorkers:                 4,
 		MaxImageDimension:              1024,
+		ProjectMarkers:                 []string{".git", "node_modules", ".venv", "vendor", ".terraform", "build"},
+		MaxDirSampleEntries:            50,
+		MaxDirSampleBytes:              2048,
 		ExternalTools:                  ExternalTools{FFmpeg: "ffmpeg"},
 	}
 }
@@ -170,6 +176,8 @@ func Load() (*Config, error) {
 // LoadPath returns defaults merged with the JSON config at path.
 // Nested objects (categories, dev_cleanup, review_cleanup) are merged deeply
 // so that a user override for one key does not erase the remaining defaults.
+// The project_markers slice is merged additively: user values are appended
+// to the built-in defaults and normalized.
 // All string values containing "~" are expanded to the user's home directory,
 // including strings inside slices and maps.
 func LoadPath(path string) (*Config, error) {
@@ -193,6 +201,7 @@ func LoadPath(path string) (*Config, error) {
 		return nil, err
 	}
 	deepMerge(merged, user)
+	mergeProjectMarkersAdditive(merged, user)
 	expandTildeInMap(merged)
 	ensureUnknownInMap(merged)
 	return configFromMap(merged)
@@ -234,6 +243,62 @@ func deepMerge(dst, src map[string]interface{}) {
 		}
 		dst[k] = sv
 	}
+}
+func mergeProjectMarkersAdditive(merged, user map[string]interface{}) {
+	defaults := Defaults().ProjectMarkers
+	if userMarkers, ok := user["project_markers"]; ok {
+		merged["project_markers"] = additiveProjectMarkers(defaults, userMarkers)
+	} else {
+		merged["project_markers"] = normalizeProjectMarkers(defaults)
+	}
+}
+
+func additiveProjectMarkers(defaults []string, raw interface{}) []string {
+	seen := make(map[string]struct{})
+	out := make([]string, 0)
+	for _, m := range defaults {
+		n := normalizeProjectMarker(m)
+		if n == "" {
+			continue
+		}
+		if _, ok := seen[n]; ok {
+			continue
+		}
+		seen[n] = struct{}{}
+		out = append(out, n)
+	}
+	list, _ := raw.([]interface{})
+	for _, v := range list {
+		s, _ := v.(string)
+		n := normalizeProjectMarker(s)
+		if n == "" {
+			continue
+		}
+		if _, ok := seen[n]; ok {
+			continue
+		}
+		seen[n] = struct{}{}
+		out = append(out, n)
+	}
+	return out
+}
+
+func normalizeProjectMarkers(ss []string) []string {
+	out := make([]string, 0, len(ss))
+	for _, s := range ss {
+		n := normalizeProjectMarker(s)
+		if n != "" {
+			out = append(out, n)
+		}
+	}
+	return out
+}
+
+func normalizeProjectMarker(s string) string {
+	s = strings.TrimSpace(s)
+	s = strings.TrimPrefix(s, "./")
+	s = strings.TrimRight(s, "/\\")
+	return strings.ToLower(s)
 }
 
 // expandTildeInMap recursively expands "~" to the user's home directory for

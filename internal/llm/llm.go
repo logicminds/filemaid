@@ -4,6 +4,7 @@ package llm
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -24,6 +25,7 @@ import (
 	"time"
 
 	"github.com/logicminds/filemaid/internal/config"
+	"github.com/logicminds/filemaid/internal/directory"
 )
 
 // Decision holds the classifier's output for a single file.
@@ -62,7 +64,9 @@ func NewDecision() Decision {
 // Classifier turns a file path into a classification Decision.
 type Classifier interface {
 	// Classify classifies a single file and returns a Decision and telemetry.
-	Classify(ctx context.Context, path string, fileHash string, cfg *config.Config) (Decision, Metrics, error)
+	// dirCtx is optional; when non-nil the classifier may include directory
+	// ancestry information in the prompt and cache key.
+	Classify(ctx context.Context, path string, fileHash string, cfg *config.Config, dirCtx *directory.Context) (Decision, Metrics, error)
 	// Validate checks that the configured Ollama model is reachable and can
 	// generate a response. Commands that depend on classification should call
 	// Validate before touching any files.
@@ -76,6 +80,33 @@ type DecisionCache interface {
 	RecordDecision(sha256 string, decision Decision) error
 }
 
+// DirectoryDecision holds the classifier's output for a single directory.
+type DirectoryDecision struct {
+	Recommendation string   `json:"recommendation"` // keep|review|trash|archive
+	Reason         string   `json:"reason"`
+	Category       string   `json:"category,omitempty"`
+	Tags           []string `json:"tags,omitempty"`
+}
+
+// NewDirectoryDecision returns a DirectoryDecision with the required default values.
+func NewDirectoryDecision() DirectoryDecision {
+	return DirectoryDecision{
+		Recommendation: "review",
+	}
+}
+
+// DirectoryClassifier classifies a directory from bounded metadata.
+type DirectoryClassifier interface {
+	ClassifyDirectory(ctx context.Context, meta *directory.Metadata, cfg *config.Config) (DirectoryDecision, Metrics, error)
+}
+
+// DirectoryDecisionCache stores and retrieves directory classification decisions
+// keyed by a stable digest so repeated identical directories can skip LLM calls.
+type DirectoryDecisionCache interface {
+	FindDirectoryDecision(key string) (DirectoryDecision, bool, error)
+	RecordDirectoryDecision(key string, decision DirectoryDecision) error
+}
+
 // HTTPTransport abstracts the HTTP layer so tests can fake Ollama responses.
 // It matches the standard http.RoundTripper signature.
 type HTTPTransport interface {
@@ -84,8 +115,9 @@ type HTTPTransport interface {
 
 // Client is an Ollama-backed Classifier.
 type Client struct {
-	transport HTTPTransport
-	cache     DecisionCache
+	transport      HTTPTransport
+	cache          DecisionCache
+	directoryCache DirectoryDecisionCache
 
 	mu      sync.Mutex
 	checked map[modelKey]checkResult
@@ -117,10 +149,19 @@ func (c *Client) SetDecisionCache(cache DecisionCache) {
 	c.cache = cache
 }
 
+// SetDirectoryDecisionCache attaches a directory decision cache to the client.
+func (c *Client) SetDirectoryDecisionCache(cache DirectoryDecisionCache) {
+	c.directoryCache = cache
+}
+
 // Classify classifies a single file using Ollama.
-func (c *Client) Classify(ctx context.Context, path string, fileHash string, cfg *config.Config) (Decision, Metrics, error) {
-	if fileHash != "" && c.cache != nil {
-		if d, ok, err := c.cache.FindDecisionByHash(fileHash); err == nil && ok {
+func (c *Client) Classify(ctx context.Context, path string, fileHash string, cfg *config.Config, dirCtx *directory.Context) (Decision, Metrics, error) {
+	cacheKey := fileHash
+	if dirCtx != nil && !dirCtx.None() {
+		cacheKey = contextualCacheKey(fileHash, dirCtx)
+	}
+	if cacheKey != "" && c.cache != nil {
+		if d, ok, err := c.cache.FindDecisionByHash(cacheKey); err == nil && ok {
 			return d, Metrics{}, nil
 		}
 	}
@@ -130,13 +171,12 @@ func (c *Client) Classify(ctx context.Context, path string, fileHash string, cfg
 		return Decision{}, Metrics{}, err
 	}
 
-	prompt, images, err := buildPrompt(path, cfg)
+	prompt, images, err := buildPrompt(path, cfg, dirCtx)
 	if err != nil {
 		d := NewDecision()
 		d.Reason = fmt.Sprintf("build prompt error: %v", err)
 		return d, Metrics{}, nil
 	}
-
 	categories := categorySet(cfg.Categories)
 	ollamaURL := strings.TrimRight(cfg.OllamaURL, "/")
 	model := resolvedModel
@@ -166,18 +206,69 @@ func (c *Client) Classify(ctx context.Context, path string, fileHash string, cfg
 	metrics.ContextSize = DefaultContextSize
 
 	if err == nil {
-		if fileHash != "" && c.cache != nil {
-			_ = c.cache.RecordDecision(fileHash, decision)
+		if cacheKey != "" && c.cache != nil {
+			_ = c.cache.RecordDecision(cacheKey, decision)
 		}
 		return decision, metrics, nil
 	}
 
 	d := NewDecision()
 	d.Reason = fmt.Sprintf("ollama error: %s", err.Error())
-	if fileHash != "" && c.cache != nil {
-		_ = c.cache.RecordDecision(fileHash, d)
+	if cacheKey != "" && c.cache != nil {
+		_ = c.cache.RecordDecision(cacheKey, d)
 	}
 	return d, metrics, nil
+}
+
+// contextualCacheKey returns a deterministic cache key that combines a file's
+// content hash with its directory context so the same file in different
+// contexts can receive different cached decisions.
+func contextualCacheKey(fileHash string, dirCtx *directory.Context) string {
+	h := sha256.New()
+	h.Write([]byte(fileHash))
+	if dirCtx != nil && !dirCtx.None() {
+		b, _ := json.Marshal(dirCtx)
+		h.Write(b)
+	}
+	return fmt.Sprintf("%x", h.Sum(nil))
+}
+
+// ClassifyDirectory classifies a directory using bounded metadata.
+func (c *Client) ClassifyDirectory(ctx context.Context, meta *directory.Metadata, cfg *config.Config) (DirectoryDecision, Metrics, error) {
+	key := directoryCacheKey(meta)
+	if key != "" && c.directoryCache != nil {
+		if d, ok, err := c.directoryCache.FindDirectoryDecision(key); err == nil && ok {
+			return d, Metrics{}, nil
+		}
+	}
+
+	resolvedModel, err := c.checkModel(ctx, cfg.OllamaURL, cfg.Model)
+	if err != nil {
+		return DirectoryDecision{}, Metrics{}, err
+	}
+
+	prompt := buildDirectoryPrompt(meta, cfg)
+	ollamaURL := strings.TrimRight(cfg.OllamaURL, "/")
+	model := resolvedModel
+
+	start := time.Now()
+	resp, err := c.requestDirectoryChat(ctx, ollamaURL, model, prompt, time.Duration(cfg.RequestTimeout))
+	if err != nil {
+		return NewDirectoryDecision(), Metrics{}, err
+	}
+	if resp.Error != "" {
+		return NewDirectoryDecision(), Metrics{}, errors.New(resp.Error)
+	}
+
+	decision := parseDirectoryResponse(resp)
+	metrics := metricsFromChatResponse(resp)
+	metrics.DurationMs = time.Since(start).Milliseconds()
+	metrics.ContextSize = DefaultContextSize
+
+	if key != "" && c.directoryCache != nil {
+		_ = c.directoryCache.RecordDirectoryDecision(key, decision)
+	}
+	return decision, metrics, nil
 }
 
 // isImageRelatedError reports whether an error from Ollama is likely caused
@@ -538,7 +629,7 @@ func lerp(a, b uint32, t float64) uint32 {
 	return uint32(float64(a)*(1.0-t) + float64(b)*t)
 }
 
-func buildPrompt(path string, cfg *config.Config) (string, []string, error) {
+func buildPrompt(path string, cfg *config.Config, dirCtx *directory.Context) (string, []string, error) {
 	stat, err := os.Stat(path)
 	if err != nil {
 		return "", nil, err
@@ -557,6 +648,15 @@ func buildPrompt(path string, cfg *config.Config) (string, []string, error) {
 	var images []string
 	var extras []string
 	var subcatExtra string
+	if dirCtx != nil && !dirCtx.None() {
+		ctxLines := []string{"Directory context:"}
+		ctxLines = append(ctxLines, fmt.Sprintf("- ancestor: %s", dirCtx.Ancestor))
+		ctxLines = append(ctxLines, fmt.Sprintf("- depth: %d", dirCtx.Depth))
+		if dirCtx.Marker != "" {
+			ctxLines = append(ctxLines, fmt.Sprintf("- project marker: %s", dirCtx.Marker))
+		}
+		extras = append(extras, strings.Join(ctxLines, "\n"))
+	}
 	if imageExts[ext] {
 		extras = append(extras, "The image is attached; use its content to classify.")
 		if cfg.SubcategorizeImages {
@@ -592,6 +692,193 @@ func buildPrompt(path string, cfg *config.Config) (string, []string, error) {
 		strings.Join(extras, "\n"),
 	)
 	return prompt, images, nil
+}
+
+const directoryPromptTemplate = `You are a directory analyst. Based on the bounded metadata below, recommend what to do with this directory.
+
+Choose exactly one recommendation: keep, review, trash, or archive.
+keep = the directory is clearly valuable and should stay where it is.
+review = the directory is ambiguous, sensitive, personal, or cannot be confidently classified.
+trash = the directory is obvious junk, cache, or temporary data with no lasting value.
+archive = the directory contains valuable historical data that should be preserved but is not actively needed.
+
+Directory:
+path: %s
+name: %s
+size: %d bytes
+child count: %d
+modified: %s
+extensions: %s
+project markers: %s
+%s
+
+Return a single compact JSON object and nothing else.
+{"recommendation": "keep|review|trash|archive", "reason": "...", "category": "...", "tags": ["..."]}`
+
+func buildDirectoryPrompt(meta *directory.Metadata, cfg *config.Config) string {
+	mtime := meta.Mtime.Format("2006-01-02T15:04:05")
+	if meta.Mtime.IsZero() {
+		mtime = "unknown"
+	}
+
+	exts := make([]string, 0, len(meta.Extensions))
+	for ext := range meta.Extensions {
+		exts = append(exts, ext)
+	}
+	sort.Strings(exts)
+	extParts := make([]string, 0, len(exts))
+	for _, ext := range exts {
+		extParts = append(extParts, fmt.Sprintf("%s:%d", ext, meta.Extensions[ext]))
+	}
+
+	var extras []string
+	if meta.IsAppBundle {
+		extras = append(extras, "This is an application bundle; treat it as an opaque directory.")
+	}
+	if meta.Truncated != "" {
+		extras = append(extras, fmt.Sprintf("Note: child enumeration was truncated due to %s.", meta.Truncated))
+	}
+	if len(meta.ReadErrors) > 0 {
+		extras = append(extras, fmt.Sprintf("Read errors on %d children.", len(meta.ReadErrors)))
+	}
+
+	markers := "none"
+	if len(meta.Markers) > 0 {
+		markers = strings.Join(meta.Markers, ", ")
+	}
+
+	return fmt.Sprintf(
+		directoryPromptTemplate,
+		meta.Path,
+		meta.Base,
+		meta.Size,
+		meta.ChildCount,
+		mtime,
+		strings.Join(extParts, ", "),
+		markers,
+		strings.Join(extras, "\n"),
+	)
+}
+
+func directoryToolSchema() map[string]any {
+	return map[string]any{
+		"type": "function",
+		"function": map[string]any{
+			"name":        "classify_directory",
+			"description": "Classify a directory and recommend what to do with it",
+			"parameters": map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"recommendation": map[string]any{
+						"type":        "string",
+						"enum":        []string{"keep", "review", "trash", "archive"},
+						"description": "keep = valuable, review = ambiguous/sensitive, trash = obvious junk, archive = valuable historical data",
+					},
+					"reason": map[string]any{
+						"type":        "string",
+						"description": "Brief explanation for the recommendation",
+					},
+					"category": map[string]any{
+						"type":        "string",
+						"description": "Optional category label for the directory",
+					},
+					"tags": map[string]any{
+						"type":        "array",
+						"items":       map[string]any{"type": "string"},
+						"description": "Optional descriptive tags",
+					},
+				},
+				"required": []string{"recommendation", "reason"},
+			},
+		},
+	}
+}
+
+func (c *Client) requestDirectoryChat(ctx context.Context, ollamaURL, model, prompt string, timeout time.Duration) (chatResponse, error) {
+	var resp chatResponse
+	body := map[string]any{
+		"model": model,
+		"messages": []map[string]any{
+			{
+				"role":    "user",
+				"content": prompt,
+			},
+		},
+		"tools":      []map[string]any{directoryToolSchema()},
+		"stream":     false,
+		"keep_alive": "5m",
+		"think":      false,
+		"options": map[string]any{
+			"temperature": 0.2,
+			"num_predict": 256,
+			"num_ctx":     DefaultContextSize,
+		},
+	}
+	if timeout <= 0 {
+		timeout = 120 * time.Second
+	}
+	if err := c.postJSON(ctx, ollamaURL+"/api/chat", body, timeout, &resp); err != nil {
+		return chatResponse{}, err
+	}
+	return resp, nil
+}
+
+func parseDirectoryResponse(resp chatResponse) DirectoryDecision {
+	d := NewDirectoryDecision()
+
+	msg := resp.Message
+	if len(msg.ToolCalls) > 0 {
+		call := msg.ToolCalls[0]
+		if call.Function.Name == "classify_directory" || call.Function.Name == "" {
+			if args, ok := parseArguments(call.Function.Arguments); ok {
+				return buildDirectoryDecision(args)
+			}
+		}
+	}
+
+	if raw := strings.TrimSpace(resp.Response); raw != "" {
+		if parsed, ok := extractJSON(raw); ok {
+			return buildDirectoryDecision(parsed)
+		}
+	}
+
+	return d
+}
+
+func buildDirectoryDecision(m map[string]any) DirectoryDecision {
+	d := NewDirectoryDecision()
+
+	if rec, ok := stringField(m, "recommendation"); ok {
+		switch rec {
+		case "keep", "review", "trash", "archive":
+			d.Recommendation = rec
+		}
+	}
+
+	d.Reason, _ = stringField(m, "reason")
+	d.Category, _ = stringField(m, "category")
+	d.Tags = stringSliceField(m, "tags")
+
+	return d
+}
+
+func directoryCacheKey(meta *directory.Metadata) string {
+	if meta == nil {
+		return ""
+	}
+	h := sha256.New()
+	fmt.Fprintf(h, "%s\n", meta.Path)
+	fmt.Fprintf(h, "%d\n", meta.Size)
+	fmt.Fprintf(h, "%d\n", meta.Mtime.Unix())
+	exts := make([]string, 0, len(meta.Extensions))
+	for ext := range meta.Extensions {
+		exts = append(exts, ext)
+	}
+	sort.Strings(exts)
+	for _, ext := range exts {
+		fmt.Fprintf(h, "%s:%d\n", ext, meta.Extensions[ext])
+	}
+	return fmt.Sprintf("%x", h.Sum(nil))
 }
 
 func readTextSnippet(path string, limit int) string {

@@ -16,10 +16,21 @@ import (
 
 	"github.com/logicminds/filemaid/internal/actions"
 	"github.com/logicminds/filemaid/internal/config"
+	"github.com/logicminds/filemaid/internal/directory"
 	"github.com/logicminds/filemaid/internal/llm"
 	"github.com/logicminds/filemaid/internal/state"
 	"github.com/spf13/cobra"
 )
+
+// inputs converts a list of path strings into processInput values for tests
+// that do not need directory context.
+func inputs(paths ...string) []processInput {
+	out := make([]processInput, len(paths))
+	for i, p := range paths {
+		out[i] = processInput{path: p}
+	}
+	return out
+}
 
 func TestIsHidden(t *testing.T) {
 	cases := []struct {
@@ -101,7 +112,7 @@ func TestProcessPathsSkipsNonexistent(t *testing.T) {
 	processFS = actions.NewOSFS()
 
 	buf := captureSlog(t)
-	processPaths(context.Background(), []string{filepath.Join(t.TempDir(), "nope.txt")}, "run-test", io.Discard, "")
+	processPaths(context.Background(), inputs(filepath.Join(t.TempDir(), "nope.txt")), "run-test", io.Discard, "")
 
 	if !bytes.Contains(buf.Bytes(), []byte("path does not exist")) {
 		t.Errorf("expected 'path does not exist' warning, got %q", buf.String())
@@ -119,7 +130,7 @@ func TestProcessPathsSkipsHidden(t *testing.T) {
 	os.WriteFile(hidden, []byte("secret"), 0644)
 
 	buf := captureSlog(t)
-	processPaths(context.Background(), []string{hidden}, "run-test", io.Discard, "")
+	processPaths(context.Background(), inputs(hidden), "run-test", io.Discard, "")
 
 	if !bytes.Contains(buf.Bytes(), []byte("skipping hidden file")) {
 		t.Errorf("expected 'skipping hidden file' log, got %q", buf.String())
@@ -136,7 +147,7 @@ func TestProcessPathsSkipsOutsideAllowed(t *testing.T) {
 	os.WriteFile(outside, []byte("outside"), 0644)
 
 	buf := captureSlog(t)
-	processPaths(context.Background(), []string{outside}, "run-test", io.Discard, "")
+	processPaths(context.Background(), inputs(outside), "run-test", io.Discard, "")
 
 	if !bytes.Contains(buf.Bytes(), []byte("outside allowed dirs")) {
 		t.Errorf("expected 'outside allowed dirs' warning, got %q", buf.String())
@@ -159,7 +170,7 @@ func TestProcessPathsClassifiesAndApplies(t *testing.T) {
 	os.MkdirAll(filepath.Dir(src), 0755)
 	os.WriteFile(src, []byte("hello"), 0644)
 
-	if _, err := processPaths(context.Background(), []string{src}, "run-test", io.Discard, ""); err != nil {
+	if _, err := processPaths(context.Background(), inputs(src), "run-test", io.Discard, ""); err != nil {
 		t.Fatal(err)
 	}
 
@@ -192,7 +203,7 @@ func TestProcessPathsDuplicateForcesReview(t *testing.T) {
 	os.WriteFile(src1, []byte("same"), 0644)
 	os.WriteFile(src2, []byte("same"), 0644)
 
-	if _, err := processPaths(context.Background(), []string{src1, src2}, "run-test", io.Discard, ""); err != nil {
+	if _, err := processPaths(context.Background(), inputs(src1, src2), "run-test", io.Discard, ""); err != nil {
 		t.Fatal(err)
 	}
 
@@ -219,21 +230,35 @@ func TestProcessPathsDuplicateForcesReview(t *testing.T) {
 }
 
 type fakeClassifier struct {
-	mu        sync.Mutex
-	decision  llm.Decision
-	err       error
-	validate  error
-	calls     []string
-	models    []string
-	validated bool
+	mu          sync.Mutex
+	decision    llm.Decision
+	dirDecision llm.DirectoryDecision
+	err         error
+	validate    error
+	calls       []string
+	models      []string
+	dirCalls    []string
+	validated   bool
 }
 
-func (f *fakeClassifier) Classify(ctx context.Context, path string, fileHash string, cfg *config.Config) (llm.Decision, llm.Metrics, error) {
+func (f *fakeClassifier) Classify(ctx context.Context, path string, fileHash string, cfg *config.Config, dirCtx *directory.Context) (llm.Decision, llm.Metrics, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.calls = append(f.calls, path)
 	f.models = append(f.models, cfg.Model)
 	return f.decision, llm.Metrics{}, f.err
+}
+
+func (f *fakeClassifier) ClassifyDirectory(ctx context.Context, meta *directory.Metadata, cfg *config.Config) (llm.DirectoryDecision, llm.Metrics, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.dirCalls = append(f.dirCalls, meta.Path)
+	decision := f.dirDecision
+	if decision.Recommendation == "" {
+		decision.Recommendation = "review"
+		decision.Reason = "fake default"
+	}
+	return decision, llm.Metrics{}, f.err
 }
 
 func (f *fakeClassifier) Validate(cfg *config.Config) error {
@@ -312,7 +337,7 @@ func TestProcessPathsFallsBackToReviewOnClassifyError(t *testing.T) {
 	os.MkdirAll(filepath.Dir(src), 0755)
 	os.WriteFile(src, []byte("hello"), 0644)
 
-	if _, err := processPaths(context.Background(), []string{src}, "run-test", io.Discard, ""); err != nil {
+	if _, err := processPaths(context.Background(), inputs(src), "run-test", io.Discard, ""); err != nil {
 		t.Fatal(err)
 	}
 
@@ -340,7 +365,7 @@ func TestProcessPathsLogsApplyError(t *testing.T) {
 	os.WriteFile(src, []byte("hello"), 0644)
 
 	buf := captureSlog(t)
-	processPaths(context.Background(), []string{src}, "run-test", io.Discard, "")
+	processPaths(context.Background(), inputs(src), "run-test", io.Discard, "")
 
 	if !bytes.Contains(buf.Bytes(), []byte("apply failed")) {
 		t.Errorf("expected 'apply failed' log, got %q", buf.String())
@@ -367,7 +392,7 @@ func TestProcessPathsResultsInInputOrder(t *testing.T) {
 		paths[i] = p
 	}
 
-	results, err := processPaths(context.Background(), paths, "run-test", io.Discard, "")
+	results, err := processPaths(context.Background(), inputs(paths...), "run-test", io.Discard, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -398,7 +423,7 @@ func newBlockingClassifier() *blockingClassifier {
 	return b
 }
 
-func (b *blockingClassifier) Classify(ctx context.Context, path string, fileHash string, cfg *config.Config) (llm.Decision, llm.Metrics, error) {
+func (b *blockingClassifier) Classify(ctx context.Context, path string, fileHash string, cfg *config.Config, dirCtx *directory.Context) (llm.Decision, llm.Metrics, error) {
 	b.mu.Lock()
 	b.active++
 	if b.active > b.maxActive {
@@ -409,7 +434,7 @@ func (b *blockingClassifier) Classify(ctx context.Context, path string, fileHash
 	}
 	b.active--
 	b.mu.Unlock()
-	decision, _, err := b.fakeClassifier.Classify(ctx, path, fileHash, cfg)
+	decision, _, err := b.fakeClassifier.Classify(ctx, path, fileHash, cfg, dirCtx)
 	return decision, llm.Metrics{}, err
 }
 
@@ -441,7 +466,7 @@ func TestProcessPathsProcessesConcurrently(t *testing.T) {
 
 	done := make(chan []processResult)
 	go func() {
-		res, err := processPaths(context.Background(), paths, "run-test", io.Discard, "")
+		res, err := processPaths(context.Background(), inputs(paths...), "run-test", io.Discard, "")
 		if err != nil {
 			t.Error(err)
 		}
@@ -497,7 +522,7 @@ func TestProcessPathsUsesConfiguredWorkers(t *testing.T) {
 
 	done := make(chan []processResult)
 	go func() {
-		res, err := processPaths(context.Background(), paths, "run-test", io.Discard, "")
+		res, err := processPaths(context.Background(), inputs(paths...), "run-test", io.Discard, "")
 		if err != nil {
 			t.Error(err)
 		}
@@ -576,7 +601,7 @@ type pathClassifier struct {
 	calls []string
 }
 
-func (p *pathClassifier) Classify(ctx context.Context, src string, fileHash string, cfg *config.Config) (llm.Decision, llm.Metrics, error) {
+func (p *pathClassifier) Classify(ctx context.Context, src string, fileHash string, cfg *config.Config, dirCtx *directory.Context) (llm.Decision, llm.Metrics, error) {
 	p.mu.Lock()
 	p.calls = append(p.calls, src)
 	p.mu.Unlock()
@@ -614,7 +639,7 @@ func TestProcessPathsAppliesConcurrentlyForDifferentDirs(t *testing.T) {
 
 	done := make(chan []processResult)
 	go func() {
-		res, err := processPaths(context.Background(), paths, "run-test", io.Discard, "")
+		res, err := processPaths(context.Background(), inputs(paths...), "run-test", io.Discard, "")
 		if err != nil {
 			t.Error(err)
 		}
@@ -671,7 +696,7 @@ func TestProcessPathsAppliesSeriallyForSameDir(t *testing.T) {
 
 	done := make(chan []processResult)
 	go func() {
-		res, err := processPaths(context.Background(), paths, "run-test", io.Discard, "")
+		res, err := processPaths(context.Background(), inputs(paths...), "run-test", io.Discard, "")
 		if err != nil {
 			t.Error(err)
 		}
@@ -772,7 +797,7 @@ func TestFormatProcessTable(t *testing.T) {
 		{Path: "/tmp/photo.jpg", Category: "Images", Tags: []string{"jpg"}, Action: "move", Result: "/archive/vacation-photo.jpg", OriginalName: "photo.jpg", NewName: "vacation-photo.jpg", OK: true},
 	}
 	out := formatProcessTable(results)
-	for _, want := range []string{"File", "Category", "Tags", "Action", "Name", "Result", "Status", "Documents", "txt", "Receipts", "pdf", "✓", "⚠", "kept name", "photo.jpg -> vacation-photo.jpg"} {
+	for _, want := range []string{"Item", "Category", "Tags", "Action", "Name", "Result", "Status", "Documents", "txt", "Receipts", "pdf", "✓", "⚠", "kept name", "photo.jpg -> vacation-photo.jpg"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("table output missing %q:\n%s", want, out)
 		}
@@ -826,7 +851,7 @@ func TestProcessPathsIncludesSkippedResults(t *testing.T) {
 	os.WriteFile(valid, []byte("hello"), 0644)
 	missing := filepath.Join(tmp, "Desktop", "gone.txt")
 
-	results, err := processPaths(context.Background(), []string{valid, missing}, "run-test", io.Discard, "")
+	results, err := processPaths(context.Background(), inputs(valid, missing), "run-test", io.Discard, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -868,7 +893,7 @@ func TestProcessCommandPrintsTable(t *testing.T) {
 			t.Fatalf("process failed: %v", err)
 		}
 	})
-	if !strings.Contains(out, "File") || !strings.Contains(out, "✓") {
+	if !strings.Contains(out, "Item") || !strings.Contains(out, "✓") {
 		t.Errorf("expected table output, got:\n%s", out)
 	}
 }
@@ -981,7 +1006,7 @@ func TestProcessPathsGroupsByModel(t *testing.T) {
 		os.WriteFile(f, []byte(f), 0644)
 	}
 
-	if _, err := processPaths(context.Background(), files, "run-test", io.Discard, ""); err != nil {
+	if _, err := processPaths(context.Background(), inputs(files...), "run-test", io.Discard, ""); err != nil {
 		t.Fatalf("processPaths failed: %v", err)
 	}
 
@@ -1034,7 +1059,7 @@ func TestProcessPathsFallsBackToModel(t *testing.T) {
 		os.WriteFile(f, []byte(f), 0644)
 	}
 
-	if _, err := processPaths(context.Background(), files, "run-test", io.Discard, ""); err != nil {
+	if _, err := processPaths(context.Background(), inputs(files...), "run-test", io.Discard, ""); err != nil {
 		t.Fatalf("processPaths failed: %v", err)
 	}
 
@@ -1070,7 +1095,7 @@ func TestProcessPathsUsesCachedDecisionWithoutClassifying(t *testing.T) {
 		Reason:   "from cache",
 	})
 
-	if _, err := processPaths(context.Background(), []string{src}, "run-test", io.Discard, ""); err != nil {
+	if _, err := processPaths(context.Background(), inputs(src), "run-test", io.Discard, ""); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1108,7 +1133,7 @@ func TestProcessPathsDuplicateSkipsClassification(t *testing.T) {
 	os.WriteFile(src1, []byte("same"), 0644)
 	os.WriteFile(src2, []byte("same"), 0644)
 
-	if _, err := processPaths(context.Background(), []string{src1, src2}, "run-test", io.Discard, ""); err != nil {
+	if _, err := processPaths(context.Background(), inputs(src1, src2), "run-test", io.Discard, ""); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1159,7 +1184,7 @@ func TestProcessPathsDuplicateWithSafeDeleteStillClassifies(t *testing.T) {
 	os.WriteFile(src1, []byte("same"), 0644)
 	os.WriteFile(src2, []byte("same"), 0644)
 
-	if _, err := processPaths(context.Background(), []string{src1, src2}, "run-test", io.Discard, ""); err != nil {
+	if _, err := processPaths(context.Background(), inputs(src1, src2), "run-test", io.Discard, ""); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1217,7 +1242,7 @@ func TestProcessPathsCachedDecisionCoercedForDuplicate(t *testing.T) {
 		Reason:   "from cache",
 	})
 
-	if _, err := processPaths(context.Background(), []string{src1, src2}, "run-test", io.Discard, ""); err != nil {
+	if _, err := processPaths(context.Background(), inputs(src1, src2), "run-test", io.Discard, ""); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1418,7 +1443,7 @@ func TestProcessPathsHashesConcurrently(t *testing.T) {
 
 	done := make(chan []processResult)
 	go func() {
-		res, err := processPaths(context.Background(), paths, "run-test", io.Discard, "")
+		res, err := processPaths(context.Background(), inputs(paths...), "run-test", io.Discard, "")
 		if err != nil {
 			t.Error(err)
 		}
@@ -1584,10 +1609,10 @@ func TestProcessPathsAcceptsDirectoryWhenFlagSet(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	processIncludeDirs = true
-	t.Cleanup(func() { processIncludeDirs = false })
+	processDepth = 1
+	t.Cleanup(func() { processDepth = 0 })
 
-	results, err := processPaths(context.Background(), []string{dirPath}, "run-test", io.Discard, "")
+	results, err := processPaths(context.Background(), inputs(dirPath), "run-test", io.Discard, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1620,9 +1645,9 @@ func TestProcessPathsSkipsDirectoryWhenFlagNotSet(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	processIncludeDirs = false
+	processDepth = 0
 
-	results, err := processPaths(context.Background(), []string{dirPath}, "run-test", io.Discard, "")
+	results, err := processPaths(context.Background(), inputs(dirPath), "run-test", io.Discard, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1651,10 +1676,10 @@ func TestProcessPathsSkipsHiddenDirectory(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	processIncludeDirs = true
-	t.Cleanup(func() { processIncludeDirs = false })
+	processDepth = 1
+	t.Cleanup(func() { processDepth = 0 })
 
-	results, err := processPaths(context.Background(), []string{dirPath}, "run-test", io.Discard, "")
+	results, err := processPaths(context.Background(), inputs(dirPath), "run-test", io.Discard, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1680,10 +1705,10 @@ func TestProcessPathsSkipsDirectoryOutsideAllowedDirs(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	processIncludeDirs = true
-	t.Cleanup(func() { processIncludeDirs = false })
+	processDepth = 1
+	t.Cleanup(func() { processDepth = 0 })
 
-	results, err := processPaths(context.Background(), []string{dirPath}, "run-test", io.Discard, "")
+	results, err := processPaths(context.Background(), inputs(dirPath), "run-test", io.Discard, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1698,14 +1723,145 @@ func TestProcessPathsSkipsDirectoryOutsideAllowedDirs(t *testing.T) {
 	}
 }
 
-func TestProcessCommandIncludeDirsFlagExists(t *testing.T) {
-	if processCmd.Flags().Lookup("include-dirs") == nil {
-		t.Fatal("expected --include-dirs flag on process command")
+func TestProcessCommandDepthFlagExists(t *testing.T) {
+	if processCmd.Flags().Lookup("depth") == nil {
+		t.Fatal("expected --depth flag on process command")
 	}
 }
 
-func TestScanCommandIncludeDirsFlagExists(t *testing.T) {
-	if scanCmd.Flags().Lookup("include-dirs") == nil {
-		t.Fatal("expected --include-dirs flag on scan command")
+func TestScanCommandDepthFlagExists(t *testing.T) {
+	if scanCmd.Flags().Lookup("depth") == nil {
+		t.Fatal("expected --depth flag on scan command")
+	}
+}
+func TestProcessPathsPassesDirectoryContext(t *testing.T) {
+	tmp := t.TempDir()
+	cfg = testConfig(tmp)
+	db = state.NewFake()
+	processFS = actions.NewRecordingFS()
+
+	fc := &pathContextClassifier{}
+	classifier = fc
+
+	dir := filepath.Join(tmp, "Downloads", "project")
+	os.MkdirAll(dir, 0755)
+	src := filepath.Join(dir, "note.txt")
+	os.WriteFile(src, []byte("hello"), 0644)
+
+	if _, err := processPaths(context.Background(), []processInput{{path: src, dirCtx: &directory.Context{Ancestor: dir, Depth: 1, Marker: ".git"}}}, "run-test", io.Discard, ""); err != nil {
+		t.Fatal(err)
+	}
+
+	fc.mu.Lock()
+	defer fc.mu.Unlock()
+	if len(fc.calls) != 1 {
+		t.Fatalf("expected 1 classification call, got %d", len(fc.calls))
+	}
+	ctx := fc.contexts[0]
+	if ctx == nil || ctx.Ancestor != dir {
+		t.Errorf("context ancestor = %q, want %q", ctx.Ancestor, dir)
+	}
+	if ctx == nil || ctx.Depth != 1 {
+		t.Errorf("context depth = %d, want 1", ctx.Depth)
+	}
+	if ctx == nil || ctx.Marker != ".git" {
+		t.Errorf("context marker = %q, want .git", ctx.Marker)
+	}
+}
+
+// pathContextClassifier records the directory context passed to Classify.
+type pathContextClassifier struct {
+	mu       sync.Mutex
+	calls    []string
+	contexts []*directory.Context
+}
+
+func (p *pathContextClassifier) Classify(ctx context.Context, src string, fileHash string, cfg *config.Config, dirCtx *directory.Context) (llm.Decision, llm.Metrics, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.calls = append(p.calls, src)
+	p.contexts = append(p.contexts, dirCtx)
+	return llm.Decision{Category: "Documents", Action: "move"}, llm.Metrics{}, nil
+}
+
+func (p *pathContextClassifier) Validate(cfg *config.Config) error { return nil }
+
+func TestProcessPathsClassifiesDirectory(t *testing.T) {
+	tmp := t.TempDir()
+	cfg = testConfig(tmp)
+	db = state.NewFake()
+	processFS = actions.NewRecordingFS()
+
+	fc := &fakeClassifier{
+		decision:    llm.Decision{Category: "Documents", Action: "move"},
+		dirDecision: llm.DirectoryDecision{Recommendation: "archive", Reason: "project folder", Category: "Projects", Tags: []string{"project"}},
+	}
+	classifier = fc
+
+	dir := filepath.Join(tmp, "Downloads", "project")
+	os.MkdirAll(dir, 0755)
+	processDepth = 1
+	t.Cleanup(func() { processDepth = 0 })
+
+	results, err := processPaths(context.Background(), inputs(dir), "run-test", io.Discard, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("expected 1 result, got %d", len(results))
+	}
+	r := results[0]
+	if r.Kind != "directory" {
+		t.Errorf("kind = %q, want directory", r.Kind)
+	}
+	if r.Recommendation != "archive" {
+		t.Errorf("recommendation = %q, want archive", r.Recommendation)
+	}
+	if r.Action != "archive" {
+		t.Errorf("action = %q, want archive", r.Action)
+	}
+	if r.Category != "Projects" {
+		t.Errorf("category = %q, want Projects", r.Category)
+	}
+	if len(r.Tags) != 1 || r.Tags[0] != "project" {
+		t.Errorf("tags = %v, want [project]", r.Tags)
+	}
+	if r.Reason != "project folder" {
+		t.Errorf("reason = %q, want project folder", r.Reason)
+	}
+	if len(fc.dirCalls) != 1 || fc.dirCalls[0] != dir {
+		t.Errorf("dirCalls = %v, want [%s]", fc.dirCalls, dir)
+	}
+}
+
+func TestFormatProcessTableDirectoryAndInPlaceRename(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	src := filepath.Join(home, "Downloads", "project", "photo.jpg")
+	results := []processResult{
+		{Path: src, Kind: "directory", Recommendation: "archive", Category: "Projects", Tags: []string{"project"}, Action: "archive", Result: "-", OriginalName: "project", OK: true, Reason: "keep project"},
+		{Path: filepath.Join(home, "Downloads", "img.jpg"), Category: "Images", Tags: []string{"jpg"}, Action: "move", Result: filepath.Join(home, "Downloads", "vacation.jpg"), OriginalName: "img.jpg", NewName: "vacation.jpg", OK: true},
+	}
+	out := formatProcessTable(results)
+	for _, want := range []string{"Item", "dir:", "archive", "in-place:", "vacation.jpg"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("table output missing %q:\n%s", want, out)
+		}
+	}
+}
+
+func TestFormatHumanDirectoryAndInPlaceRename(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	src := filepath.Join(home, "Downloads", "project")
+	results := []processResult{
+		{Path: src, Kind: "directory", Recommendation: "archive", Category: "Projects", Tags: []string{"project"}, Action: "archive", Result: "-", OriginalName: "project", OK: true, Reason: "keep project"},
+		{Path: filepath.Join(home, "Downloads", "img.jpg"), Category: "Images", Tags: []string{"jpg"}, Action: "move", Result: filepath.Join(home, "Downloads", "vacation.jpg"), OriginalName: "img.jpg", NewName: "vacation.jpg", OK: true},
+	}
+	out := formatHuman(results)
+	for _, want := range []string{"[dir] project", "Recommendation: archive", "Reason:   keep project", "in-place:", "vacation.jpg"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("human output missing %q:\n%s", want, out)
+		}
 	}
 }

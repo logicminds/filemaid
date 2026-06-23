@@ -11,9 +11,10 @@ import (
 
 // FakeRepo is an in-memory implementation of Repo for tests.
 type FakeRepo struct {
-	mu        sync.Mutex
-	records   []Record
-	decisions map[string]llm.Decision
+	mu                 sync.Mutex
+	records            []Record
+	decisions          map[string]llm.Decision
+	directoryDecisions map[string]llm.DirectoryDecision
 }
 
 // NewFake returns a new empty FakeRepo.
@@ -138,6 +139,42 @@ func (f *FakeRepo) RecordDecision(sha256 string, decision llm.Decision) error {
 	}
 	f.decisions[sha256] = decision
 	return nil
+}
+
+// FindDirectoryDecision returns a cached directory decision for key, if one exists.
+func (f *FakeRepo) FindDirectoryDecision(key string) (llm.DirectoryDecision, bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	if f.directoryDecisions == nil {
+		return llm.DirectoryDecision{}, false, nil
+	}
+	d, ok := f.directoryDecisions[key]
+	return d, ok, nil
+}
+
+// RecordDirectoryDecision stores a directory decision keyed by key.
+func (f *FakeRepo) RecordDirectoryDecision(key string, decision llm.DirectoryDecision) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	if f.directoryDecisions == nil {
+		f.directoryDecisions = make(map[string]llm.DirectoryDecision)
+	}
+	f.directoryDecisions[key] = decision
+	return nil
+}
+
+// DirectoryDecisions returns a snapshot of all cached directory decisions.
+func (f *FakeRepo) DirectoryDecisions() map[string]llm.DirectoryDecision {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	out := make(map[string]llm.DirectoryDecision, len(f.directoryDecisions))
+	for k, v := range f.directoryDecisions {
+		out[k] = v
+	}
+	return out
 }
 
 // Decisions returns a snapshot of all cached decisions.

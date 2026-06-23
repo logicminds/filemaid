@@ -199,6 +199,7 @@ func Apply(decision llm.Decision, src string, fileHash string, cfg *config.Confi
 
 	var destDir string
 	var destFileName string
+	inPlace := false
 	if decision.Action == "review" {
 		destDir = filepath.Dir(reviewBase)
 		destFileName = originalName
@@ -209,6 +210,10 @@ func Apply(decision llm.Decision, src string, fileHash string, cfg *config.Confi
 	} else if catDir, ok := cfg.Categories[decision.Category]; ok {
 		destDir = expandTilde(catDir)
 		destFileName = originalName
+	} else if decision.Action == "move" {
+		destDir = filepath.Dir(src)
+		destFileName = originalName
+		inPlace = true
 	} else {
 		destDir = filepath.Dir(reviewBase)
 		destFileName = originalName
@@ -217,9 +222,17 @@ func Apply(decision llm.Decision, src string, fileHash string, cfg *config.Confi
 	renamedTo := ""
 	if cfg.Rename && decision.Action != "review" && decision.Action != "delete" && decision.NameQuality >= cfg.RenameLevel && fpErr == nil {
 		if sanitized, ok := sanitizeName(decision.NewName, originalName, cfg); ok {
-			destFileName = uniqueNameWithCounter(destDir, sanitized, fs)
+			destFileName = uniqueNameWithCounter(destDir, sanitized, src, fs)
 			renamedTo = destFileName
 		}
+	}
+
+	// In-place rename requires a successful rename; otherwise fall back to review.
+	if inPlace && renamedTo == "" {
+		destDir = filepath.Dir(reviewBase)
+		destFileName = originalName
+		decision.Action = "review"
+		decision.Reason += "; in-place rename requires a valid new name"
 	}
 
 	dest := filepath.Join(destDir, destFileName)
@@ -305,6 +318,8 @@ func DestinationDir(decision llm.Decision, src string, cfg *config.Config) strin
 		destDir = filepath.Dir(expandTilde(decision.Destination))
 	} else if catDir, ok := cfg.Categories[decision.Category]; ok {
 		destDir = expandTilde(catDir)
+	} else if decision.Action == "move" {
+		destDir = filepath.Dir(src)
 	} else {
 		destDir = filepath.Dir(reviewBase)
 	}
@@ -355,15 +370,17 @@ func sanitizeName(newName, original string, cfg *config.Config) (string, bool) {
 	return stem + ext, true
 }
 
-func uniqueNameWithCounter(dir, name string, fs FS) string {
-	if !fs.Exists(filepath.Join(dir, name)) {
+func uniqueNameWithCounter(dir, name, src string, fs FS) string {
+	candidate := filepath.Join(dir, name)
+	if candidate == src || !fs.Exists(candidate) {
 		return name
 	}
 	ext := filepath.Ext(name)
 	stem := strings.TrimSuffix(name, ext)
 	for i := 1; i < 10000; i++ {
 		candidate := fmt.Sprintf("%s %d%s", stem, i, ext)
-		if !fs.Exists(filepath.Join(dir, candidate)) {
+		full := filepath.Join(dir, candidate)
+		if full == src || !fs.Exists(full) {
 			return candidate
 		}
 	}

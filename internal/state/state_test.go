@@ -427,6 +427,138 @@ func TestOpen_CreatesDecisionsTable(t *testing.T) {
 		t.Fatalf("unexpected table name: %q", name)
 	}
 }
+func TestRecordAndFindDirectoryDecision(t *testing.T) {
+	repo, err := state.Open(filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+	defer repo.Close()
+
+	decision := llm.DirectoryDecision{
+		Recommendation: "archive",
+		Reason:         "old project",
+		Category:       "Projects",
+		Tags:           []string{"code", "backup"},
+	}
+
+	if err := repo.RecordDirectoryDecision("key1", decision); err != nil {
+		t.Fatalf("RecordDirectoryDecision failed: %v", err)
+	}
+
+	got, ok, err := repo.FindDirectoryDecision("key1")
+	if err != nil {
+		t.Fatalf("FindDirectoryDecision failed: %v", err)
+	}
+	if !ok {
+		t.Fatal("expected directory decision to be found")
+	}
+	if got.Recommendation != decision.Recommendation {
+		t.Errorf("Recommendation = %q, want %q", got.Recommendation, decision.Recommendation)
+	}
+	if got.Reason != decision.Reason {
+		t.Errorf("Reason = %q, want %q", got.Reason, decision.Reason)
+	}
+	if got.Category != decision.Category {
+		t.Errorf("Category = %q, want %q", got.Category, decision.Category)
+	}
+	if len(got.Tags) != len(decision.Tags) || got.Tags[0] != decision.Tags[0] || got.Tags[1] != decision.Tags[1] {
+		t.Errorf("Tags = %v, want %v", got.Tags, decision.Tags)
+	}
+}
+
+func TestFindDirectoryDecision_NotFound(t *testing.T) {
+	repo, err := state.Open(filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+	defer repo.Close()
+
+	_, ok, err := repo.FindDirectoryDecision("missing")
+	if err != nil {
+		t.Fatalf("FindDirectoryDecision failed: %v", err)
+	}
+	if ok {
+		t.Error("expected no directory decision for unknown key")
+	}
+}
+
+func TestRecordDirectoryDecision_OverwritesExisting(t *testing.T) {
+	repo, err := state.Open(filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+	defer repo.Close()
+
+	if err := repo.RecordDirectoryDecision("k1", llm.DirectoryDecision{Recommendation: "keep", Reason: "a"}); err != nil {
+		t.Fatalf("RecordDirectoryDecision failed: %v", err)
+	}
+	if err := repo.RecordDirectoryDecision("k1", llm.DirectoryDecision{Recommendation: "trash", Reason: "b"}); err != nil {
+		t.Fatalf("RecordDirectoryDecision overwrite failed: %v", err)
+	}
+
+	got, ok, err := repo.FindDirectoryDecision("k1")
+	if err != nil {
+		t.Fatalf("FindDirectoryDecision failed: %v", err)
+	}
+	if !ok {
+		t.Fatal("expected directory decision to be found")
+	}
+	if got.Recommendation != "trash" {
+		t.Errorf("Recommendation = %q, want trash", got.Recommendation)
+	}
+	if got.Reason != "b" {
+		t.Errorf("Reason = %q, want b", got.Reason)
+	}
+}
+
+func TestFakeRepoDirectoryDecisionCache(t *testing.T) {
+	repo := state.NewFake()
+
+	decision := llm.DirectoryDecision{Recommendation: "archive", Reason: "old project"}
+	if err := repo.RecordDirectoryDecision("k1", decision); err != nil {
+		t.Fatalf("RecordDirectoryDecision failed: %v", err)
+	}
+
+	got, ok, err := repo.FindDirectoryDecision("k1")
+	if err != nil {
+		t.Fatalf("FindDirectoryDecision failed: %v", err)
+	}
+	if !ok {
+		t.Fatal("expected directory decision to be found")
+	}
+	if got.Recommendation != decision.Recommendation {
+		t.Errorf("Recommendation = %q, want %q", got.Recommendation, decision.Recommendation)
+	}
+	if got.Reason != decision.Reason {
+		t.Errorf("Reason = %q, want %q", got.Reason, decision.Reason)
+	}
+}
+
+func TestOpen_CreatesDirectoryDecisionsTable(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "filemaid.db")
+
+	repo, err := state.Open(dbPath)
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+	repo.Close()
+
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("open db for inspection: %v", err)
+	}
+	defer db.Close()
+
+	var name string
+	err = db.QueryRow("SELECT name FROM sqlite_master WHERE type='table' AND name='directory_decisions'").Scan(&name)
+	if err != nil {
+		t.Fatalf("directory_decisions table not found: %v", err)
+	}
+	if name != "directory_decisions" {
+		t.Fatalf("unexpected table name: %q", name)
+	}
+}
 
 func TestHistory_ByRunID(t *testing.T) {
 	repo, err := state.Open(filepath.Join(t.TempDir(), "state.db"))

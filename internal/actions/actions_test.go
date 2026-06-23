@@ -1208,6 +1208,167 @@ func TestApplyRenameEnforcesMinMaxLength(t *testing.T) {
 		t.Errorf("below min length should keep original, got %q", filepath.Base(result2))
 	}
 }
+func TestApplyInPlaceRename(t *testing.T) {
+	cases := []struct {
+		name         string
+		category     string
+		newName      string
+		nameQuality  int
+		renameLevel  int
+		setupDir     func(dir string) string
+		wantBase     string
+		wantInSource bool
+		wantAction   string
+		wantNewName  string
+	}{
+		{
+			name:        "success",
+			category:    "Notes",
+			newName:     "Meeting Notes.txt",
+			nameQuality: 3,
+			renameLevel: 1,
+			setupDir: func(dir string) string {
+				src := filepath.Join(dir, "doc.txt")
+				os.WriteFile(src, []byte("doc"), 0o644)
+				return src
+			},
+			wantBase:     "Meeting Notes.txt",
+			wantInSource: true,
+			wantAction:   "move",
+			wantNewName:  "Meeting Notes.txt",
+		},
+		{
+			name:        "collision counter",
+			category:    "Notes",
+			newName:     "Report.txt",
+			nameQuality: 3,
+			renameLevel: 1,
+			setupDir: func(dir string) string {
+				os.WriteFile(filepath.Join(dir, "Report.txt"), []byte("existing"), 0o644)
+				src := filepath.Join(dir, "doc.txt")
+				os.WriteFile(src, []byte("report content"), 0o644)
+				return src
+			},
+			wantBase:     "Report 1.txt",
+			wantInSource: true,
+			wantAction:   "move",
+			wantNewName:  "Report 1.txt",
+		},
+		{
+			name:        "skips source name collision",
+			category:    "Notes",
+			newName:     "doc.txt",
+			nameQuality: 3,
+			renameLevel: 1,
+			setupDir: func(dir string) string {
+				src := filepath.Join(dir, "doc.txt")
+				os.WriteFile(src, []byte("doc"), 0o644)
+				return src
+			},
+			wantBase:     "doc.txt",
+			wantInSource: true,
+			wantAction:   "move",
+			wantNewName:  "doc.txt",
+		},
+		{
+			name:        "normal move unchanged",
+			category:    "Documents",
+			newName:     "Renamed Document.txt",
+			nameQuality: 3,
+			renameLevel: 1,
+			setupDir: func(dir string) string {
+				src := filepath.Join(dir, "doc.txt")
+				os.WriteFile(src, []byte("doc"), 0o644)
+				return src
+			},
+			wantBase:     "Renamed Document.txt",
+			wantInSource: false,
+			wantAction:   "move",
+			wantNewName:  "Renamed Document.txt",
+		},
+		{
+			name:        "review fallback quality too low",
+			category:    "Notes",
+			newName:     "Better Name.txt",
+			nameQuality: 1,
+			renameLevel: 3,
+			setupDir: func(dir string) string {
+				src := filepath.Join(dir, "doc.txt")
+				os.WriteFile(src, []byte("doc"), 0o644)
+				return src
+			},
+			wantBase:     "doc.txt",
+			wantInSource: false,
+			wantAction:   "review",
+			wantNewName:  "",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			tmp := t.TempDir()
+			cfg := testConfig(t, tmp)
+			cfg.Rename = true
+			cfg.RenameLevel = tc.renameLevel
+			cfg.RenameMinLength = 1
+			cfg.RenameMaxLength = 120
+			cfg.RenameInvalidChars = "<>:\"/\\\\|?*"
+			db := state.NewFake()
+			fs := NewRecordingFS()
+
+			srcDir := filepath.Join(tmp, "Desktop")
+			if err := os.MkdirAll(srcDir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			src := tc.setupDir(srcDir)
+
+			decision := llm.Decision{
+				Category:    tc.category,
+				Action:      "move",
+				Reason:      tc.name,
+				NewName:     tc.newName,
+				NameQuality: tc.nameQuality,
+			}
+			result, err := Apply(decision, src, mustHash(t, src), cfg, db, false, fs, "", llm.Metrics{}, false)
+			if err != nil {
+				t.Fatalf("Apply error: %v", err)
+			}
+			if filepath.Base(result) != tc.wantBase {
+				t.Errorf("result base = %q, want %q", filepath.Base(result), tc.wantBase)
+			}
+			if tc.wantInSource && filepath.Dir(result) != srcDir {
+				t.Errorf("result dir = %q, want source dir %q", filepath.Dir(result), srcDir)
+			}
+			if !tc.wantInSource && filepath.Dir(result) == srcDir {
+				t.Errorf("result dir = %q, want outside source dir", filepath.Dir(result))
+			}
+			recs := db.Records()
+			if len(recs) != 1 {
+				t.Fatalf("recorded %d rows, want 1", len(recs))
+			}
+			rec := recs[0]
+			if rec.Action != tc.wantAction {
+				t.Errorf("action = %q, want %q", rec.Action, tc.wantAction)
+			}
+			if rec.NewName != tc.wantNewName {
+				t.Errorf("new_name = %q, want %q", rec.NewName, tc.wantNewName)
+			}
+			if rec.FinalPath != result {
+				t.Errorf("final_path = %q, want %q", rec.FinalPath, result)
+			}
+			if tc.wantInSource {
+				if _, err := os.Stat(result); err != nil {
+					t.Errorf("result file missing: %v", err)
+				}
+				if result != src {
+					if _, err := os.Stat(src); err == nil {
+						t.Errorf("source file still exists")
+					}
+				}
+			}
+		})
+	}
+}
 
 func TestOSFSMoveAndExists(t *testing.T) {
 	tmp := t.TempDir()
