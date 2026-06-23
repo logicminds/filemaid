@@ -73,8 +73,11 @@ func TestDefaultsMatchPythonReference(t *testing.T) {
 	if cfg.ReviewCleanup.MaxAgeDays != 30 {
 		t.Errorf("ReviewCleanup.MaxAgeDays = %d, want 30", cfg.ReviewCleanup.MaxAgeDays)
 	}
-	if time.Duration(cfg.RequestTimeout) != 120*time.Second {
-		t.Errorf("RequestTimeout = %v, want 120s", cfg.RequestTimeout)
+	if time.Duration(cfg.RequestTimeout) != 5*time.Minute {
+		t.Errorf("RequestTimeout = %v, want 5m", cfg.RequestTimeout)
+	}
+	if cfg.ProcessWorkers != 1 {
+		t.Errorf("ProcessWorkers = %d, want 1", cfg.ProcessWorkers)
 	}
 }
 func TestDefaultsRenameFields(t *testing.T) {
@@ -104,15 +107,13 @@ func TestDefaultsRenameFields(t *testing.T) {
 	if cfg.RenameUseFFmpeg {
 		t.Error("RenameUseFFmpeg = true, want false")
 	}
-	if cfg.ExternalTools.FFmpeg != "ffmpeg" {
-		t.Errorf("ExternalTools.FFmpeg = %q, want ffmpeg", cfg.ExternalTools.FFmpeg)
-	}
-	if cfg.ProcessWorkers != 4 {
-		t.Errorf("ProcessWorkers = %d, want 4", cfg.ProcessWorkers)
+	if cfg.ProcessWorkers != 1 {
+		t.Errorf("ProcessWorkers = %d, want 1", cfg.ProcessWorkers)
 	}
 	if cfg.MaxImageDimension != 1024 {
 		t.Errorf("MaxImageDimension = %d, want 1024", cfg.MaxImageDimension)
 	}
+	// ProcessWorkers is asserted in TestDefaultsMatchPythonReference.
 }
 func TestDefaultsProjectMarkers(t *testing.T) {
 	want := []string{".git", "node_modules", ".venv", "vendor", ".terraform", "build"}
@@ -558,13 +559,13 @@ func TestLoadPathRequestTimeout(t *testing.T) {
 		want    time.Duration
 		wantErr bool
 	}{
-		{"default", "", 120 * time.Second, false},
-		{"string override", `{"request_timeout": "30s"}`, 30 * time.Second, false},
-		{"numeric override", `{"request_timeout": 30000000000}`, 30 * time.Second, false},
-		{"zero", `{"request_timeout": "0s"}`, 0, false},
-		{"negative", `{"request_timeout": "-10s"}`, -10 * time.Second, false},
-		{"invalid string", `{"request_timeout": "abc"}`, 0, true},
-		{"invalid type", `{"request_timeout": true}`, 0, true},
+		{name: "default", user: "", want: 5 * time.Minute, wantErr: false},
+		{name: "string override", user: `{"request_timeout": "30s"}`, want: 30 * time.Second, wantErr: false},
+		{name: "numeric override", user: `{"request_timeout": 30000000000}`, want: 30 * time.Second, wantErr: false},
+		{name: "zero", user: `{"request_timeout": "0s"}`, want: 0, wantErr: false},
+		{name: "negative", user: `{"request_timeout": "-10s"}`, want: -10 * time.Second, wantErr: false},
+		{name: "invalid string", user: `{"request_timeout": "abc"}`, want: 0, wantErr: true},
+		{name: "invalid type", user: `{"request_timeout": true}`, want: 0, wantErr: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

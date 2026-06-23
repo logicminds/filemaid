@@ -121,7 +121,7 @@ func Defaults() *Config {
 		MinAgeHours:         0,
 		SmartFolders:        true,
 		SmartFoldersDir:     "~/Documents/Filemaid",
-		RequestTimeout:      Duration(120 * time.Second),
+		RequestTimeout:      Duration(5 * time.Minute),
 		Categories: map[string]string{
 			"Screenshots": "~/Documents/Archive/Screenshots",
 			"Documents":   "~/Documents/Archive/Documents",
@@ -159,7 +159,7 @@ func Defaults() *Config {
 		RenameAVSimilarityThreshold:    0.90,
 		RenameUseFFmpeg:                false,
 		Force:                          false,
-		ProcessWorkers:                 4,
+		ProcessWorkers:                 1,
 		MaxImageDimension:              1024,
 		ProjectMarkers:                 []string{".git", "node_modules", ".venv", "vendor", ".terraform", "build"},
 		MaxDirSampleEntries:            50,

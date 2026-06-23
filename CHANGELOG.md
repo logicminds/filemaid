@@ -17,6 +17,12 @@ All notable changes to filemaid are documented in this file.
 ### Changed
 
 - `--depth` changed from a boolean flag (`--include-dirs`) to an optional integer (`--depth` = depth 1, `--depth=N` = depth N).
+
+### Fixed
+
+- **Transient LLM errors are no longer cached.** A timeout or unreachable Ollama previously wrote an "ollama error: ..." decision to the per-file cache, causing the same file to land in review forever on retry. Error decisions are now skipped so the next run can retry classification.
+- **Default `request_timeout` increased to 5 minutes** and **default `process_workers` reduced to 1** to accommodate slower local vision models and avoid concurrent model loads timing out on typical Apple Silicon setups.
+
 ## [0.5.1]
 
 ### Added

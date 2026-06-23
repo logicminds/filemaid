@@ -1934,6 +1934,45 @@ func TestClassifyRecordsDecisionInCache(t *testing.T) {
 	}
 }
 
+func TestClassifyDoesNotCacheErrors(t *testing.T) {
+	tmp := t.TempDir()
+	cfg := baseConfig(t, tmp)
+
+	textFile := filepath.Join(tmp, "note.txt")
+	if err := os.WriteFile(textFile, []byte("hello world"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cache := &fakeDecisionCache{}
+	transport := &fakeTransport{
+		handler: func(req *http.Request) (*http.Response, error) {
+			if strings.HasSuffix(req.URL.String(), "/api/tags") {
+				return modelListResponse(cfg.Model), nil
+			}
+			return nil, context.DeadlineExceeded
+		},
+	}
+
+	client := NewClient(transport)
+	client.SetDecisionCache(cache)
+
+	decision, _, err := client.Classify(context.Background(), textFile, "hash1", cfg, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(decision.Reason, "context deadline exceeded") {
+		t.Errorf("Reason = %q, want timeout error", decision.Reason)
+	}
+
+	_, ok, err := cache.FindDecisionByHash("hash1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ok {
+		t.Fatal("expected error decision not to be cached")
+	}
+}
+
 func TestValidateUsesCachedModelCheck(t *testing.T) {
 	var tagsCalls int
 	transport := &fakeTransport{

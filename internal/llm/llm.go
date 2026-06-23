@@ -214,9 +214,8 @@ func (c *Client) Classify(ctx context.Context, path string, fileHash string, cfg
 
 	d := NewDecision()
 	d.Reason = fmt.Sprintf("ollama error: %s", err.Error())
-	if cacheKey != "" && c.cache != nil {
-		_ = c.cache.RecordDecision(cacheKey, d)
-	}
+	// Do not cache transient errors (timeouts, unreachable Ollama, etc.):
+	// the next run should retry instead of replaying a failed decision forever.
 	return d, metrics, nil
 }
 
