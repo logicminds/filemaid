@@ -248,3 +248,49 @@ func (f *FakeRepo) History(limit int, runID string) ([]Record, error) {
 	}
 	return out, nil
 }
+
+// HistoryByRunID returns all in-memory records for the given run, excluding undo rows.
+func (f *FakeRepo) HistoryByRunID(runID string) ([]Record, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	out := make([]Record, 0)
+	for i := len(f.records) - 1; i >= 0; i-- {
+		r := f.records[i]
+		if r.RunID.String != runID || r.Action == "undo" {
+			continue
+		}
+		out = append(out, r)
+	}
+	return out, nil
+}
+
+// HistoryByFinalPath returns the most recent in-memory record with the given
+// final path, excluding undo rows.
+func (f *FakeRepo) HistoryByFinalPath(finalPath string) (*Record, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	for i := len(f.records) - 1; i >= 0; i-- {
+		r := f.records[i]
+		if r.FinalPath == finalPath && r.Action != "undo" {
+			return &r, nil
+		}
+	}
+	return nil, nil
+}
+
+// LastRunID returns the most recent run_id that has move actions, ignoring undo
+// rows and trashed items.
+func (f *FakeRepo) LastRunID() (string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	for i := len(f.records) - 1; i >= 0; i-- {
+		r := f.records[i]
+		if r.Action != "undo" && r.FinalPath != "trash" {
+			return r.RunID.String, nil
+		}
+	}
+	return "", nil
+}

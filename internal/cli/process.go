@@ -44,6 +44,14 @@ var (
 
 	// nowFunc returns the current time. Tests may replace it with a fixed clock.
 	nowFunc = time.Now
+
+	// moveProjects enables whole-directory moves for recognized project
+	// directories in process and scan.
+	moveProjects bool
+
+	// applyDirectoryFunc carries out a DirectoryDecision. Tests may replace it
+	// to observe directory applies without touching the filesystem.
+	applyDirectoryFunc func(decision llm.DirectoryDecision, src string, cfg *config.Config, db state.Repo, fs actions.FS, runID string) (string, error) = actions.ApplyDirectory
 )
 
 // noopFS is an actions.FS implementation that performs no side effects. It is
@@ -70,8 +78,9 @@ func (n *noopRecordRepo) RecordDecision(sha256 string, decision llm.Decision) er
 // processInput carries a candidate path and optional directory context for
 // files discovered while scanning with --depth.
 type processInput struct {
-	path   string
-	dirCtx *directory.Context
+	path        string
+	dirCtx      *directory.Context
+	dirDecision *llm.DirectoryDecision // pre-computed directory decision from scan
 }
 
 // processItem carries the sequential preprocessing state for a single accepted
@@ -147,6 +156,7 @@ func init() {
 	processCmd.Flags().BoolVar(&processDryRun, "dry-run", false, "preview changes without moving files")
 	processCmd.Flags().IntVar(&processDepth, "depth", 0, "descend into directories N levels (0 = file-only)")
 	processCmd.Flags().Lookup("depth").NoOptDefVal = "1"
+	processCmd.Flags().BoolVar(&moveProjects, "move-projects", false, "move recognized project directories as atomic units")
 	rootCmd.AddCommand(processCmd)
 }
 
@@ -345,9 +355,7 @@ func formatProcessTable(results []processResult) string {
 	for _, r := range results {
 		status := statusSymbol(r.OK, r.Error, useColor)
 		action := r.Action
-		if r.Kind == "directory" {
-			action = r.Recommendation
-		} else if action == "" {
+		if action == "" {
 			action = "-"
 		}
 		category := r.Category
@@ -385,20 +393,23 @@ func formatHuman(results []processResult) string {
 	var lines []string
 	for _, r := range results {
 		name := filepath.Base(r.Path)
-		if r.Kind == "directory" {
-			name = "[dir] " + name
-		}
 		status := statusSymbol(r.OK, r.Error, useColor)
-		lines = append(lines, fmt.Sprintf("%s  %s", status, colorize(name, colorBold, useColor)))
+		if r.Kind == "directory" && r.Action == "move" {
+			dest := collapseHome(r.Result)
+			lines = append(lines, fmt.Sprintf("%s  moved directory %s → %s", status, colorize(name, colorBold, useColor), colorize(dest, colorBold, useColor)))
+		} else {
+			if r.Kind == "directory" {
+				name = "[dir] " + name
+			}
+			lines = append(lines, fmt.Sprintf("%s  %s", status, colorize(name, colorBold, useColor)))
+		}
 		if r.Category != "" {
 			lines = append(lines, fmt.Sprintf("   Category: %s", r.Category))
 		}
 		if len(r.Tags) > 0 {
 			lines = append(lines, fmt.Sprintf("   Tags:     %s", strings.Join(r.Tags, ", ")))
 		}
-		if r.Kind == "directory" {
-			lines = append(lines, fmt.Sprintf("   Recommendation: %s", r.Recommendation))
-		} else if r.Action != "" {
+		if r.Action != "" {
 			lines = append(lines, fmt.Sprintf("   Action:   %s", r.Action))
 		}
 		nameChange := formatNameChange(r)
@@ -642,6 +653,7 @@ func processPaths(ctx context.Context, inputs []processInput, runID string, w io
 	// deterministic while file hashing runs concurrently. Skipped paths still
 	// produce a result so the final table is complete.
 	results := make([]processResult, len(inputs))
+	dirLocks := newDirLockMap()
 
 	type candidate struct {
 		pos    int
@@ -681,27 +693,15 @@ func processPaths(ctx context.Context, inputs []processInput, runID string, w io
 					slog.Warn("skipping directory outside allowed dirs", "path", src)
 					continue
 				}
-				decision, metrics := classifyDirectory(ctx, src, cfg)
-				results[i] = processResult{
-					Path:             src,
-					Kind:             "directory",
-					Recommendation:   decision.Recommendation,
-					Category:         decision.Category,
-					Tags:             decision.Tags,
-					Action:           decision.Recommendation,
-					Result:           "-",
-					OriginalName:     filepath.Base(src),
-					OK:               true,
-					Reason:           decision.Reason,
-					DurationMs:       metrics.DurationMs,
-					PromptTokens:     metrics.PromptTokens,
-					CompletionTokens: metrics.CompletionTokens,
-					TotalTokens:      metrics.TotalTokens,
-					TokensPerSec:     metrics.TokensPerSec,
-					ContextSize:      metrics.ContextSize,
+				decision, metrics := directoryDecisionForPath(ctx, src, in)
+				if moveProjects && decision.Action == "move" {
+					results[i] = applyDirectory(src, decision, metrics, runID, dirLocks)
+					slog.Info("moved directory", "path", src, "destination", results[i].Result, "reason", decision.Reason)
+				} else {
+					results[i] = recommendDirectory(src, decision, metrics)
+					slog.Info("directory candidate", "path", src, "recommendation", decision.Recommendation, "reason", decision.Reason)
 				}
 				streamer.writeResult(results[i])
-				slog.Info("directory candidate", "path", src, "recommendation", decision.Recommendation, "reason", decision.Reason)
 				continue
 			}
 			results[i] = skipResult(src, "not a regular file")
@@ -822,7 +822,6 @@ func processPaths(ctx context.Context, inputs []processInput, runID string, w io
 	}
 	classifySem := make(chan struct{}, workers)
 	applySem := make(chan struct{}, workers)
-	dirLocks := newDirLockMap()
 
 	groups := groupItemsByModel(items)
 
@@ -944,9 +943,95 @@ func applyFile(src, fileHash string, isDuplicate bool, decision llm.Decision, me
 	}
 }
 
-// classifyDirectory returns a read-only DirectoryDecision for a directory
-// candidate. If the classifier does not support directory classification, it
-// falls back to a review recommendation.
+// directoryDecisionForPath returns a DirectoryDecision for a directory input.
+// It uses a pre-computed decision from scan when available, otherwise checks
+// for project markers and falls back to LLM classification.
+func directoryDecisionForPath(ctx context.Context, src string, in processInput) (llm.DirectoryDecision, llm.Metrics) {
+	if in.dirDecision != nil {
+		return *in.dirDecision, llm.Metrics{}
+	}
+	meta, err := directory.Gather(src, cfg)
+	if err == nil && len(meta.Markers) > 0 {
+		return llm.DirectoryDecision{
+			Recommendation: "archive",
+			Action:         "move",
+			Reason:         fmt.Sprintf("project marker(s): %s", strings.Join(meta.Markers, ", ")),
+		}, llm.Metrics{}
+	}
+	return classifyDirectory(ctx, src, cfg)
+}
+
+// directoryDestinationDir returns the destination directory used to serialize
+// directory moves. It mirrors the resolution order in actions.ApplyDirectory
+// without unique-name expansion.
+func directoryDestinationDir(decision llm.DirectoryDecision, cfg *config.Config) string {
+	if decision.Destination != "" {
+		return filepath.Dir(decision.Destination)
+	}
+	if cfg.ProjectDirCategory != "" {
+		if catDir, ok := cfg.Categories[cfg.ProjectDirCategory]; ok {
+			return catDir
+		}
+	}
+	return cfg.ReviewDir
+}
+
+// applyDirectory carries out a DirectoryDecision and builds a processResult.
+func applyDirectory(src string, decision llm.DirectoryDecision, metrics llm.Metrics, runID string, dirLocks *dirLockMap) processResult {
+	destDir := directoryDestinationDir(decision, cfg)
+	unlock := dirLocks.lock(destDir)
+	dest, err := applyDirectoryFunc(decision, src, cfg, db, processFS, runID)
+	unlock()
+
+	res := processResult{
+		Path:             src,
+		Kind:             "directory",
+		Recommendation:   decision.Recommendation,
+		Category:         decision.Category,
+		Tags:             decision.Tags,
+		Action:           "move",
+		Result:           dest,
+		OriginalName:     filepath.Base(src),
+		OK:               err == nil,
+		Reason:           decision.Reason,
+		DurationMs:       metrics.DurationMs,
+		PromptTokens:     metrics.PromptTokens,
+		CompletionTokens: metrics.CompletionTokens,
+		TotalTokens:      metrics.TotalTokens,
+		TokensPerSec:     metrics.TokensPerSec,
+		ContextSize:      metrics.ContextSize,
+	}
+	if err != nil {
+		res.Error = err.Error()
+	}
+	return res
+}
+
+// recommendDirectory builds a read-only processResult for a directory.
+func recommendDirectory(src string, decision llm.DirectoryDecision, metrics llm.Metrics) processResult {
+	return processResult{
+		Path:             src,
+		Kind:             "directory",
+		Recommendation:   decision.Recommendation,
+		Category:         decision.Category,
+		Tags:             decision.Tags,
+		Action:           decision.Recommendation,
+		Result:           "-",
+		OriginalName:     filepath.Base(src),
+		OK:               true,
+		Reason:           decision.Reason,
+		DurationMs:       metrics.DurationMs,
+		PromptTokens:     metrics.PromptTokens,
+		CompletionTokens: metrics.CompletionTokens,
+		TotalTokens:      metrics.TotalTokens,
+		TokensPerSec:     metrics.TokensPerSec,
+		ContextSize:      metrics.ContextSize,
+	}
+}
+
+// classifyDirectory returns a DirectoryDecision for a directory candidate.
+// If the classifier does not support directory classification, it falls back
+// to a review recommendation.
 func classifyDirectory(ctx context.Context, src string, cfg *config.Config) (llm.DirectoryDecision, llm.Metrics) {
 	dc, ok := classifier.(llm.DirectoryClassifier)
 	if !ok {

@@ -288,6 +288,55 @@ func TestGatherDefaults(t *testing.T) {
 	}
 }
 
+func TestGatherSnippets(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "readme.md", "# Project\n\ncross-ref: see also notes.txt")
+	writeFile(t, dir, "notes.txt", "Details about the project.")
+	writeFile(t, dir, "image.png", string([]byte{0x89, 0x50, 0x4E, 0x47})) // binary
+
+	meta, err := Gather(dir, config.Defaults())
+	if err != nil {
+		t.Fatalf("Gather error: %v", err)
+	}
+	if len(meta.Snippets) != 2 {
+		t.Errorf("Snippets = %v, want 2 entries", meta.Snippets)
+	}
+	if _, ok := meta.Snippets["readme.md"]; !ok {
+		t.Errorf("missing snippet for readme.md")
+	}
+	if _, ok := meta.Snippets["notes.txt"]; !ok {
+		t.Errorf("missing snippet for notes.txt")
+	}
+	if _, ok := meta.Snippets["image.png"]; ok {
+		t.Errorf("binary image.png should not have a snippet")
+	}
+	if meta.Snippets["readme.md"] != "# Project\n\ncross-ref: see also notes.txt" {
+		t.Errorf("readme.md snippet = %q, want full content", meta.Snippets["readme.md"])
+	}
+}
+
+func TestGatherSnippetBudget(t *testing.T) {
+	dir := t.TempDir()
+	// Two text files whose combined snippets exceed the default byte budget.
+	writeFile(t, dir, "a.txt", strings.Repeat("a", 1500))
+	writeFile(t, dir, "b.txt", strings.Repeat("b", 1500))
+
+	meta, err := Gather(dir, config.Defaults())
+	if err != nil {
+		t.Fatalf("Gather error: %v", err)
+	}
+	if len(meta.Snippets) == 0 {
+		t.Fatal("expected at least one snippet")
+	}
+	var total int
+	for _, s := range meta.Snippets {
+		total += len(s)
+	}
+	if total > defaultSnippetBytes {
+		t.Errorf("total snippet bytes = %d, want \u003c= %d", total, defaultSnippetBytes)
+	}
+}
+
 func TestGatherNotADirectory(t *testing.T) {
 	f := filepath.Join(t.TempDir(), "file.txt")
 	if err := os.WriteFile(f, []byte("x"), 0o644); err != nil {

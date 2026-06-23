@@ -302,6 +302,99 @@ func Apply(decision llm.Decision, src string, fileHash string, cfg *config.Confi
 	}
 	return dest, nil
 }
+// ApplyDirectory carries out a DirectoryDecision for a project directory.
+//
+// Safety rules:
+//   - Sources outside cfg.AllowedDirs are skipped.
+//   - Destinations outside cfg.AllowedDirs redirect to the dated review queue.
+//   - Same-volume moves use a single fs.Move. Cross-device moves fall back to a
+//     recursive copy+remove, which is documented as non-atomic.
+//   - A single history row is recorded for the whole directory.
+func ApplyDirectory(decision llm.DirectoryDecision, src string, cfg *config.Config, db state.Repo, fs FS, runID string) (string, error) {
+	originalName := filepath.Base(src)
+
+	if len(cfg.AllowedDirs) > 0 && !WithinAllowed(src, cfg.AllowedDirs) {
+		return fmt.Sprintf("skipped (not allowed): %s", src), nil
+	}
+
+	var dest string
+	var action string
+	if decision.Action == "move" {
+		action = "move"
+		if decision.Destination != "" {
+			dest = expandTilde(decision.Destination)
+		} else if cfg.ProjectDirCategory != "" {
+			if catDir, ok := cfg.Categories[cfg.ProjectDirCategory]; ok {
+				dest = filepath.Join(expandTilde(catDir), originalName)
+			}
+		}
+		if dest == "" {
+			dest = datedReviewPath(cfg.ReviewDir, originalName)
+		}
+	} else {
+		action = "review"
+		dest = datedReviewPath(cfg.ReviewDir, originalName)
+	}
+
+	dest = UniqueDest(dest, fs)
+
+	if len(cfg.AllowedDirs) > 0 && !WithinAllowed(dest, cfg.AllowedDirs) {
+		action = "review"
+		dest = datedReviewPath(cfg.ReviewDir, originalName)
+		dest = UniqueDest(dest, fs)
+		decision.Reason += "; destination outside allowed dirs"
+	}
+
+	if err := fs.MkdirAll(filepath.Dir(dest)); err != nil {
+		return "", fmt.Errorf("mkdir failed: %w", err)
+	}
+
+	if err := fs.Move(src, dest); err != nil {
+		if !isCrossDeviceError(err) {
+			return "", fmt.Errorf("move failed: %s -> %s: %w", src, dest, err)
+		}
+		if cpErr := copyTree(src, dest); cpErr != nil {
+			os.RemoveAll(dest)
+			return "", fmt.Errorf("cross-device copy failed: %s -> %s: %w", src, dest, cpErr)
+		}
+		if rmErr := removeTree(src); rmErr != nil {
+			return "", fmt.Errorf("cross-device copy succeeded but remove source failed: %s: %w", src, rmErr)
+		}
+	}
+
+	var tags []string
+	if cfg.Tags {
+		tags = append(tags, decision.Tags...)
+		if decision.Category != "" && !stringSliceContains(tags, decision.Category) {
+			tags = append([]string{decision.Category}, tags...)
+		}
+	}
+	if cfg.SmartFolders {
+		tags = append([]string{"filemaid"}, tags...)
+	}
+	if len(tags) > 0 {
+		fs.SetTags(dest, tags)
+	}
+	if cfg.Comments {
+		fs.SetFinderComment(dest, decision.Reason)
+	}
+
+	if err := db.Record(state.RecordInput{
+		OriginalPath: src,
+		FinalPath:    dest,
+		SHA256:       "",
+		Category:     decision.Category,
+		Tags:         tags,
+		Action:       action,
+		Reason:       decision.Reason,
+		RunID:        runID,
+		OriginalName: originalName,
+		NewName:      "",
+	}); err != nil {
+		return "", fmt.Errorf("record history: %w", err)
+	}
+	return dest, nil
+}
 
 // DestinationDir returns the directory a file would be moved to based on the
 // classification decision and configuration, before unique-name resolution.

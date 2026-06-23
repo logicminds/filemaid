@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/logicminds/filemaid/internal/actions"
@@ -23,7 +24,7 @@ var (
 	// scanGetCandidates returns the candidate files and directories in a scan
 	// directory up to the requested depth. Tests may replace it to avoid
 	// filesystem dependencies.
-	scanGetCandidates func(dir string, depth int) ([]processInput, []string, error) = defaultScanGetCandidates
+	scanGetCandidates func(ctx context.Context, dir string, depth int) ([]processInput, []processInput, error) = defaultScanGetCandidates
 )
 
 func init() {
@@ -37,6 +38,7 @@ func init() {
 	scanCmd.Flags().BoolVar(&processDryRun, "dry-run", false, "preview changes without moving files")
 	scanCmd.Flags().IntVar(&scanDepth, "depth", 0, "descend into directories N levels (0 = file-only)")
 	scanCmd.Flags().Lookup("depth").NoOptDefVal = "1"
+	scanCmd.Flags().BoolVar(&moveProjects, "move-projects", false, "move recognized project directories as atomic units")
 	rootCmd.AddCommand(scanCmd)
 }
 
@@ -139,7 +141,7 @@ func runScanDir(ctx context.Context, directory string, runID string, w io.Writer
 		return nil, nil
 	}
 
-	files, dirs, err := scanGetCandidates(root, scanDepth)
+	files, dirs, err := scanGetCandidates(ctx, root, scanDepth)
 	if err != nil {
 		if errors.Is(err, os.ErrPermission) {
 			slog.Warn("permission denied", "dir", root)
@@ -170,7 +172,8 @@ func runScanDir(ctx context.Context, directory string, runID string, w io.Writer
 	}
 
 	if scanDepth > 0 {
-		for _, path := range dirs {
+		for _, in := range dirs {
+			path := in.path
 			info, err := os.Stat(path)
 			if err != nil {
 				slog.Warn("scan directory stat failed", "path", path, "error", err)
@@ -184,7 +187,7 @@ func runScanDir(ctx context.Context, directory string, runID string, w io.Writer
 				continue
 			}
 			if info.ModTime().Before(cutoff) {
-				toProcess = append(toProcess, processInput{path: path})
+				toProcess = append(toProcess, in)
 			}
 		}
 	}
@@ -204,25 +207,27 @@ func runScanDir(ctx context.Context, directory string, runID string, w io.Writer
 // applying allowed_dirs, hidden-directory, and min_age_hours guardrails at each
 // level. Directories containing a project marker from cfg.ProjectMarkers (or
 // .app bundles) are emitted as directory candidates and are not recursed into.
-func defaultScanGetCandidates(dir string, depth int) ([]processInput, []string, error) {
+// When --move-projects is set, directories classified as projects are also
+// treated as opaque candidates and their child files are not collected.
+func defaultScanGetCandidates(ctx context.Context, dir string, depth int) ([]processInput, []processInput, error) {
 	if depth <= 0 {
 		return listImmediateFiles(dir)
 	}
-	return scanCandidatesRecursive(dir, depth, 1)
+	return scanCandidatesRecursive(ctx, dir, depth, 1)
 }
 
 // listImmediateFiles preserves the legacy file-only enumeration behavior.
-func listImmediateFiles(dir string) ([]processInput, []string, error) {
+func listImmediateFiles(dir string) ([]processInput, []processInput, error) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return nil, nil, err
 	}
 	files := make([]processInput, 0, len(entries))
-	dirs := make([]string, 0, len(entries))
+	dirs := make([]processInput, 0, len(entries))
 	for _, e := range entries {
 		path := filepath.Join(dir, e.Name())
 		if e.IsDir() {
-			dirs = append(dirs, path)
+			dirs = append(dirs, processInput{path: path})
 			continue
 		}
 		info, err := e.Info()
@@ -239,7 +244,7 @@ func listImmediateFiles(dir string) ([]processInput, []string, error) {
 // scanCandidatesRecursive walks dir up to depth levels and returns file and
 // directory candidates that pass configured guardrails. currentDepth is the
 // level of dir relative to the scan root (1 = immediate child of root).
-func scanCandidatesRecursive(dir string, depth int, currentDepth int) ([]processInput, []string, error) {
+func scanCandidatesRecursive(ctx context.Context, dir string, depth int, currentDepth int) ([]processInput, []processInput, error) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return nil, nil, err
@@ -260,7 +265,7 @@ func scanCandidatesRecursive(dir string, depth int, currentDepth int) ([]process
 	}
 
 	var files []processInput
-	var dirs []string
+	var dirs []processInput
 	cutoff := time.Now().Add(-time.Duration(cfg.MinAgeHours) * time.Hour)
 
 	for _, e := range entries {
@@ -288,12 +293,34 @@ func scanCandidatesRecursive(dir string, depth int, currentDepth int) ([]process
 				slog.Warn("directory metadata failed", "path", path, "error", err)
 				continue
 			}
-			dirs = append(dirs, path)
-			if meta.IsAppBundle || len(meta.Markers) > 0 {
+
+			isProject := meta.IsAppBundle || len(meta.Markers) > 0
+			var dirDecision *llm.DirectoryDecision
+			if isProject {
+				recommendation := "archive"
+				reason := "macOS app bundle"
+				if len(meta.Markers) > 0 {
+					reason = fmt.Sprintf("project marker(s): %s", strings.Join(meta.Markers, ", "))
+				}
+				dirDecision = &llm.DirectoryDecision{
+					Recommendation: recommendation,
+					Action:         "move",
+					Reason:         reason,
+				}
+			} else if moveProjects {
+				decision, _ := classifyDirectory(ctx, path, cfg)
+				if decision.Action == "move" {
+					isProject = true
+					dirDecision = &decision
+				}
+			}
+
+			dirs = append(dirs, processInput{path: path, dirDecision: dirDecision})
+			if isProject {
 				continue
 			}
 			if depth > 1 {
-				subFiles, subDirs, err := scanCandidatesRecursive(path, depth-1, currentDepth+1)
+				subFiles, subDirs, err := scanCandidatesRecursive(ctx, path, depth-1, currentDepth+1)
 				if err != nil {
 					slog.Warn("scan subdirectory failed", "path", path, "error", err)
 					continue

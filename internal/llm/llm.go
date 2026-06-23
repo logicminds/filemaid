@@ -84,7 +84,9 @@ type DecisionCache interface {
 
 // DirectoryDecision holds the classifier's output for a single directory.
 type DirectoryDecision struct {
-	Recommendation string   `json:"recommendation"` // keep|review|trash|archive
+	Recommendation string   `json:"recommendation"`        // keep|review|trash|archive
+	Action         string   `json:"action,omitempty"`      // move, or empty
+	Destination    string   `json:"destination,omitempty"` // optional explicit destination
 	Reason         string   `json:"reason"`
 	Category       string   `json:"category,omitempty"`
 	Tags           []string `json:"tags,omitempty"`
@@ -369,9 +371,8 @@ func contextualCacheKey(fileHash string, dirCtx *directory.Context) string {
 	return fmt.Sprintf("%x", h.Sum(nil))
 }
 
-// ClassifyDirectory classifies a directory using bounded metadata.
 func (c *Client) ClassifyDirectory(ctx context.Context, meta *directory.Metadata, cfg *config.Config) (DirectoryDecision, Metrics, error) {
-	key := directoryCacheKey(meta)
+	key := directoryCacheKey(meta, cfg)
 	if key != "" && c.directoryCache != nil {
 		if d, ok, err := c.directoryCache.FindDirectoryDecision(key); err == nil && ok {
 			return d, Metrics{}, nil
@@ -838,6 +839,10 @@ review = the directory is ambiguous, sensitive, personal, or cannot be confident
 trash = the directory is obvious junk, cache, or temporary data with no lasting value.
 archive = the directory contains valuable historical data that should be preserved but is not actively needed.
 
+If the recommendation is review or archive, you may also recommend moving the whole directory as an atomic project:
+- action: set to "move" when the directory is a cohesive project that should be relocated as a unit. Leave empty for ordinary review or archive decisions.
+- destination: optional explicit destination path or category label. Leave empty unless you want to override the configured project directory category.
+
 Directory:
 path: %s
 name: %s
@@ -847,9 +852,10 @@ modified: %s
 extensions: %s
 project markers: %s
 %s
+%s
 
 Return a single compact JSON object and nothing else.
-{"recommendation": "keep|review|trash|archive", "reason": "...", "category": "...", "tags": ["..."]}`
+{"recommendation": "keep|review|trash|archive", "action": "move|", "destination": "", "reason": "...", "category": "...", "tags": ["..."]}`
 
 func buildDirectoryPrompt(meta *directory.Metadata, cfg *config.Config) string {
 	mtime := meta.Mtime.Format("2006-01-02T15:04:05")
@@ -883,6 +889,20 @@ func buildDirectoryPrompt(meta *directory.Metadata, cfg *config.Config) string {
 		markers = strings.Join(meta.Markers, ", ")
 	}
 
+	var snippetsSection string
+	if len(meta.Snippets) > 0 {
+		names := make([]string, 0, len(meta.Snippets))
+		for name := range meta.Snippets {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+		parts := make([]string, 0, len(names))
+		for _, name := range names {
+			parts = append(parts, fmt.Sprintf("%s:\n%s", name, meta.Snippets[name]))
+		}
+		snippetsSection = "Representative text snippets:\n" + strings.Join(parts, "\n---\n")
+	}
+
 	return fmt.Sprintf(
 		directoryPromptTemplate,
 		meta.Path,
@@ -893,6 +913,7 @@ func buildDirectoryPrompt(meta *directory.Metadata, cfg *config.Config) string {
 		strings.Join(extParts, ", "),
 		markers,
 		strings.Join(extras, "\n"),
+		snippetsSection,
 	)
 }
 
@@ -922,6 +943,15 @@ func directoryToolSchema() map[string]any {
 						"type":        "array",
 						"items":       map[string]any{"type": "string"},
 						"description": "Optional descriptive tags",
+					},
+					"action": map[string]any{
+						"type":        "string",
+						"enum":        []string{"move", ""},
+						"description": "Set to 'move' for review/archive recommendations when the directory is a cohesive project that should move as a whole. Leave empty otherwise.",
+					},
+					"destination": map[string]any{
+						"type":        "string",
+						"description": "Optional explicit destination path or category label when action is 'move'. Leave empty to use the configured project directory category.",
 					},
 				},
 				"required": []string{"recommendation", "reason"},
@@ -995,10 +1025,17 @@ func buildDirectoryDecision(m map[string]any) DirectoryDecision {
 	d.Category, _ = stringField(m, "category")
 	d.Tags = stringSliceField(m, "tags")
 
+	if action, ok := stringField(m, "action"); ok {
+		if action == "move" {
+			d.Action = "move"
+		}
+	}
+	d.Destination, _ = stringField(m, "destination")
+
 	return d
 }
 
-func directoryCacheKey(meta *directory.Metadata) string {
+func directoryCacheKey(meta *directory.Metadata, cfg *config.Config) string {
 	if meta == nil {
 		return ""
 	}
@@ -1006,6 +1043,17 @@ func directoryCacheKey(meta *directory.Metadata) string {
 	fmt.Fprintf(h, "%s\n", meta.Path)
 	fmt.Fprintf(h, "%d\n", meta.Size)
 	fmt.Fprintf(h, "%d\n", meta.Mtime.Unix())
+
+	if cfg != nil {
+		fmt.Fprintf(h, "cat:%s\n", cfg.ProjectDirCategory)
+		markers := make([]string, len(cfg.ProjectMarkers))
+		copy(markers, cfg.ProjectMarkers)
+		sort.Strings(markers)
+		for _, m := range markers {
+			fmt.Fprintf(h, "marker:%s\n", m)
+		}
+	}
+
 	exts := make([]string, 0, len(meta.Extensions))
 	for ext := range meta.Extensions {
 		exts = append(exts, ext)

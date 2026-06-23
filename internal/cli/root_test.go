@@ -17,6 +17,8 @@ func TestRootCommandRegistersAllSubcommands(t *testing.T) {
 		"config":    true,
 		"setup":     true,
 		"uninstall": true,
+		"history":   true,
+		"undo":      true,
 	}
 
 	for _, cmd := range rootCmd.Commands() {

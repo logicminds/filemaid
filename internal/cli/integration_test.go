@@ -42,18 +42,28 @@ func resetGlobals(t *testing.T) {
 	t.Helper()
 	oldClassifier := classifier
 	oldApply := applyDecision
+	oldApplyDir := applyDirectoryFunc
 	oldFS := processFS
+	oldUndoFS := undoFS
 	oldScanGetCandidates := scanGetCandidates
 	oldRegistry := cleanerRegistry
 	oldNow := nowFunc
+	oldMoveProjects := moveProjects
 
 	t.Cleanup(func() {
 		classifier = oldClassifier
 		applyDecision = oldApply
+		applyDirectoryFunc = oldApplyDir
 		processFS = oldFS
+		undoFS = oldUndoFS
 		scanGetCandidates = oldScanGetCandidates
 		cleanerRegistry = oldRegistry
 		nowFunc = oldNow
+		moveProjects = oldMoveProjects
+		undoLast = false
+		undoRun = ""
+		undoForce = false
+		undoDryRun = false
 	})
 }
 
@@ -142,9 +152,8 @@ func TestSmokeScanCommand(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	scanGetCandidates = func(dir string, depth int) ([]processInput, []string, error) {
-		return []processInput{{path: src}}, nil, nil
-	}
+	scanGetCandidates = func(ctx context.Context, dir string, depth int) ([]processInput, []processInput, error) { return []processInput{{path: src}}, nil, nil
+ }
 	scanDir = filepath.Join(tmp, "Desktop")
 
 	if err := scanCmd.RunE(scanCmd, nil); err != nil {
@@ -168,7 +177,7 @@ func TestSmokeDefaultScanGetCandidates(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	files, dirs, err := defaultScanGetCandidates(tmp, 0)
+	files, dirs, err := defaultScanGetCandidates(context.Background(), tmp, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -199,9 +208,8 @@ func TestSmokeScanRespectsMinAge(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	scanGetCandidates = func(dir string, depth int) ([]processInput, []string, error) {
-		return []processInput{{path: src}}, nil, nil
-	}
+	scanGetCandidates = func(ctx context.Context, dir string, depth int) ([]processInput, []processInput, error) { return []processInput{{path: src}}, nil, nil
+ }
 
 	if _, err := runScanDir(context.Background(), filepath.Join(tmp, "Desktop"), "run-test", io.Discard, ""); err != nil {
 		t.Fatal(err)
@@ -391,9 +399,8 @@ func TestSmokeEndToEnd(t *testing.T) {
 	// Scan the same directory; nothing should be re-processed because the file
 	// is already gone.
 	nowFunc = func() time.Time { return time.Now().Add(2 * time.Hour) }
-	scanGetCandidates = func(dir string, depth int) ([]processInput, []string, error) {
-		return nil, nil, nil
-	}
+	scanGetCandidates = func(ctx context.Context, dir string, depth int) ([]processInput, []processInput, error) { return nil, nil, nil
+ }
 	if _, err := runScanDir(context.Background(), filepath.Join(tmp, "Desktop"), "run-test", io.Discard, ""); err != nil {
 		t.Fatalf("scan failed: %v", err)
 	}
@@ -624,5 +631,279 @@ func TestAcceptanceAppBundleTreatedAsDirectory(t *testing.T) {
 	}
 	if results[0].Kind != "directory" {
 		t.Errorf("kind = %q, want directory", results[0].Kind)
+	}
+}
+// TestIntegrationProjectDirectoryMoveAndUndo verifies that a directory
+// classified as a project is moved whole to the review queue by
+// `process --depth --move-projects` and restored to its original path by
+// `undo --last`.
+func TestIntegrationProjectDirectoryMoveAndUndo(t *testing.T) {
+	resetGlobals(t)
+
+	tmp := t.TempDir()
+	cfg = testConfig(tmp)
+	db = state.NewFake()
+	processFS = actions.NewRecordingFS()
+	applyDecision = actions.Apply
+	applyDirectoryFunc = actions.ApplyDirectory
+	classifier = &fakeClassifier{
+		decision:    llm.Decision{Category: "Documents", Action: "move", Reason: "text"},
+		dirDecision: llm.DirectoryDecision{Recommendation: "archive", Action: "move", Reason: "project folder"},
+	}
+
+	dirPath := filepath.Join(tmp, "Desktop", "thesis")
+	sections := filepath.Join(dirPath, "sections")
+	if err := os.MkdirAll(sections, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dirPath, "thesis.tex"), []byte("\\documentclass{article}"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dirPath, "thesis.bib"), []byte("@article{sample}"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(sections, "chapter1.md"), []byte("# Chapter 1"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	moveProjects = true
+	processDepth = 1
+	t.Cleanup(func() {
+		moveProjects = false
+		processDepth = 0
+	})
+
+	if err := processCmd.RunE(processCmd, []string{dirPath}); err != nil {
+		t.Fatalf("process failed: %v", err)
+	}
+
+	if _, err := os.Stat(dirPath); !os.IsNotExist(err) {
+		t.Fatalf("expected original directory to be moved, still exists: %v", err)
+	}
+
+	records := db.(*state.FakeRepo).Records()
+	if len(records) != 1 {
+		t.Fatalf("expected 1 history record, got %d", len(records))
+	}
+	if records[0].Action != "move" {
+		t.Errorf("action = %q, want move", records[0].Action)
+	}
+	if records[0].OriginalPath != dirPath {
+		t.Errorf("original path = %q, want %q", records[0].OriginalPath, dirPath)
+	}
+
+	movedDir := records[0].FinalPath
+	for _, rel := range []string{"thesis.tex", "thesis.bib", "sections/chapter1.md"} {
+		if _, err := os.Stat(filepath.Join(movedDir, rel)); err != nil {
+			t.Fatalf("expected %s to be moved whole: %v", rel, err)
+		}
+	}
+
+	undoLast = true
+	t.Cleanup(func() { undoLast = false })
+	if err := undoCmd.RunE(undoCmd, nil); err != nil {
+		t.Fatalf("undo failed: %v", err)
+	}
+
+	if _, err := os.Stat(dirPath); err != nil {
+		t.Fatalf("directory not restored to original path: %v", err)
+	}
+	for _, rel := range []string{"thesis.tex", "thesis.bib", "sections/chapter1.md"} {
+		if _, err := os.Stat(filepath.Join(dirPath, rel)); err != nil {
+			t.Fatalf("expected %s to be restored: %v", rel, err)
+		}
+	}
+	if _, err := os.Stat(movedDir); !os.IsNotExist(err) {
+		t.Fatalf("expected moved directory to be gone after undo: %v", err)
+	}
+
+	records = db.(*state.FakeRepo).Records()
+	if len(records) != 2 {
+		t.Fatalf("expected 2 history records after undo, got %d", len(records))
+	}
+	if records[1].Action != "undo" {
+		t.Errorf("second record action = %q, want undo", records[1].Action)
+	}
+	if records[1].OriginalPath != movedDir {
+		t.Errorf("undo original path = %q, want %q", records[1].OriginalPath, movedDir)
+	}
+	if records[1].FinalPath != dirPath {
+		t.Errorf("undo final path = %q, want %q", records[1].FinalPath, dirPath)
+	}
+}
+
+// TestIntegrationProcessMoveProjectsDryRun verifies that
+// `process --depth --move-projects --dry-run` previews a directory move without
+// touching the filesystem or recording history.
+func TestIntegrationProcessMoveProjectsDryRun(t *testing.T) {
+	resetGlobals(t)
+
+	tmp := t.TempDir()
+	cfg = testConfig(tmp)
+	db = state.NewFake()
+	processFS = actions.NewRecordingFS()
+	applyDirectoryFunc = actions.ApplyDirectory
+	classifier = &fakeClassifier{
+		dirDecision: llm.DirectoryDecision{Recommendation: "archive", Action: "move", Reason: "project folder"},
+	}
+
+	dirPath := filepath.Join(tmp, "Desktop", "thesis")
+	if err := os.MkdirAll(dirPath, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dirPath, "thesis.tex"), []byte("\\documentclass{article}"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	moveProjects = true
+	processDepth = 1
+	processDryRun = true
+	t.Cleanup(func() {
+		moveProjects = false
+		processDepth = 0
+		processDryRun = false
+	})
+
+	if err := processCmd.RunE(processCmd, []string{dirPath}); err != nil {
+		t.Fatalf("process dry-run failed: %v", err)
+	}
+
+	if _, err := os.Stat(dirPath); err != nil {
+		t.Fatalf("dry-run should not move directory: %v", err)
+	}
+	if len(db.(*state.FakeRepo).Records()) != 0 {
+		t.Fatalf("expected no history records in dry-run, got %d", len(db.(*state.FakeRepo).Records()))
+	}
+}
+
+// TestIntegrationUndoDryRun verifies that `undo --last --dry-run` previews a
+// restore without moving files or recording an undo history row.
+func TestIntegrationUndoDryRun(t *testing.T) {
+	resetGlobals(t)
+
+	tmp := t.TempDir()
+	cfg = testConfig(tmp)
+	db = state.NewFake()
+	processFS = actions.NewRecordingFS()
+	applyDirectoryFunc = actions.ApplyDirectory
+	classifier = &fakeClassifier{
+		dirDecision: llm.DirectoryDecision{Recommendation: "archive", Action: "move", Reason: "project folder"},
+	}
+
+	dirPath := filepath.Join(tmp, "Desktop", "thesis")
+	if err := os.MkdirAll(dirPath, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dirPath, "thesis.tex"), []byte("\\documentclass{article}"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	moveProjects = true
+	processDepth = 1
+	if err := processCmd.RunE(processCmd, []string{dirPath}); err != nil {
+		t.Fatalf("process failed: %v", err)
+	}
+	moveProjects = false
+	processDepth = 0
+
+	records := db.(*state.FakeRepo).Records()
+	if len(records) != 1 {
+		t.Fatalf("expected 1 history record after process, got %d", len(records))
+	}
+	movedDir := records[0].FinalPath
+
+	undoLast = true
+	undoDryRun = true
+	t.Cleanup(func() {
+		undoLast = false
+		undoDryRun = false
+	})
+	if err := undoCmd.RunE(undoCmd, nil); err != nil {
+		t.Fatalf("undo dry-run failed: %v", err)
+	}
+
+	if _, err := os.Stat(movedDir); err != nil {
+		t.Fatalf("undo dry-run should not restore directory: %v", err)
+	}
+	if _, err := os.Stat(dirPath); !os.IsNotExist(err) {
+		t.Fatalf("undo dry-run should not restore to original path: %v", err)
+	}
+	if len(db.(*state.FakeRepo).Records()) != 1 {
+		t.Fatalf("expected 1 history record after dry-run undo, got %d", len(db.(*state.FakeRepo).Records()))
+	}
+}
+
+// TestIntegrationNonProjectDirectoryProcessesFiles verifies that a directory
+// that is not classified as a project is not moved whole; instead, scan
+// descends into it and processes individual files when `--depth` is used.
+func TestIntegrationNonProjectDirectoryProcessesFiles(t *testing.T) {
+	resetGlobals(t)
+
+	tmp := t.TempDir()
+	cfg = testConfig(tmp)
+	cfg.MinAgeHours = 0
+	db = state.NewFake()
+	processFS = actions.NewRecordingFS()
+	applyDecision = actions.Apply
+	applyDirectoryFunc = actions.ApplyDirectory
+	classifier = &fakeClassifier{
+		decision:    llm.Decision{Category: "Documents", Action: "move", Reason: "text"},
+		dirDecision: llm.DirectoryDecision{Recommendation: "review", Action: "", Reason: "not a project"},
+	}
+
+	scanRoot := filepath.Join(tmp, "Desktop")
+	mixedDir := filepath.Join(scanRoot, "mixed")
+	if err := os.MkdirAll(mixedDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(mixedDir, "a.txt"), []byte("a"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(mixedDir, "b.txt"), []byte("b"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	oldTime := time.Now().Add(-time.Hour)
+	for _, p := range []string{mixedDir, filepath.Join(mixedDir, "a.txt"), filepath.Join(mixedDir, "b.txt")} {
+		if err := os.Chtimes(p, oldTime, oldTime); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	scanDir = scanRoot
+	scanDepth = 2
+	moveProjects = true
+	scanGetCandidates = defaultScanGetCandidates
+	t.Cleanup(func() {
+		scanDir = ""
+		scanDepth = 0
+		moveProjects = false
+	})
+
+	if err := scanCmd.RunE(scanCmd, nil); err != nil {
+		t.Fatalf("scan failed: %v", err)
+	}
+
+	if _, err := os.Stat(mixedDir); err != nil {
+		t.Fatalf("non-project directory should remain: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(tmp, "Documents", "a.txt")); err != nil {
+		t.Fatalf("a.txt should be moved to Documents: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(tmp, "Documents", "b.txt")); err != nil {
+		t.Fatalf("b.txt should be moved to Documents: %v", err)
+	}
+
+	records := db.(*state.FakeRepo).Records()
+	if len(records) != 2 {
+		t.Fatalf("expected 2 history records for files, got %d", len(records))
+	}
+	for _, r := range records {
+		if !strings.HasPrefix(r.OriginalPath, mixedDir) {
+			t.Errorf("expected file record inside %s, got %s", mixedDir, r.OriginalPath)
+		}
+		if r.Action != "move" {
+			t.Errorf("expected action move, got %s", r.Action)
+		}
 	}
 }

@@ -1837,13 +1837,14 @@ func TestProcessPathsClassifiesDirectory(t *testing.T) {
 func TestFormatProcessTableDirectoryAndInPlaceRename(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
-	src := filepath.Join(home, "Downloads", "project", "photo.jpg")
+	dest := filepath.Join(home, "Projects", "project")
+	src := filepath.Join(home, "Downloads", "project")
 	results := []processResult{
-		{Path: src, Kind: "directory", Recommendation: "archive", Category: "Projects", Tags: []string{"project"}, Action: "archive", Result: "-", OriginalName: "project", OK: true, Reason: "keep project"},
+		{Path: src, Kind: "directory", Recommendation: "archive", Category: "Projects", Tags: []string{"project"}, Action: "move", Result: dest, OriginalName: "project", OK: true, Reason: "keep project"},
 		{Path: filepath.Join(home, "Downloads", "img.jpg"), Category: "Images", Tags: []string{"jpg"}, Action: "move", Result: filepath.Join(home, "Downloads", "vacation.jpg"), OriginalName: "img.jpg", NewName: "vacation.jpg", OK: true},
 	}
 	out := formatProcessTable(results)
-	for _, want := range []string{"Item", "dir:", "archive", "in-place:", "vacation.jpg"} {
+	for _, want := range []string{"Item", "dir:", "move", "Projects", "project", "in-place:", "vacation.jpg"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("table output missing %q:\n%s", want, out)
 		}
@@ -1853,15 +1854,213 @@ func TestFormatProcessTableDirectoryAndInPlaceRename(t *testing.T) {
 func TestFormatHumanDirectoryAndInPlaceRename(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
+	dest := filepath.Join(home, "Projects", "project")
 	src := filepath.Join(home, "Downloads", "project")
 	results := []processResult{
-		{Path: src, Kind: "directory", Recommendation: "archive", Category: "Projects", Tags: []string{"project"}, Action: "archive", Result: "-", OriginalName: "project", OK: true, Reason: "keep project"},
+		{Path: src, Kind: "directory", Recommendation: "archive", Category: "Projects", Tags: []string{"project"}, Action: "move", Result: dest, OriginalName: "project", OK: true, Reason: "keep project"},
 		{Path: filepath.Join(home, "Downloads", "img.jpg"), Category: "Images", Tags: []string{"jpg"}, Action: "move", Result: filepath.Join(home, "Downloads", "vacation.jpg"), OriginalName: "img.jpg", NewName: "vacation.jpg", OK: true},
 	}
 	out := formatHuman(results)
-	for _, want := range []string{"[dir] project", "Recommendation: archive", "Reason:   keep project", "in-place:", "vacation.jpg"} {
+	for _, want := range []string{"moved directory project", "→", "~/Projects/project", "Action:   move", "Reason:   keep project", "in-place:", "vacation.jpg"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("human output missing %q:\n%s", want, out)
 		}
+	}
+}
+
+func TestFormatProcessResultsJSONDirectory(t *testing.T) {
+	dest := "/archive/project"
+	results := []processResult{
+		{Path: "/Downloads/project", Kind: "directory", Recommendation: "archive", Category: "Projects", Tags: []string{"project"}, Action: "move", Result: dest, OriginalName: "project", OK: true, Reason: "keep project"},
+	}
+	out, err := formatProcessResults(results, "json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{`"path": "/Downloads/project"`, `"kind": "directory"`, `"action": "move"`, `"result": "/archive/project"`, `"category": "Projects"`, `"ok": true`} {
+		if !strings.Contains(out, want) {
+			t.Errorf("json output missing %q:\n%s", want, out)
+		}
+	}
+}
+func TestProcessCmdHasMoveProjectsFlag(t *testing.T) {
+	if processCmd.Flags().Lookup("move-projects") == nil {
+		t.Fatal("expected --move-projects flag on process command")
+	}
+}
+
+func TestProcessPathsMoveProjectsWithMarkers(t *testing.T) {
+	tmp := t.TempDir()
+	cfg = testConfig(tmp)
+	cfg.ProjectMarkers = []string{".git"}
+	db = state.NewFake()
+	processFS = actions.NewRecordingFS()
+
+	dir := filepath.Join(tmp, "Desktop", "project")
+	if err := os.MkdirAll(filepath.Join(dir, ".git"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "readme.txt"), []byte("hello"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	processDepth = 1
+	moveProjects = true
+	t.Cleanup(func() { processDepth = 0; moveProjects = false })
+
+	results, err := processPaths(context.Background(), inputs(dir), "run-test", io.Discard, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("expected 1 result, got %d", len(results))
+	}
+	r := results[0]
+	if r.Kind != "directory" {
+		t.Errorf("kind = %q, want directory", r.Kind)
+	}
+	if r.Action != "move" {
+		t.Errorf("action = %q, want move", r.Action)
+	}
+	if r.Result == "" || r.Result == "-" {
+		t.Errorf("result = %q, want destination path", r.Result)
+	}
+	if !r.OK {
+		t.Errorf("expected directory move to be OK")
+	}
+	records := db.(*state.FakeRepo).Records()
+	if len(records) != 1 {
+		t.Errorf("expected 1 history record, got %d", len(records))
+	}
+	fs := processFS.(*actions.RecordingFS)
+	if len(fs.Moved) != 1 {
+		t.Errorf("expected 1 move, got %d", len(fs.Moved))
+	}
+}
+
+func TestProcessPathsMoveProjectsClassified(t *testing.T) {
+	tmp := t.TempDir()
+	cfg = testConfig(tmp)
+	db = state.NewFake()
+	processFS = actions.NewRecordingFS()
+
+	fc := &fakeClassifier{
+		decision:    llm.Decision{Category: "Documents", Action: "move"},
+		dirDecision: llm.DirectoryDecision{Recommendation: "archive", Action: "move", Reason: "project folder", Category: "Projects", Tags: []string{"project"}},
+	}
+	classifier = fc
+
+	dir := filepath.Join(tmp, "Desktop", "project")
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	processDepth = 1
+	moveProjects = true
+	t.Cleanup(func() { processDepth = 0; moveProjects = false; classifier = llm.NewClient(nil) })
+
+	results, err := processPaths(context.Background(), inputs(dir), "run-test", io.Discard, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("expected 1 result, got %d", len(results))
+	}
+	r := results[0]
+	if r.Kind != "directory" {
+		t.Errorf("kind = %q, want directory", r.Kind)
+	}
+	if r.Action != "move" {
+		t.Errorf("action = %q, want move", r.Action)
+	}
+	if r.Recommendation != "archive" {
+		t.Errorf("recommendation = %q, want archive", r.Recommendation)
+	}
+	if r.Category != "Projects" {
+		t.Errorf("category = %q, want Projects", r.Category)
+	}
+	if r.Result == "" || r.Result == "-" {
+		t.Errorf("result = %q, want destination path", r.Result)
+	}
+	if !r.OK {
+		t.Errorf("expected directory move to be OK")
+	}
+	records := db.(*state.FakeRepo).Records()
+	if len(records) != 1 {
+		t.Errorf("expected 1 history record, got %d", len(records))
+	}
+}
+func TestProcessPathsMoveProjectsWithoutFlagKeepsReadOnly(t *testing.T) {
+	tmp := t.TempDir()
+	cfg = testConfig(tmp)
+	cfg.ProjectMarkers = []string{".git"}
+	db = state.NewFake()
+	processFS = actions.NewRecordingFS()
+
+	dir := filepath.Join(tmp, "Desktop", "project")
+	if err := os.MkdirAll(filepath.Join(dir, ".git"), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	processDepth = 1
+	moveProjects = false
+	t.Cleanup(func() { processDepth = 0 })
+
+	results, err := processPaths(context.Background(), inputs(dir), "run-test", io.Discard, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("expected 1 result, got %d", len(results))
+	}
+	if results[0].Action != "archive" {
+		t.Errorf("action = %q, want archive recommendation", results[0].Action)
+	}
+	if results[0].Result != "-" {
+		t.Errorf("result = %q, want '-' for read-only", results[0].Result)
+	}
+	records := db.(*state.FakeRepo).Records()
+	if len(records) != 0 {
+		t.Errorf("expected no history records without --move-projects, got %d", len(records))
+	}
+}
+
+func TestProcessPathsMoveProjectsNonProjectReadOnly(t *testing.T) {
+	tmp := t.TempDir()
+	cfg = testConfig(tmp)
+	db = state.NewFake()
+	processFS = actions.NewRecordingFS()
+
+	fc := &fakeClassifier{dirDecision: llm.DirectoryDecision{Recommendation: "keep", Action: "", Reason: "keep it"}}
+	classifier = fc
+
+	dir := filepath.Join(tmp, "Desktop", "other")
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	processDepth = 1
+	moveProjects = true
+	t.Cleanup(func() { processDepth = 0; moveProjects = false; classifier = llm.NewClient(nil) })
+
+	results, err := processPaths(context.Background(), inputs(dir), "run-test", io.Discard, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("expected 1 result, got %d", len(results))
+	}
+	if results[0].Action != "keep" {
+		t.Errorf("action = %q, want keep", results[0].Action)
+	}
+	if results[0].Result != "-" {
+		t.Errorf("result = %q, want '-' for read-only", results[0].Result)
+	}
+	if !results[0].OK {
+		t.Errorf("expected read-only directory result to be OK")
+	}
+	records := db.(*state.FakeRepo).Records()
+	if len(records) != 0 {
+		t.Errorf("expected no history records for non-project directory, got %d", len(records))
 	}
 }

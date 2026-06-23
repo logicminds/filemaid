@@ -42,8 +42,11 @@
     "Code": "~/Documents/Archive/Code",
     "Archives": "~/Documents/Archive/Archives",
     "Media": "~/Documents/Archive/Media",
-    "Unknown": "~/.filemaid/review"
+    "Unknown": "~/.filemaid/review",
+    "Projects": "~/Documents/Archive/Projects"
   },
+  "_project_dir_category_note": "When --move-projects is enabled, recognized project directories are moved to this category. Empty or missing category falls back to the dated review queue.",
+  "project_dir_category": "Projects",
   "safe_delete_patterns": [],
   "age_rules": [
     {

@@ -80,6 +80,7 @@ type Config struct {
 	ProcessWorkers                 int                      `json:"process_workers"`
 	MaxImageDimension              int                      `json:"max_image_dimension"`
 	ProjectMarkers                 []string                 `json:"project_markers"`
+	ProjectDirCategory             string                   `json:"project_dir_category"`
 	MaxDirSampleEntries            int                      `json:"max_dir_sample_entries"`
 	MaxDirSampleBytes              int                      `json:"max_dir_sample_bytes"`
 	ExternalTools                  ExternalTools            `json:"external_tools"`

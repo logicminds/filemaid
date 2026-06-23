@@ -27,6 +27,9 @@ type Repo interface {
 	FindDirectoryDecision(key string) (llm.DirectoryDecision, bool, error)
 	RecordDirectoryDecision(key string, decision llm.DirectoryDecision) error
 	History(limit int, runID string) ([]Record, error)
+	HistoryByRunID(runID string) ([]Record, error)
+	HistoryByFinalPath(finalPath string) (*Record, error)
+	LastRunID() (string, error)
 	Close() error
 }
 
@@ -396,6 +399,75 @@ func (s *State) History(limit int, runID string) ([]Record, error) {
 		return nil, fmt.Errorf("iterate history: %w", err)
 	}
 	return out, nil
+}
+
+// HistoryByRunID returns all history rows for the given run, excluding undo rows.
+func (s *State) HistoryByRunID(runID string) ([]Record, error) {
+	rows, err := s.db.Query(
+		`SELECT `+historySelectColumns+
+			` FROM history WHERE run_id = ? AND action != 'undo' ORDER BY created_at DESC, id DESC`,
+		runID)
+	if err != nil {
+		return nil, fmt.Errorf("query history by run id: %w", err)
+	}
+	defer rows.Close()
+
+	var out []Record
+	for rows.Next() {
+		var r Record
+		var finalPath, sha, category, tags, action, reason sql.NullString
+		var origName, newName, mediaKind, pHash, avSig, textSig, hashAlgo sql.NullString
+		if err := rows.Scan(
+			&r.ID, &r.OriginalPath, &finalPath, &sha, &category, &tags, &action, &reason, &r.CreatedAt,
+			&r.RunID, &r.LLMDurationMs, &r.PromptTokens, &r.CompletionTokens, &r.TotalTokens, &r.TokensPerSec, &r.ContextSize,
+			&origName, &newName, &r.NameQuality, &mediaKind, &pHash, &avSig, &textSig, &hashAlgo,
+		); err != nil {
+			return nil, fmt.Errorf("scan history: %w", err)
+		}
+		r.FinalPath = finalPath.String
+		r.SHA256 = sha.String
+		r.Category = category.String
+		r.Tags = tags.String
+		r.Action = action.String
+		r.Reason = reason.String
+		r.OriginalName = origName.String
+		r.NewName = newName.String
+		r.MediaKind = mediaKind.String
+		r.PerceptualHash = pHash.String
+		r.AVSignature = avSig.String
+		r.TextSignature = textSig.String
+		r.HashAlgorithm = hashAlgo.String
+		out = append(out, r)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate history: %w", err)
+	}
+	return out, nil
+}
+
+// HistoryByFinalPath returns the most recent history row with the given final path,
+// excluding undo rows.
+func (s *State) HistoryByFinalPath(finalPath string) (*Record, error) {
+	row := s.db.QueryRow(
+		`SELECT `+historySelectColumns+
+			` FROM history WHERE final_path = ? AND action != 'undo' ORDER BY created_at DESC, id DESC LIMIT 1`,
+		finalPath)
+	return scanRecord(row)
+}
+
+// LastRunID returns the most recent run_id that has move actions, ignoring undo
+// rows and trashed items.
+func (s *State) LastRunID() (string, error) {
+	var runID sql.NullString
+	err := s.db.QueryRow(
+		`SELECT run_id FROM history WHERE action != 'undo' AND final_path != 'trash' ORDER BY created_at DESC, id DESC LIMIT 1`).Scan(&runID)
+	if err == sql.ErrNoRows {
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("query last run id: %w", err)
+	}
+	return runID.String, nil
 }
 
 // FindDuplicatesByHash returns all history rows matching sha256, ordered by most recent first.

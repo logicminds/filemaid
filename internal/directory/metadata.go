@@ -1,7 +1,9 @@
 package directory
 
 import (
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -21,9 +23,50 @@ type Metadata struct {
 	Extensions  map[string]int
 	Markers     []string
 	IsAppBundle bool
-	Truncated   string   // "entries", "bytes", or "entries, bytes" when capped
-	ReadErrors  []string // individual child permission/stat failures
+	Truncated   string            // "entries", "bytes", or "entries, bytes" when capped
+	ReadErrors  []string          // individual child permission/stat failures
+	Snippets    map[string]string // representative text snippets keyed by filename
 }
+
+// textExtensions is the set of file extensions treated as text for snippet
+// gathering. It is intentionally conservative to avoid reading binaries.
+var textExtensions = map[string]bool{
+	".txt": true, ".md": true, ".markdown": true,
+	".go": true, ".js": true, ".ts": true, ".jsx": true, ".tsx": true,
+	".json": true, ".yaml": true, ".yml": true, ".toml": true,
+	".xml": true, ".html": true, ".htm": true, ".css": true,
+	".py": true, ".rb": true, ".rs": true, ".java": true,
+	".c": true, ".cpp": true, ".cc": true, ".h": true, ".hpp": true,
+	".sh": true, ".bash": true, ".zsh": true,
+	".log": true, ".csv": true, ".tex": true, ".bib": true,
+	".rst": true, ".org": true,
+}
+
+func isTextFile(name string) bool {
+	ext := strings.ToLower(filepath.Ext(name))
+	return textExtensions[ext]
+}
+
+// readSnippet reads up to limit bytes from path and returns them as a string.
+func readSnippet(path string, limit int) (string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+
+	buf := make([]byte, limit)
+	n, err := io.ReadFull(f, buf)
+	if err != nil && !errors.Is(err, io.EOF) && !errors.Is(err, io.ErrUnexpectedEOF) {
+		return "", err
+	}
+	return string(buf[:n]), nil
+}
+
+const (
+	defaultSnippetCount = 10
+	defaultSnippetBytes = 2048
+)
 
 // Gather builds a bounded snapshot of dir. It walks only the immediate
 // children. It returns an error only for fundamental failures; permission
@@ -61,6 +104,7 @@ func Gather(dir string, cfg *config.Config) (*Metadata, error) {
 		Base:        base,
 		Mtime:       info.ModTime(),
 		Extensions:  make(map[string]int),
+		Snippets:    make(map[string]string),
 		IsAppBundle: strings.HasSuffix(base, ".app"),
 	}
 
@@ -95,6 +139,9 @@ func Gather(dir string, cfg *config.Config) (*Metadata, error) {
 	var sampledBytes int64
 	var truncated bool
 	var reasons []string
+	maxSnippetCount := defaultSnippetCount
+	maxSnippetBytes := defaultSnippetBytes
+	var snippetCount, snippetBytes int
 
 	for i, entry := range entries {
 		if i >= maxEntries {
@@ -126,6 +173,18 @@ func Gather(dir string, cfg *config.Config) (*Metadata, error) {
 
 		ext := strings.ToLower(filepath.Ext(name))
 		meta.Extensions[ext]++
+
+		if isTextFile(name) && snippetCount < maxSnippetCount && snippetBytes < maxSnippetBytes {
+			limit := maxSnippetBytes - snippetBytes
+			if limit > 512 {
+				limit = 512
+			}
+			if s, err := readSnippet(filepath.Join(absDir, name), limit); err == nil && s != "" {
+				meta.Snippets[name] = s
+				snippetCount++
+				snippetBytes += len(s)
+			}
+		}
 	}
 
 	if truncated {

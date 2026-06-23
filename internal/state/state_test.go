@@ -904,3 +904,112 @@ func TestOpen_WALUnsupportedContinues(t *testing.T) {
 		t.Errorf("expected WAL warning in logs, got %q", buf.String())
 	}
 }
+
+func TestHistoryByRunID_ExcludesUndo(t *testing.T) {
+	repo, err := state.Open(filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+	defer repo.Close()
+
+	m := llm.Metrics{}
+	if err := repo.Record(state.RecordInput{OriginalPath: "/a", FinalPath: "/b", SHA256: "h1", Action: "move", RunID: "run-1", Metrics: m}); err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.Record(state.RecordInput{OriginalPath: "/b", FinalPath: "/a", SHA256: "h1", Action: "undo", RunID: "run-2", Metrics: m}); err != nil {
+		t.Fatal(err)
+	}
+
+	recs, err := repo.HistoryByRunID("run-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(recs) != 1 || recs[0].Action != "move" {
+		t.Errorf("expected 1 move row, got %+v", recs)
+	}
+
+	recs, err = repo.HistoryByRunID("run-2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(recs) != 0 {
+		t.Errorf("expected 0 undo rows, got %d", len(recs))
+	}
+}
+
+func TestHistoryByFinalPath_ReturnsMostRecent(t *testing.T) {
+	repo, err := state.Open(filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+	defer repo.Close()
+
+	m := llm.Metrics{}
+	if err := repo.Record(state.RecordInput{OriginalPath: "/a", FinalPath: "/c", SHA256: "h1", Action: "move", RunID: "run-1", Metrics: m}); err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.Record(state.RecordInput{OriginalPath: "/b", FinalPath: "/c", SHA256: "h2", Action: "move", RunID: "run-2", Metrics: m}); err != nil {
+		t.Fatal(err)
+	}
+
+	r, err := repo.HistoryByFinalPath("/c")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r == nil {
+		t.Fatal("expected record, got nil")
+	}
+	if r.OriginalPath != "/b" {
+		t.Errorf("OriginalPath = %q, want /b", r.OriginalPath)
+	}
+}
+
+func TestLastRunID_IgnoresUndoAndTrash(t *testing.T) {
+	repo, err := state.Open(filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+	defer repo.Close()
+
+	m := llm.Metrics{}
+	if err := repo.Record(state.RecordInput{OriginalPath: "/a", FinalPath: "trash", SHA256: "h1", Action: "delete", RunID: "run-1", Metrics: m}); err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.Record(state.RecordInput{OriginalPath: "/b", FinalPath: "/c", SHA256: "h2", Action: "move", RunID: "run-2", Metrics: m}); err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.Record(state.RecordInput{OriginalPath: "/c", FinalPath: "/b", SHA256: "h2", Action: "undo", RunID: "run-3", Metrics: m}); err != nil {
+		t.Fatal(err)
+	}
+
+	runID, err := repo.LastRunID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if runID != "run-2" {
+		t.Errorf("LastRunID = %q, want run-2", runID)
+	}
+}
+
+func TestFakeRepo_UndoQueries(t *testing.T) {
+	f := state.NewFake()
+	m := llm.Metrics{}
+	f.Record(state.RecordInput{OriginalPath: "/a", FinalPath: "/b", SHA256: "h1", Action: "move", RunID: "run-1", Metrics: m})
+	f.Record(state.RecordInput{OriginalPath: "/c", FinalPath: "/d", SHA256: "h2", Action: "move", RunID: "run-2", Metrics: m})
+	f.Record(state.RecordInput{OriginalPath: "/b", FinalPath: "/a", SHA256: "h1", Action: "undo", RunID: "run-3", Metrics: m})
+
+	recs, err := f.HistoryByRunID("run-1")
+	if err != nil || len(recs) != 1 || recs[0].Action != "move" {
+		t.Errorf("HistoryByRunID unexpected: %v, err=%v", recs, err)
+	}
+
+	r, err := f.HistoryByFinalPath("/d")
+	if err != nil || r == nil || r.RunID.String != "run-2" {
+		t.Errorf("HistoryByFinalPath unexpected: %v, err=%v", r, err)
+	}
+
+	runID, err := f.LastRunID()
+	if err != nil || runID != "run-2" {
+		t.Errorf("LastRunID = %q, want run-2", runID)
+	}
+}

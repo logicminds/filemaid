@@ -34,9 +34,8 @@ func TestScanDirProcessesFiles(t *testing.T) {
 	os.MkdirAll(filepath.Dir(src), 0755)
 	os.WriteFile(src, []byte("hello"), 0644)
 
-	scanGetCandidates = func(dir string, depth int) ([]processInput, []string, error) {
-		return []processInput{{path: src}}, nil, nil
-	}
+	scanGetCandidates = func(ctx context.Context, dir string, depth int) ([]processInput, []processInput, error) { return []processInput{{path: src}}, nil, nil
+ }
 	t.Cleanup(func() { scanGetCandidates = defaultScanGetCandidates })
 
 	if _, err := runScanDir(context.Background(), filepath.Join(tmp, "Desktop"), "run-test", io.Discard, ""); err != nil {
@@ -67,9 +66,8 @@ func TestScanDirPermissionError(t *testing.T) {
 	cfg = testConfig(tmp)
 	db = state.NewFake()
 
-	scanGetCandidates = func(dir string, depth int) ([]processInput, []string, error) {
-		return nil, nil, os.ErrPermission
-	}
+	scanGetCandidates = func(ctx context.Context, dir string, depth int) ([]processInput, []processInput, error) { return nil, nil, os.ErrPermission
+ }
 	t.Cleanup(func() { scanGetCandidates = defaultScanGetCandidates })
 
 	buf := captureSlog(t)
@@ -93,10 +91,9 @@ func TestScanCommandFailsValidationBeforeScanning(t *testing.T) {
 	os.MkdirAll(filepath.Dir(src), 0755)
 	os.WriteFile(src, []byte("hello"), 0644)
 
-	scanGetCandidates = func(dir string, depth int) ([]processInput, []string, error) {
-		t.Fatal("scanGetCandidates should not be called when validation fails")
+	scanGetCandidates = func(ctx context.Context, dir string, depth int) ([]processInput, []processInput, error) { t.Fatal("scanGetCandidates should not be called when validation fails")
 		return nil, nil, nil
-	}
+ }
 	t.Cleanup(func() { scanGetCandidates = defaultScanGetCandidates })
 
 	err := scanCmd.RunE(nil, []string{})
@@ -134,9 +131,8 @@ func TestScanCommandSucceedsWhenValidationPasses(t *testing.T) {
 	os.MkdirAll(filepath.Dir(src), 0755)
 	os.WriteFile(src, []byte("hello"), 0644)
 
-	scanGetCandidates = func(dir string, depth int) ([]processInput, []string, error) {
-		return []processInput{{path: src}}, nil, nil
-	}
+	scanGetCandidates = func(ctx context.Context, dir string, depth int) ([]processInput, []processInput, error) { return []processInput{{path: src}}, nil, nil
+ }
 	t.Cleanup(func() { scanGetCandidates = defaultScanGetCandidates })
 
 	scanDir = filepath.Join(tmp, "Desktop")
@@ -168,9 +164,7 @@ func TestScanDirIncludesDirectoriesWhenFlagSet(t *testing.T) {
 
 	scanDepth = 1
 	t.Cleanup(func() { scanDepth = 0 })
-	scanGetCandidates = func(dir string, depth int) ([]processInput, []string, error) {
-		return nil, []string{dirPath}, nil
-	}
+	scanGetCandidates = func(ctx context.Context, dir string, depth int) ([]processInput, []processInput, error) { return nil, []processInput{{path: dirPath}}, nil }
 	t.Cleanup(func() { scanGetCandidates = defaultScanGetCandidates })
 
 	results, err := runScanDir(context.Background(), filepath.Join(tmp, "Desktop"), "run-test", io.Discard, "")
@@ -205,9 +199,7 @@ func TestScanDirSkipsHiddenDirectories(t *testing.T) {
 
 	scanDepth = 1
 	t.Cleanup(func() { scanDepth = 0 })
-	scanGetCandidates = func(dir string, depth int) ([]processInput, []string, error) {
-		return nil, []string{dirPath}, nil
-	}
+	scanGetCandidates = func(ctx context.Context, dir string, depth int) ([]processInput, []processInput, error) { return nil, []processInput{{path: dirPath}}, nil }
 	t.Cleanup(func() { scanGetCandidates = defaultScanGetCandidates })
 
 	results, err := runScanDir(context.Background(), filepath.Join(tmp, "Desktop"), "run-test", io.Discard, "")
@@ -232,9 +224,7 @@ func TestScanDirSkipsDirectoriesOutsideAllowedDirs(t *testing.T) {
 
 	scanDepth = 1
 	t.Cleanup(func() { scanDepth = 0 })
-	scanGetCandidates = func(dir string, depth int) ([]processInput, []string, error) {
-		return nil, []string{dirPath}, nil
-	}
+	scanGetCandidates = func(ctx context.Context, dir string, depth int) ([]processInput, []processInput, error) { return nil, []processInput{{path: dirPath}}, nil }
 	t.Cleanup(func() { scanGetCandidates = defaultScanGetCandidates })
 
 	results, err := runScanDir(context.Background(), filepath.Join(tmp, "Outside"), "run-test", io.Discard, "")
@@ -264,9 +254,7 @@ func TestScanDirRespectsMinAgeForDirectories(t *testing.T) {
 
 	scanDepth = 1
 	t.Cleanup(func() { scanDepth = 0 })
-	scanGetCandidates = func(dir string, depth int) ([]processInput, []string, error) {
-		return nil, []string{recentDir}, nil
-	}
+	scanGetCandidates = func(ctx context.Context, dir string, depth int) ([]processInput, []processInput, error) { return nil, []processInput{{path: recentDir}}, nil }
 	t.Cleanup(func() { scanGetCandidates = defaultScanGetCandidates })
 
 	results, err := runScanDir(context.Background(), filepath.Join(tmp, "Desktop"), "run-test", io.Discard, "")
@@ -290,9 +278,7 @@ func TestScanDirWithoutFlagSkipsDirectories(t *testing.T) {
 	}
 
 	scanDepth = 0
-	scanGetCandidates = func(dir string, depth int) ([]processInput, []string, error) {
-		return nil, []string{dirPath}, nil
-	}
+	scanGetCandidates = func(ctx context.Context, dir string, depth int) ([]processInput, []processInput, error) { return nil, []processInput{{path: dirPath}}, nil }
 	t.Cleanup(func() { scanGetCandidates = defaultScanGetCandidates })
 
 	results, err := runScanDir(context.Background(), filepath.Join(tmp, "Desktop"), "run-test", io.Discard, "")
@@ -512,7 +498,7 @@ func TestDefaultScanGetCandidates(t *testing.T) {
 				cfg.AllowedDirs = testConfig(tmp).AllowedDirs
 			}
 
-			files, dirs, err := defaultScanGetCandidates(desktop, tt.depth)
+			files, dirs, err := defaultScanGetCandidates(context.Background(), desktop, tt.depth)
 			if err != nil {
 				t.Fatalf("defaultScanGetCandidates: %v", err)
 			}
@@ -520,7 +506,10 @@ func TestDefaultScanGetCandidates(t *testing.T) {
 			for _, f := range files {
 				fileSet[f.path] = struct{}{}
 			}
-			dirSet := sliceToSet(dirs)
+			dirSet := make(map[string]struct{}, len(dirs))
+			for _, d := range dirs {
+				dirSet[d.path] = struct{}{}
+			}
 			for _, want := range tt.wantFiles {
 				if _, ok := fileSet[want]; !ok {
 					t.Errorf("missing file %s\nfiles = %v", want, files)
@@ -568,4 +557,209 @@ func sliceToSet(ss []string) map[string]struct{} {
 		m[s] = struct{}{}
 	}
 	return m
+}
+func TestScanCmdHasMoveProjectsFlag(t *testing.T) {
+	if scanCmd.Flags().Lookup("move-projects") == nil {
+		t.Fatal("expected --move-projects flag on scan command")
+	}
+}
+
+func TestScanMoveProjectsStopsAtProjectMarkerDir(t *testing.T) {
+	tmp := t.TempDir()
+	cfg = testConfig(tmp)
+	cfg.ProjectMarkers = []string{".git"}
+	db = state.NewFake()
+	processFS = actions.NewRecordingFS()
+
+	desktop := filepath.Join(tmp, "Desktop")
+	proj := filepath.Join(desktop, "proj")
+	mustMkdir(t, filepath.Join(proj, ".git"))
+	mustWriteFile(t, filepath.Join(proj, "readme.txt"), "hello")
+	nested := filepath.Join(proj, "sub")
+	mustMkdir(t, nested)
+	mustWriteFile(t, filepath.Join(nested, "deep.txt"), "deep")
+
+	setOldMtime := func(path string) {
+		old := time.Now().Add(-24 * time.Hour)
+		if err := os.Chtimes(path, old, old); err != nil {
+			t.Fatalf("Chtimes %s: %v", path, err)
+		}
+	}
+	setOldMtime(desktop)
+	setOldMtime(proj)
+	setOldMtime(nested)
+
+	scanDepth = 2
+	moveProjects = true
+	t.Cleanup(func() { scanDepth = 0; moveProjects = false })
+
+	files, dirs, err := defaultScanGetCandidates(context.Background(), desktop, scanDepth)
+	if err != nil {
+		t.Fatalf("defaultScanGetCandidates: %v", err)
+	}
+
+	fileSet := make(map[string]struct{}, len(files))
+	for _, f := range files {
+		fileSet[f.path] = struct{}{}
+	}
+	dirSet := make(map[string]struct{}, len(dirs))
+	for _, d := range dirs {
+		dirSet[d.path] = struct{}{}
+	}
+
+	if _, ok := dirSet[proj]; !ok {
+		t.Errorf("expected project dir %s in dirs, got %v", proj, dirs)
+	}
+	for _, unexpected := range []string{
+		filepath.Join(proj, "readme.txt"),
+		filepath.Join(nested, "deep.txt"),
+	} {
+		if _, ok := fileSet[unexpected]; ok {
+			t.Errorf("unexpected file inside project dir: %s", unexpected)
+		}
+	}
+}
+
+func TestScanMoveProjectsStopsAtClassifiedProjectDir(t *testing.T) {
+	tmp := t.TempDir()
+	cfg = testConfig(tmp)
+	db = state.NewFake()
+	processFS = actions.NewRecordingFS()
+
+	fc := &fakeClassifier{
+		decision:    llm.Decision{Category: "Documents", Action: "move"},
+		dirDecision: llm.DirectoryDecision{Recommendation: "archive", Action: "move", Reason: "project folder"},
+	}
+	classifier = fc
+
+	desktop := filepath.Join(tmp, "Desktop")
+	proj := filepath.Join(desktop, "proj")
+	mustMkdir(t, proj)
+	mustWriteFile(t, filepath.Join(proj, "readme.txt"), "hello")
+
+	setOldMtime := func(path string) {
+		old := time.Now().Add(-24 * time.Hour)
+		if err := os.Chtimes(path, old, old); err != nil {
+			t.Fatalf("Chtimes %s: %v", path, err)
+		}
+	}
+	setOldMtime(desktop)
+	setOldMtime(proj)
+
+	scanDepth = 2
+	moveProjects = true
+	t.Cleanup(func() { scanDepth = 0; moveProjects = false; classifier = llm.NewClient(nil) })
+
+	files, dirs, err := defaultScanGetCandidates(context.Background(), desktop, scanDepth)
+	if err != nil {
+		t.Fatalf("defaultScanGetCandidates: %v", err)
+	}
+
+	dirSet := make(map[string]struct{}, len(dirs))
+	for _, d := range dirs {
+		dirSet[d.path] = struct{}{}
+	}
+	if _, ok := dirSet[proj]; !ok {
+		t.Errorf("expected project dir %s in dirs, got %v", proj, dirs)
+	}
+
+	fileSet := make(map[string]struct{}, len(files))
+	for _, f := range files {
+		fileSet[f.path] = struct{}{}
+	}
+	if _, ok := fileSet[filepath.Join(proj, "readme.txt")]; ok {
+		t.Errorf("unexpected file inside classified project dir")
+	}
+}
+
+func TestScanWithoutMoveProjectsRecursesIntoNonMarkerDir(t *testing.T) {
+	tmp := t.TempDir()
+	cfg = testConfig(tmp)
+	db = state.NewFake()
+	processFS = actions.NewRecordingFS()
+
+	fc := &fakeClassifier{
+		decision:    llm.Decision{Category: "Documents", Action: "move"},
+		dirDecision: llm.DirectoryDecision{Recommendation: "archive", Action: "move", Reason: "project folder"},
+	}
+	classifier = fc
+
+	desktop := filepath.Join(tmp, "Desktop")
+	proj := filepath.Join(desktop, "proj")
+	mustMkdir(t, proj)
+	mustWriteFile(t, filepath.Join(proj, "readme.txt"), "hello")
+
+	setOldMtime := func(path string) {
+		old := time.Now().Add(-24 * time.Hour)
+		if err := os.Chtimes(path, old, old); err != nil {
+			t.Fatalf("Chtimes %s: %v", path, err)
+		}
+	}
+	setOldMtime(desktop)
+	setOldMtime(proj)
+
+	scanDepth = 2
+	moveProjects = false
+	t.Cleanup(func() { scanDepth = 0; classifier = llm.NewClient(nil) })
+
+	files, _, err := defaultScanGetCandidates(context.Background(), desktop, scanDepth)
+	if err != nil {
+		t.Fatalf("defaultScanGetCandidates: %v", err)
+	}
+
+	fileSet := make(map[string]struct{}, len(files))
+	for _, f := range files {
+		fileSet[f.path] = struct{}{}
+	}
+	if _, ok := fileSet[filepath.Join(proj, "readme.txt")]; !ok {
+		t.Errorf("expected file inside non-marker dir to be collected when --move-projects is false")
+	}
+}
+
+func TestScanMoveProjectsMovesProjectDirWhole(t *testing.T) {
+	tmp := t.TempDir()
+	cfg = testConfig(tmp)
+	cfg.ProjectMarkers = []string{".git"}
+	db = state.NewFake()
+	processFS = actions.NewRecordingFS()
+
+	desktop := filepath.Join(tmp, "Desktop")
+	proj := filepath.Join(desktop, "proj")
+	mustMkdir(t, filepath.Join(proj, ".git"))
+	mustWriteFile(t, filepath.Join(proj, "readme.txt"), "hello")
+
+	setOldMtime := func(path string) {
+		old := time.Now().Add(-24 * time.Hour)
+		if err := os.Chtimes(path, old, old); err != nil {
+			t.Fatalf("Chtimes %s: %v", path, err)
+		}
+	}
+	setOldMtime(desktop)
+	setOldMtime(proj)
+
+	scanDepth = 2
+	moveProjects = true
+	t.Cleanup(func() { scanDepth = 0; moveProjects = false })
+
+	results, err := runScanDir(context.Background(), desktop, "run-test", io.Discard, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("expected 1 result, got %d", len(results))
+	}
+	if results[0].Kind != "directory" {
+		t.Errorf("kind = %q, want directory", results[0].Kind)
+	}
+	if results[0].Action != "move" {
+		t.Errorf("action = %q, want move", results[0].Action)
+	}
+	records := db.(*state.FakeRepo).Records()
+	if len(records) != 1 {
+		t.Errorf("expected 1 history record, got %d", len(records))
+	}
+	fs := processFS.(*actions.RecordingFS)
+	if len(fs.Moved) != 1 {
+		t.Errorf("expected 1 move, got %d", len(fs.Moved))
+	}
 }

@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -811,6 +812,253 @@ func TestApplySkipsGracefullyWhenFileDisappears(t *testing.T) {
 	if len(db.Records()) != 0 {
 		t.Errorf("expected no DB record for disappeared file, got %d", len(db.Records()))
 	}
+}
+func TestApplyDirectoryMovesToProjectCategory(t *testing.T) {
+	tmp := t.TempDir()
+	src := filepath.Join(tmp, "Downloads", "project")
+	if err := os.MkdirAll(src, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(src, "file.txt"), []byte("hello"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg := testConfig(t, tmp)
+	cfg.ProjectDirCategory = "Projects"
+	cfg.Categories["Projects"] = filepath.Join(tmp, "Projects")
+	cfg.AllowedDirs = append(cfg.AllowedDirs, cfg.Categories["Projects"])
+	cfg.Tags = true
+	cfg.Comments = true
+
+	fsys := NewRecordingFS()
+	db := state.NewFake()
+	decision := llm.DirectoryDecision{
+		Recommendation: "archive",
+		Action:         "move",
+		Reason:         "project directory",
+		Category:       "Projects",
+		Tags:           []string{"project"},
+	}
+
+	dest, err := ApplyDirectory(decision, src, cfg, db, fsys, "run-1")
+	if err != nil {
+		t.Fatalf("ApplyDirectory error: %v", err)
+	}
+
+	if _, err := os.Stat(src); !os.IsNotExist(err) {
+		t.Errorf("source directory still exists: %s", src)
+	}
+	if _, err := os.Stat(dest); err != nil {
+		t.Fatalf("destination missing: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dest, "file.txt")); err != nil {
+		t.Errorf("destination child missing: %v", err)
+	}
+
+	recs := db.Records()
+	if len(recs) != 1 {
+		t.Fatalf("expected 1 history record, got %d", len(recs))
+	}
+	rec := recs[0]
+	if rec.OriginalPath != src {
+		t.Errorf("OriginalPath = %q, want %q", rec.OriginalPath, src)
+	}
+	if rec.FinalPath != dest {
+		t.Errorf("FinalPath = %q, want %q", rec.FinalPath, dest)
+	}
+	if rec.OriginalName != "project" {
+		t.Errorf("OriginalName = %q, want project", rec.OriginalName)
+	}
+	if rec.NewName != "" {
+		t.Errorf("NewName = %q, want empty", rec.NewName)
+	}
+	if rec.Action != "move" {
+		t.Errorf("Action = %q, want move", rec.Action)
+	}
+	if len(fsys.Tags) != 1 {
+		t.Fatalf("expected 1 tag call, got %d", len(fsys.Tags))
+	}
+	if fsys.Tags[0].Path != dest {
+		t.Errorf("tag path = %q, want %q", fsys.Tags[0].Path, dest)
+	}
+	if len(fsys.Comments) != 1 {
+		t.Fatalf("expected 1 comment call, got %d", len(fsys.Comments))
+	}
+	if fsys.Comments[0].Path != dest {
+		t.Errorf("comment path = %q, want %q", fsys.Comments[0].Path, dest)
+	}
+}
+
+func TestApplyDirectoryUsesExplicitDestination(t *testing.T) {
+	tmp := t.TempDir()
+	src := filepath.Join(tmp, "Downloads", "project")
+	if err := os.MkdirAll(src, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := testConfig(t, tmp)
+	cfg.AllowedDirs = append(cfg.AllowedDirs, filepath.Join(tmp, "Explicit"))
+	fsys := NewRecordingFS()
+	db := state.NewFake()
+	explicitDest := filepath.Join(tmp, "Explicit")
+	decision := llm.DirectoryDecision{
+		Action:      "move",
+		Destination: explicitDest,
+		Reason:      "explicit",
+	}
+
+	dest, err := ApplyDirectory(decision, src, cfg, db, fsys, "run-1")
+	if err != nil {
+		t.Fatalf("ApplyDirectory error: %v", err)
+	}
+	if dest != explicitDest {
+		t.Errorf("dest = %q, want %q", dest, explicitDest)
+	}
+	if len(db.Records()) != 1 {
+		t.Fatalf("expected 1 record, got %d", len(db.Records()))
+	}
+}
+
+func TestApplyDirectoryMissingCategoryFallsBackToReview(t *testing.T) {
+	tmp := t.TempDir()
+	src := filepath.Join(tmp, "Downloads", "project")
+	if err := os.MkdirAll(src, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := testConfig(t, tmp)
+	cfg.ProjectDirCategory = "Missing"
+	fsys := NewRecordingFS()
+	db := state.NewFake()
+	decision := llm.DirectoryDecision{Action: "move", Reason: "project"}
+
+	dest, err := ApplyDirectory(decision, src, cfg, db, fsys, "run-1")
+	if err != nil {
+		t.Fatalf("ApplyDirectory error: %v", err)
+	}
+	if !strings.Contains(dest, "review") {
+		t.Errorf("dest = %q, want review queue", dest)
+	}
+	recs := db.Records()
+	if len(recs) != 1 || recs[0].Action != "move" {
+		t.Errorf("Action = %q, want move", recs[0].Action)
+	}
+}
+
+func TestApplyDirectoryRedirectsOutsideAllowedDestination(t *testing.T) {
+	tmp := t.TempDir()
+	src := filepath.Join(tmp, "Downloads", "project")
+	if err := os.MkdirAll(src, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := testConfig(t, tmp)
+	cfg.ProjectDirCategory = "Projects"
+	cfg.Categories["Projects"] = filepath.Join(tmp, "Outside", "Projects")
+	fsys := NewRecordingFS()
+	db := state.NewFake()
+	decision := llm.DirectoryDecision{Action: "move", Reason: "project"}
+
+	dest, err := ApplyDirectory(decision, src, cfg, db, fsys, "run-1")
+	if err != nil {
+		t.Fatalf("ApplyDirectory error: %v", err)
+	}
+	if !strings.Contains(dest, "review") {
+		t.Errorf("dest = %q, want review queue", dest)
+	}
+	recs := db.Records()
+	if len(recs) != 1 || recs[0].Action != "review" {
+		t.Errorf("Action = %q, want review", recs[0].Action)
+	}
+}
+
+func TestApplyDirectorySkipsDisallowedSource(t *testing.T) {
+	tmp := t.TempDir()
+	src := filepath.Join(tmp, "Outside", "project")
+	if err := os.MkdirAll(src, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := testConfig(t, tmp)
+	fsys := NewRecordingFS()
+	db := state.NewFake()
+	decision := llm.DirectoryDecision{Action: "move"}
+
+	result, err := ApplyDirectory(decision, src, cfg, db, fsys, "run-1")
+	if err != nil {
+		t.Fatalf("ApplyDirectory error: %v", err)
+	}
+	if !strings.HasPrefix(result, "skipped") {
+		t.Errorf("result = %q, want skipped", result)
+	}
+	if len(db.Records()) != 0 {
+		t.Errorf("expected no records, got %d", len(db.Records()))
+	}
+}
+
+func TestApplyDirectoryNonMoveRedirectsToReview(t *testing.T) {
+	tmp := t.TempDir()
+	src := filepath.Join(tmp, "Downloads", "project")
+	if err := os.MkdirAll(src, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := testConfig(t, tmp)
+	fsys := NewRecordingFS()
+	db := state.NewFake()
+	decision := llm.DirectoryDecision{Recommendation: "keep", Reason: "keep"}
+
+	dest, err := ApplyDirectory(decision, src, cfg, db, fsys, "run-1")
+	if err != nil {
+		t.Fatalf("ApplyDirectory error: %v", err)
+	}
+	if !strings.Contains(dest, "review") {
+		t.Errorf("dest = %q, want review queue", dest)
+	}
+	recs := db.Records()
+	if len(recs) != 1 || recs[0].Action != "review" {
+		t.Errorf("Action = %q, want review", recs[0].Action)
+	}
+}
+
+func TestApplyDirectoryCrossDeviceFallback(t *testing.T) {
+	tmp := t.TempDir()
+	src := filepath.Join(tmp, "Downloads", "project")
+	if err := os.MkdirAll(src, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(src, "file.txt"), []byte("hello"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := testConfig(t, tmp)
+	fsys := &exdevFS{NewRecordingFS()}
+	db := state.NewFake()
+	decision := llm.DirectoryDecision{Action: "move", Reason: "project"}
+
+	dest, err := ApplyDirectory(decision, src, cfg, db, fsys, "run-1")
+	if err != nil {
+		t.Fatalf("ApplyDirectory error: %v", err)
+	}
+	if _, err := os.Stat(src); !os.IsNotExist(err) {
+		t.Errorf("source directory still exists: %s", src)
+	}
+	if _, err := os.Stat(filepath.Join(dest, "file.txt")); err != nil {
+		t.Errorf("destination child missing: %v", err)
+	}
+	recs := db.Records()
+	if len(recs) != 1 {
+		t.Fatalf("expected 1 record, got %d", len(recs))
+	}
+}
+
+// exdevFS simulates a cross-device move failure so the recursive copy+remove
+// fallback path can be exercised on a single-volume test filesystem.
+type exdevFS struct {
+	*RecordingFS
+}
+
+func (e *exdevFS) Move(src, dest string) error {
+	return &os.LinkError{Op: "rename", Old: src, New: dest, Err: syscall.EXDEV}
 }
 
 func TestApplyUniqueDestCollision(t *testing.T) {

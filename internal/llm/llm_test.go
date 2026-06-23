@@ -610,6 +610,12 @@ func TestDirectoryDecisionDefaults(t *testing.T) {
 	if len(d.Tags) != 0 {
 		t.Errorf("Tags = %v, want empty", d.Tags)
 	}
+	if d.Action != "" {
+		t.Errorf("Action = %q, want empty", d.Action)
+	}
+	if d.Destination != "" {
+		t.Errorf("Destination = %q, want empty", d.Destination)
+	}
 }
 
 func TestParseDirectoryResponseToolCall(t *testing.T) {
@@ -703,8 +709,9 @@ func TestDirectoryCacheKeyStability(t *testing.T) {
 		Mtime:      time.Date(2024, 1, 2, 3, 4, 5, 0, time.UTC),
 		Extensions: map[string]int{".go": 1, ".md": 1},
 	}
-	key1 := directoryCacheKey(meta)
-	key2 := directoryCacheKey(meta)
+	cfg := &config.Config{}
+	key1 := directoryCacheKey(meta, cfg)
+	key2 := directoryCacheKey(meta, cfg)
 	if key1 == "" {
 		t.Fatal("expected non-empty key")
 	}
@@ -713,9 +720,91 @@ func TestDirectoryCacheKeyStability(t *testing.T) {
 	}
 
 	meta.Size = 200
-	key3 := directoryCacheKey(meta)
+	key3 := directoryCacheKey(meta, cfg)
 	if key1 == key3 {
 		t.Error("expected key to change when size changes")
+	}
+}
+
+func TestParseDirectoryResponseActionAndDestination(t *testing.T) {
+	resp := chatResponse{
+		Message: chatMessage{
+			Role: "assistant",
+			ToolCalls: []toolCall{
+				{
+					Function: functionCall{
+						Name:      "classify_directory",
+						Arguments: json.RawMessage(`{"recommendation": "archive", "action": "move", "destination": "Projects", "reason": "cohesive project", "category": "Projects", "tags": ["code"]}`),
+					},
+				},
+			},
+		},
+	}
+	got := parseDirectoryResponse(resp)
+	if got.Recommendation != "archive" {
+		t.Errorf("Recommendation = %q, want archive", got.Recommendation)
+	}
+	if got.Action != "move" {
+		t.Errorf("Action = %q, want move", got.Action)
+	}
+	if got.Destination != "Projects" {
+		t.Errorf("Destination = %q, want Projects", got.Destination)
+	}
+
+	// keep and trash decisions should not carry an action.
+	keep := parseDirectoryResponse(chatResponse{Response: `{"recommendation": "keep", "reason": "valuable"}`})
+	if keep.Action != "" {
+		t.Errorf("keep Action = %q, want empty", keep.Action)
+	}
+	trash := parseDirectoryResponse(chatResponse{Response: `{"recommendation": "trash", "action": "delete", "reason": "junk"}`})
+	if trash.Action != "" {
+		t.Errorf("trash Action = %q, want empty for non-move action", trash.Action)
+	}
+}
+
+func TestDirectoryCacheKeyIncludesConfig(t *testing.T) {
+	meta := &directory.Metadata{
+		Path:       "/downloads/project",
+		Base:       "project",
+		Size:       100,
+		ChildCount: 2,
+		Mtime:      time.Date(2024, 1, 2, 3, 4, 5, 0, time.UTC),
+		Extensions: map[string]int{".go": 1, ".md": 1},
+	}
+	cfg1 := &config.Config{ProjectDirCategory: "Projects", ProjectMarkers: []string{".git"}}
+	cfg2 := &config.Config{ProjectDirCategory: "Archive", ProjectMarkers: []string{".git"}}
+
+	key1 := directoryCacheKey(meta, cfg1)
+	key2 := directoryCacheKey(meta, cfg2)
+	if key1 == key2 {
+		t.Errorf("expected cache key to change when ProjectDirCategory changes: %q", key1)
+	}
+
+	cfg3 := &config.Config{ProjectDirCategory: "Projects", ProjectMarkers: []string{".git", "marker"}}
+	key3 := directoryCacheKey(meta, cfg3)
+	if key1 == key3 {
+		t.Errorf("expected cache key to change when ProjectMarkers changes: %q", key1)
+	}
+}
+
+func TestBuildDirectoryPromptIncludesSnippets(t *testing.T) {
+	meta := &directory.Metadata{
+		Path:       "/downloads/project",
+		Base:       "project",
+		Size:       1234,
+		ChildCount: 2,
+		Mtime:      time.Date(2024, 1, 2, 3, 4, 5, 0, time.UTC),
+		Extensions: map[string]int{".md": 1, ".txt": 1},
+		Snippets: map[string]string{
+			"readme.md": "# Project",
+			"note.txt":  "cross-ref readme.md",
+		},
+	}
+	prompt := buildDirectoryPrompt(meta, &config.Config{})
+	for _, want := range []string{"Representative text snippets:", "readme.md:", "# Project", "note.txt:", "cross-ref readme.md"} {
+		if !strings.Contains(prompt, want) {
+			t.Errorf("prompt missing %q", want)
+		}
 	}
 }
 
@@ -791,7 +880,7 @@ func TestClassifyDirectoryCache(t *testing.T) {
 	}
 
 	cache := &fakeDirectoryDecisionCache{}
-	key := directoryCacheKey(meta)
+	key := directoryCacheKey(meta, cfg)
 	if err := cache.RecordDirectoryDecision(key, DirectoryDecision{Recommendation: "keep", Reason: "cached"}); err != nil {
 		t.Fatal(err)
 	}
@@ -863,7 +952,7 @@ func TestClassifyDirectoryRecordsDecisionInCache(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	key := directoryCacheKey(meta)
+	key := directoryCacheKey(meta, cfg)
 	d, ok, err := cache.FindDirectoryDecision(key)
 	if err != nil {
 		t.Fatal(err)

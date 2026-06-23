@@ -5,14 +5,17 @@ import (
 	"bytes"
 	"encoding/binary"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 	"unicode/utf16"
 )
@@ -101,6 +104,92 @@ func (o *OSFS) Move(src, dest string) error {
 		return fmt.Errorf("remove source: %w", err)
 	}
 	return nil
+}
+// isCrossDeviceError reports whether err is a cross-device link/rename error.
+func isCrossDeviceError(err error) bool {
+	return errors.Is(err, syscall.EXDEV)
+}
+
+// copyTree recursively copies src to dest. Both files and directories are
+// recreated; symlinks are recreated pointing to the original target. Permissions
+// are preserved. It is used as a fallback when os.Rename cannot move a directory
+// across devices.
+func copyTree(src, dest string) error {
+	srcInfo, err := os.Stat(src)
+	if err != nil {
+		return fmt.Errorf("stat source: %w", err)
+	}
+	if !srcInfo.IsDir() {
+		return copyFile(src, dest, srcInfo.Mode())
+	}
+
+	if err := os.MkdirAll(dest, srcInfo.Mode().Perm()); err != nil {
+		return fmt.Errorf("create dest dir: %w", err)
+	}
+	if err := os.Chmod(dest, srcInfo.Mode().Perm()); err != nil {
+		return fmt.Errorf("chmod dest dir: %w", err)
+	}
+
+	return filepath.WalkDir(src, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, err := filepath.Rel(src, path)
+		if err != nil || rel == "." {
+			return err
+		}
+		destPath := filepath.Join(dest, rel)
+		info, err := d.Info()
+		if err != nil {
+			return fmt.Errorf("stat %s: %w", path, err)
+		}
+		if d.IsDir() {
+			if err := os.Mkdir(destPath, info.Mode().Perm()); err != nil {
+				return fmt.Errorf("mkdir %s: %w", destPath, err)
+			}
+			return os.Chmod(destPath, info.Mode().Perm())
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			target, err := os.Readlink(path)
+			if err != nil {
+				return fmt.Errorf("readlink %s: %w", path, err)
+			}
+			return os.Symlink(target, destPath)
+		}
+		return copyFile(path, destPath, info.Mode())
+	})
+}
+
+// copyFile copies a regular file and preserves its permissions.
+func copyFile(src, dest string, mode os.FileMode) error {
+	sf, err := os.Open(src)
+	if err != nil {
+		return fmt.Errorf("open source: %w", err)
+	}
+	defer sf.Close()
+
+	df, err := os.OpenFile(dest, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, mode)
+	if err != nil {
+		return fmt.Errorf("create dest: %w", err)
+	}
+	if _, err := io.Copy(df, sf); err != nil {
+		df.Close()
+		os.Remove(dest)
+		return fmt.Errorf("copy: %w", err)
+	}
+	if err := df.Close(); err != nil {
+		return fmt.Errorf("close dest: %w", err)
+	}
+	if err := os.Chmod(dest, mode.Perm()); err != nil {
+		return fmt.Errorf("chmod dest: %w", err)
+	}
+	return nil
+}
+
+// removeTree removes a directory tree. It is a thin wrapper around
+// os.RemoveAll so the cross-device fallback in ApplyDirectory is explicit.
+func removeTree(src string) error {
+	return os.RemoveAll(src)
 }
 
 // MkdirAll creates path and any missing parents.
