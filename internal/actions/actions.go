@@ -302,6 +302,7 @@ func Apply(decision llm.Decision, src string, fileHash string, cfg *config.Confi
 	}
 	return dest, nil
 }
+
 // ApplyDirectory carries out a DirectoryDecision for a project directory.
 //
 // Safety rules:

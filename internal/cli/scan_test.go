@@ -34,8 +34,9 @@ func TestScanDirProcessesFiles(t *testing.T) {
 	os.MkdirAll(filepath.Dir(src), 0755)
 	os.WriteFile(src, []byte("hello"), 0644)
 
-	scanGetCandidates = func(ctx context.Context, dir string, depth int) ([]processInput, []processInput, error) { return []processInput{{path: src}}, nil, nil
- }
+	scanGetCandidates = func(ctx context.Context, dir string, depth int) ([]processInput, []processInput, error) {
+		return []processInput{{path: src}}, nil, nil
+	}
 	t.Cleanup(func() { scanGetCandidates = defaultScanGetCandidates })
 
 	if _, err := runScanDir(context.Background(), filepath.Join(tmp, "Desktop"), "run-test", io.Discard, ""); err != nil {
@@ -66,8 +67,9 @@ func TestScanDirPermissionError(t *testing.T) {
 	cfg = testConfig(tmp)
 	db = state.NewFake()
 
-	scanGetCandidates = func(ctx context.Context, dir string, depth int) ([]processInput, []processInput, error) { return nil, nil, os.ErrPermission
- }
+	scanGetCandidates = func(ctx context.Context, dir string, depth int) ([]processInput, []processInput, error) {
+		return nil, nil, os.ErrPermission
+	}
 	t.Cleanup(func() { scanGetCandidates = defaultScanGetCandidates })
 
 	buf := captureSlog(t)
@@ -91,9 +93,10 @@ func TestScanCommandFailsValidationBeforeScanning(t *testing.T) {
 	os.MkdirAll(filepath.Dir(src), 0755)
 	os.WriteFile(src, []byte("hello"), 0644)
 
-	scanGetCandidates = func(ctx context.Context, dir string, depth int) ([]processInput, []processInput, error) { t.Fatal("scanGetCandidates should not be called when validation fails")
+	scanGetCandidates = func(ctx context.Context, dir string, depth int) ([]processInput, []processInput, error) {
+		t.Fatal("scanGetCandidates should not be called when validation fails")
 		return nil, nil, nil
- }
+	}
 	t.Cleanup(func() { scanGetCandidates = defaultScanGetCandidates })
 
 	err := scanCmd.RunE(nil, []string{})
@@ -131,8 +134,9 @@ func TestScanCommandSucceedsWhenValidationPasses(t *testing.T) {
 	os.MkdirAll(filepath.Dir(src), 0755)
 	os.WriteFile(src, []byte("hello"), 0644)
 
-	scanGetCandidates = func(ctx context.Context, dir string, depth int) ([]processInput, []processInput, error) { return []processInput{{path: src}}, nil, nil
- }
+	scanGetCandidates = func(ctx context.Context, dir string, depth int) ([]processInput, []processInput, error) {
+		return []processInput{{path: src}}, nil, nil
+	}
 	t.Cleanup(func() { scanGetCandidates = defaultScanGetCandidates })
 
 	scanDir = filepath.Join(tmp, "Desktop")
@@ -164,7 +168,9 @@ func TestScanDirIncludesDirectoriesWhenFlagSet(t *testing.T) {
 
 	scanDepth = 1
 	t.Cleanup(func() { scanDepth = 0 })
-	scanGetCandidates = func(ctx context.Context, dir string, depth int) ([]processInput, []processInput, error) { return nil, []processInput{{path: dirPath}}, nil }
+	scanGetCandidates = func(ctx context.Context, dir string, depth int) ([]processInput, []processInput, error) {
+		return nil, []processInput{{path: dirPath}}, nil
+	}
 	t.Cleanup(func() { scanGetCandidates = defaultScanGetCandidates })
 
 	results, err := runScanDir(context.Background(), filepath.Join(tmp, "Desktop"), "run-test", io.Discard, "")
@@ -199,7 +205,9 @@ func TestScanDirSkipsHiddenDirectories(t *testing.T) {
 
 	scanDepth = 1
 	t.Cleanup(func() { scanDepth = 0 })
-	scanGetCandidates = func(ctx context.Context, dir string, depth int) ([]processInput, []processInput, error) { return nil, []processInput{{path: dirPath}}, nil }
+	scanGetCandidates = func(ctx context.Context, dir string, depth int) ([]processInput, []processInput, error) {
+		return nil, []processInput{{path: dirPath}}, nil
+	}
 	t.Cleanup(func() { scanGetCandidates = defaultScanGetCandidates })
 
 	results, err := runScanDir(context.Background(), filepath.Join(tmp, "Desktop"), "run-test", io.Discard, "")
@@ -224,7 +232,9 @@ func TestScanDirSkipsDirectoriesOutsideAllowedDirs(t *testing.T) {
 
 	scanDepth = 1
 	t.Cleanup(func() { scanDepth = 0 })
-	scanGetCandidates = func(ctx context.Context, dir string, depth int) ([]processInput, []processInput, error) { return nil, []processInput{{path: dirPath}}, nil }
+	scanGetCandidates = func(ctx context.Context, dir string, depth int) ([]processInput, []processInput, error) {
+		return nil, []processInput{{path: dirPath}}, nil
+	}
 	t.Cleanup(func() { scanGetCandidates = defaultScanGetCandidates })
 
 	results, err := runScanDir(context.Background(), filepath.Join(tmp, "Outside"), "run-test", io.Discard, "")
@@ -254,7 +264,9 @@ func TestScanDirRespectsMinAgeForDirectories(t *testing.T) {
 
 	scanDepth = 1
 	t.Cleanup(func() { scanDepth = 0 })
-	scanGetCandidates = func(ctx context.Context, dir string, depth int) ([]processInput, []processInput, error) { return nil, []processInput{{path: recentDir}}, nil }
+	scanGetCandidates = func(ctx context.Context, dir string, depth int) ([]processInput, []processInput, error) {
+		return nil, []processInput{{path: recentDir}}, nil
+	}
 	t.Cleanup(func() { scanGetCandidates = defaultScanGetCandidates })
 
 	results, err := runScanDir(context.Background(), filepath.Join(tmp, "Desktop"), "run-test", io.Discard, "")
@@ -278,7 +290,9 @@ func TestScanDirWithoutFlagSkipsDirectories(t *testing.T) {
 	}
 
 	scanDepth = 0
-	scanGetCandidates = func(ctx context.Context, dir string, depth int) ([]processInput, []processInput, error) { return nil, []processInput{{path: dirPath}}, nil }
+	scanGetCandidates = func(ctx context.Context, dir string, depth int) ([]processInput, []processInput, error) {
+		return nil, []processInput{{path: dirPath}}, nil
+	}
 	t.Cleanup(func() { scanGetCandidates = defaultScanGetCandidates })
 
 	results, err := runScanDir(context.Background(), filepath.Join(tmp, "Desktop"), "run-test", io.Discard, "")
