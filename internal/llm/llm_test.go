@@ -68,6 +68,9 @@ func baseConfig(t *testing.T, tmp string) *config.Config {
 		OllamaURL:         "http://localhost:11434",
 		Model:             "dummy",
 		MaxImageDimension: 1024,
+		RequestTimeout:    config.Duration(120 * time.Second),
+		LLMRetryAttempts:  0,
+		LLMRetryBaseDelay: config.Duration(2 * time.Second),
 		Categories: map[string]string{
 			"Screenshots": filepath.Join(tmp, "Screenshots"),
 			"Documents":   filepath.Join(tmp, "Documents"),
@@ -1166,6 +1169,170 @@ func TestClassifyDoesNotRetryWithoutImagesOnGenericError(t *testing.T) {
 	}
 	if !strings.Contains(decision.Reason, "ollama is offline") {
 		t.Errorf("Reason = %q, want error mentioned", decision.Reason)
+	}
+}
+func TestClassifyRetriesTransientErrors(t *testing.T) {
+	tmp := t.TempDir()
+	cfg := baseConfig(t, tmp)
+	cfg.LLMRetryAttempts = 2
+	cfg.LLMRetryBaseDelay = config.Duration(10 * time.Millisecond)
+
+	textFile := filepath.Join(tmp, "note.txt")
+	if err := os.WriteFile(textFile, []byte("hello"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var callCount int
+	transport := &fakeTransport{
+		handler: func(req *http.Request) (*http.Response, error) {
+			if strings.HasSuffix(req.URL.String(), "/api/tags") {
+				return modelListResponse(cfg.Model), nil
+			}
+			callCount++
+			if callCount < 3 {
+				return nil, context.DeadlineExceeded
+			}
+			return jsonResponse(map[string]any{
+				"message": map[string]any{
+					"tool_calls": []any{
+						map[string]any{
+							"function": map[string]any{
+								"arguments": map[string]any{
+									"category": "Documents",
+									"tags":     []any{"txt"},
+									"action":   "move",
+									"reason":   "text",
+								},
+							},
+						},
+					},
+				},
+			}), nil
+		},
+	}
+
+	client := NewClient(transport)
+	decision, _, err := client.Classify(context.Background(), textFile, "", cfg, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if decision.Category != "Documents" {
+		t.Errorf("Category = %q, want Documents", decision.Category)
+	}
+	if callCount != 3 {
+		t.Errorf("expected 3 calls, got %d", callCount)
+	}
+}
+
+func TestClassifyRetriesExhaustedReturnsReview(t *testing.T) {
+	tmp := t.TempDir()
+	cfg := baseConfig(t, tmp)
+	cfg.LLMRetryAttempts = 1
+	cfg.LLMRetryBaseDelay = config.Duration(10 * time.Millisecond)
+
+	textFile := filepath.Join(tmp, "note.txt")
+	if err := os.WriteFile(textFile, []byte("hello"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var callCount int
+	transport := &fakeTransport{
+		handler: func(req *http.Request) (*http.Response, error) {
+			if strings.HasSuffix(req.URL.String(), "/api/tags") {
+				return modelListResponse(cfg.Model), nil
+			}
+			callCount++
+			return nil, context.DeadlineExceeded
+		},
+	}
+
+	client := NewClient(transport)
+	decision, _, err := client.Classify(context.Background(), textFile, "", cfg, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if decision.Action != "review" {
+		t.Errorf("Action = %q, want review", decision.Action)
+	}
+	if !strings.Contains(decision.Reason, "after 1 retries") {
+		t.Errorf("Reason = %q, want retries exhausted mention", decision.Reason)
+	}
+	if callCount != 2 {
+		t.Errorf("expected 2 calls (initial + 1 retry), got %d", callCount)
+	}
+}
+
+func TestClassifyDoesNotRetryNonTransientErrors(t *testing.T) {
+	tmp := t.TempDir()
+	cfg := baseConfig(t, tmp)
+	cfg.LLMRetryAttempts = 2
+	cfg.LLMRetryBaseDelay = config.Duration(10 * time.Millisecond)
+
+	textFile := filepath.Join(tmp, "note.txt")
+	if err := os.WriteFile(textFile, []byte("hello"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var callCount int
+	transport := &fakeTransport{
+		handler: func(req *http.Request) (*http.Response, error) {
+			if strings.HasSuffix(req.URL.String(), "/api/tags") {
+				return modelListResponse(cfg.Model), nil
+			}
+			callCount++
+			return jsonResponse(map[string]any{
+				"message": map[string]any{
+					"tool_calls": []any{
+						map[string]any{
+							"function": map[string]any{
+								"arguments": map[string]any{
+									"category": "Documents",
+									"tags":     []any{"txt"},
+									"action":   "invalid-action",
+									"reason":   "text",
+								},
+							},
+						},
+					},
+				},
+			}), nil
+		},
+	}
+
+	client := NewClient(transport)
+	decision, _, err := client.Classify(context.Background(), textFile, "", cfg, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if decision.Action != "review" {
+		t.Errorf("Action = %q, want review", decision.Action)
+	}
+	if callCount != 1 {
+		t.Errorf("expected 1 call for non-transient error, got %d", callCount)
+	}
+}
+
+func TestIsTransientReason(t *testing.T) {
+	tests := []struct {
+		reason string
+		want   bool
+	}{
+		{"ollama error after 2 retries: context deadline exceeded", true},
+		{"ollama error: context deadline exceeded", true},
+		{"ollama error: connection refused", true},
+		{"ollama error: EOF", true},
+		{"ollama error: model is loading", true},
+		{"ollama error: could not parse model response", false},
+		{"duplicate content detected; original reason: text", false},
+		{"Contains sensitive personal financial information", false},
+		{"", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.reason, func(t *testing.T) {
+			if got := IsTransientReason(tt.reason); got != tt.want {
+				t.Errorf("IsTransientReason(%q) = %v, want %v", tt.reason, got, tt.want)
+			}
+		})
 	}
 }
 

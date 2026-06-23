@@ -6,6 +6,10 @@ All notable changes to filemaid are documented in this file.
 
 ### Added
 
+- **LLM retry with exponential backoff** — transient Ollama errors (`context deadline exceeded`, connection failures, model loading, EOF) are now retried up to `llm_retry_attempts` times with `llm_retry_base_delay` exponential backoff. Configurable in `~/.config/filemaid/config.json`.
+- **`filemaid review --retry`** — re-process review-queue items whose reason indicates a transient LLM failure. Successful retries move files to their proper archive folders; persistent failures remain in review with an updated reason.
+- **`--rename` flag on `review --retry`** — `filemaid review --retry --rename=3` applies the same rename override semantics as `process` and `scan` during a retry run.
+- **`llm_retry_attempts` and `llm_retry_base_delay` config options** — control retry behavior; defaults are 2 attempts and a 2-second base delay.
 - **Directory-aware deep classification and in-place renaming** — `--depth` is now an optional integer depth flag. `scan --depth` and `process --depth` descend up to N levels, detect project markers, classify directories read-only, and include directory context in file prompts.
 - **`project_markers` config option** — built-in markers (`.git`, `node_modules`, `.venv`, `vendor`, `.terraform`, `build`) stop recursion; user-provided markers are merged additively.
 - **Bounded directory metadata gathering** — `internal/directory.Gather` produces a capped snapshot of immediate children, extension counts, and detected markers; `.app` bundles are treated as opaque directories.
@@ -13,7 +17,6 @@ All notable changes to filemaid are documented in this file.
 - **Directory context in file prompts** — files discovered inside descended directories include ancestor path, depth, and detected project marker in the classification prompt; cache keys incorporate context.
 - **In-place file renaming** — files inside project-marker directories can be renamed within their source directory when the LLM suggests a better name and rename is enabled.
 - **Updated output formatters** — table/human/JSON output distinguishes directory rows with `dir:`/`[dir]` markers and recommendations, and in-place renames are labeled with the new absolute path; summary counts split files and directories.
-
 ### Changed
 
 - `--depth` changed from a boolean flag (`--include-dirs`) to an optional integer (`--depth` = depth 1, `--depth=N` = depth N).

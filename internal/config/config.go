@@ -61,6 +61,8 @@ type Config struct {
 	SmartFolders                   bool                     `json:"smart_folders"`
 	SmartFoldersDir                string                   `json:"smart_folders_dir"`
 	RequestTimeout                 Duration                 `json:"request_timeout"`
+	LLMRetryAttempts               int                      `json:"llm_retry_attempts"`
+	LLMRetryBaseDelay              Duration                 `json:"llm_retry_base_delay"`
 	Categories                     map[string]string        `json:"categories"`
 	SafeDeletePatterns             []string                 `json:"safe_delete_patterns"`
 	AgeRules                       []AgeRule                `json:"age_rules"`
@@ -122,6 +124,8 @@ func Defaults() *Config {
 		SmartFolders:        true,
 		SmartFoldersDir:     "~/Documents/Filemaid",
 		RequestTimeout:      Duration(5 * time.Minute),
+		LLMRetryAttempts:    2,
+		LLMRetryBaseDelay:   Duration(2 * time.Second),
 		Categories: map[string]string{
 			"Screenshots": "~/Documents/Archive/Screenshots",
 			"Documents":   "~/Documents/Archive/Documents",

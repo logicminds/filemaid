@@ -42,6 +42,8 @@
   "smart_folders_dir": "~/Documents/Filemaid",
   "min_age_hours": 0,
   "request_timeout": "120s",
+  "llm_retry_attempts": 2,
+  "llm_retry_base_delay": "2s",
   "categories": {
     "Screenshots": "~/Documents/Archive/Screenshots",
     "Documents": "~/Documents/Archive/Documents",

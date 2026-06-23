@@ -1,15 +1,19 @@
 package cli
 
 import (
+	"context"
 	"fmt"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/logicminds/filemaid/internal/actions"
 	"github.com/logicminds/filemaid/internal/llm"
+	"github.com/logicminds/filemaid/internal/log"
 	"github.com/logicminds/filemaid/internal/state"
 
 	"github.com/spf13/cobra"
@@ -19,12 +23,17 @@ var (
 	reviewOpen    bool
 	reviewApprove string
 	reviewReject  string
+	reviewRetry   bool
+	reviewRename  string
 	// reviewFS is the filesystem implementation used by review. Tests may
 	// replace it with a recording or fake filesystem.
 	reviewFS actions.FS = actions.NewOSFS()
 )
 
 func init() {
+	reviewCmd.Flags().BoolVar(&reviewRetry, "retry", false, "re-process review items whose reason indicates a transient LLM failure")
+	reviewCmd.Flags().StringVar(&reviewRename, "rename", "", "when used with --retry, rename files using the LLM; optionally set minimum quality threshold 1-5")
+	reviewCmd.Flags().Lookup("rename").NoOptDefVal = "default"
 	reviewCmd.Flags().BoolVar(&reviewOpen, "open", false, "open review queue in Finder")
 	reviewCmd.Flags().StringVar(&reviewApprove, "approve", "", "approve a review item by relative path")
 	reviewCmd.Flags().StringVar(&reviewReject, "reject", "", "reject a review item by relative path")
@@ -34,8 +43,11 @@ func init() {
 var reviewCmd = &cobra.Command{
 	Use:   "review",
 	Short: "List, open, or manage the review queue",
-	Long:  "List files currently quarantined in the review queue, open the queue in Finder with --open, or approve/reject an item by relative path.",
+	Long:  "List files currently quarantined in the review queue, open the queue in Finder with --open, approve/reject an item by relative path, or retry transient LLM failures with --retry.",
 	RunE: func(cmd *cobra.Command, args []string) error {
+		if reviewRetry {
+			return reviewRetryItems(cmd)
+		}
 		if reviewApprove != "" {
 			return reviewApprovePath(cfg.ReviewDir, reviewApprove)
 		}
@@ -200,4 +212,103 @@ func reviewFindRecord(reviewDir, rel string) (state.Record, error) {
 		}
 	}
 	return state.Record{}, fmt.Errorf("review item not found in state: %s", rel)
+}
+
+// applyReviewRenameFlags copies CLI flag overrides for rename settings into cfg
+// when the user explicitly provided them. It mirrors applyRenameFlags used by
+// process and scan.
+func applyReviewRenameFlags(cmd *cobra.Command) {
+	if cmd == nil {
+		return
+	}
+
+	const defaultRenameLevel = 2
+
+	if cmd.Flags().Changed("rename") {
+		cfg.Rename = true
+		switch reviewRename {
+		case "", "default":
+			cfg.RenameLevel = defaultRenameLevel
+		default:
+			if n, err := strconv.Atoi(reviewRename); err == nil && n >= 0 && n <= 5 {
+				cfg.RenameLevel = n
+			} else {
+				cfg.RenameLevel = defaultRenameLevel
+			}
+		}
+	}
+}
+
+// reviewRetryItems re-processes review-queue items whose stored reason
+// indicates a transient LLM failure. Items that still fail or land in review
+// for a non-transient reason remain in the review queue.
+func reviewRetryItems(cmd *cobra.Command) error {
+	applyReviewRenameFlags(cmd)
+
+	if err := classifier.Validate(cfg); err != nil {
+		return fmt.Errorf("model validation failed: %w", err)
+	}
+	if c, ok := classifier.(*llm.Client); ok {
+		c.SetDecisionCache(db)
+		c.SetDirectoryDecisionCache(db)
+	}
+
+	records, err := db.History(10000, "")
+	if err != nil {
+		return fmt.Errorf("load history: %w", err)
+	}
+
+	var inputs []processInput
+	seen := make(map[string]bool)
+	for _, r := range records {
+		if r.Action != "review" {
+			continue
+		}
+		if !llm.IsTransientReason(r.Reason) {
+			continue
+		}
+		if seen[r.FinalPath] {
+			continue
+		}
+		seen[r.FinalPath] = true
+		if _, err := os.Stat(r.FinalPath); err != nil {
+			slog.Warn("review retry skipping missing file", "path", r.FinalPath, "error", err)
+			continue
+		}
+		inputs = append(inputs, processInput{path: r.FinalPath})
+	}
+
+	if len(inputs) == 0 {
+		fmt.Fprintln(cmd.OutOrStdout(), "No transient review items to retry.")
+		return nil
+	}
+
+	ctx := context.Background()
+	if cmd != nil {
+		ctx = cmd.Context()
+	}
+
+	quiet := isTerminal(os.Stdout)
+	if quiet {
+		log.SetStderrEnabled(false)
+		defer log.SetStderrEnabled(true)
+	}
+
+	runID := newRunID()
+	results, err := processPaths(ctx, inputs, runID, cmd.OutOrStdout(), "human")
+	if err != nil {
+		return err
+	}
+
+	if err := regenerateSmartFolders(); err != nil {
+		slog.Warn("smart folder regeneration failed", "error", err)
+	}
+
+	if len(results) == 0 {
+		fmt.Fprintln(cmd.OutOrStdout(), "No files retried.")
+		return nil
+	}
+
+	fmt.Fprintln(cmd.OutOrStdout(), formatSummary(results, isTerminal(os.Stdout)))
+	return nil
 }

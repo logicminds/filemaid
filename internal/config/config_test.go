@@ -76,6 +76,12 @@ func TestDefaultsMatchPythonReference(t *testing.T) {
 	if time.Duration(cfg.RequestTimeout) != 5*time.Minute {
 		t.Errorf("RequestTimeout = %v, want 5m", cfg.RequestTimeout)
 	}
+	if cfg.LLMRetryAttempts != 2 {
+		t.Errorf("LLMRetryAttempts = %d, want 2", cfg.LLMRetryAttempts)
+	}
+	if time.Duration(cfg.LLMRetryBaseDelay) != 2*time.Second {
+		t.Errorf("LLMRetryBaseDelay = %v, want 2s", cfg.LLMRetryBaseDelay)
+	}
 	if cfg.ProcessWorkers != 1 {
 		t.Errorf("ProcessWorkers = %d, want 1", cfg.ProcessWorkers)
 	}

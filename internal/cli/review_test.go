@@ -10,7 +10,10 @@ import (
 
 	"github.com/logicminds/filemaid/internal/actions"
 	"github.com/logicminds/filemaid/internal/config"
+	"github.com/logicminds/filemaid/internal/llm"
 	"github.com/logicminds/filemaid/internal/state"
+
+	"github.com/spf13/cobra"
 )
 
 func TestReviewQueueListsFiles(t *testing.T) {
@@ -192,5 +195,164 @@ func TestReviewRejectTrashesFile(t *testing.T) {
 	}
 	if len(fs.Trashed) != 1 {
 		t.Errorf("expected 1 trash call, got %d", len(fs.Trashed))
+	}
+}
+func TestReviewRetryReprocessesTransientFailures(t *testing.T) {
+	tmp := t.TempDir()
+	cfg = testConfig(tmp)
+	db = state.NewFake()
+	processFS = actions.NewRecordingFS()
+	classifier = &fakeClassifier{decision: llm.Decision{
+		Category:    "Documents",
+		Action:      "move",
+		Reason:      "text file",
+		Destination: "",
+	}}
+
+	reviewPath := filepath.Join(cfg.ReviewDir, "note.txt")
+	if err := os.WriteFile(reviewPath, []byte("hello"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Record(state.RecordInput{
+		OriginalPath: reviewPath,
+		FinalPath:    reviewPath,
+		SHA256:       "abc",
+		Category:     "Unknown",
+		Action:       "review",
+		Reason:       "ollama error after 2 retries: context deadline exceeded",
+		OriginalName: "note.txt",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd := &cobra.Command{Use: "review"}
+	cmd.Flags().BoolVar(&reviewRetry, "retry", false, "")
+	cmd.Flags().StringVar(&reviewRename, "rename", "", "")
+	if err := cmd.Flags().Set("retry", "true"); err != nil {
+		t.Fatal(err)
+	}
+
+	var buf bytes.Buffer
+	cmd.SetOut(&buf)
+	if err := reviewRetryItems(cmd); err != nil {
+		t.Fatal(err)
+	}
+	out := buf.String()
+	if !strings.Contains(out, "1 file processed") {
+		t.Errorf("expected retry summary, got %q", out)
+	}
+	fs, ok := processFS.(*actions.RecordingFS)
+	if !ok {
+		t.Fatal("expected RecordingFS")
+	}
+	if len(fs.Moved) != 1 {
+		t.Fatalf("expected 1 move, got %d", len(fs.Moved))
+	}
+	if !strings.Contains(fs.Moved[0][1], "Documents") {
+		t.Errorf("expected move to Documents, got %q", fs.Moved[0][1])
+	}
+}
+
+func TestReviewRetrySkipsNonTransientItems(t *testing.T) {
+	tmp := t.TempDir()
+	cfg = testConfig(tmp)
+	db = state.NewFake()
+	processFS = actions.NewRecordingFS()
+	classifier = &fakeClassifier{decision: llm.Decision{
+		Category: "Documents",
+		Action:   "move",
+		Reason:   "text file",
+	}}
+
+	reviewPath := filepath.Join(cfg.ReviewDir, "note.txt")
+	if err := os.WriteFile(reviewPath, []byte("hello"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Record(state.RecordInput{
+		OriginalPath: reviewPath,
+		FinalPath:    reviewPath,
+		SHA256:       "abc",
+		Category:     "Unknown",
+		Action:       "review",
+		Reason:       "duplicate content detected; original reason: text file",
+		OriginalName: "note.txt",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd := &cobra.Command{Use: "review"}
+	cmd.Flags().BoolVar(&reviewRetry, "retry", false, "")
+	cmd.Flags().StringVar(&reviewRename, "rename", "", "")
+	if err := cmd.Flags().Set("retry", "true"); err != nil {
+		t.Fatal(err)
+	}
+
+	var buf bytes.Buffer
+	cmd.SetOut(&buf)
+	if err := reviewRetryItems(cmd); err != nil {
+		t.Fatal(err)
+	}
+
+	out := buf.String()
+	if !strings.Contains(out, "No transient review items to retry") {
+		t.Errorf("expected no items message, got %q", out)
+	}
+}
+
+func TestReviewRetryAppliesRenameOverride(t *testing.T) {
+	tmp := t.TempDir()
+	cfg = testConfig(tmp)
+	cfg.Rename = false
+	db = state.NewFake()
+	processFS = actions.NewRecordingFS()
+	classifier = &fakeClassifier{decision: llm.Decision{
+		Category:    "Documents",
+		Action:      "move",
+		Reason:      "text file",
+		NewName:     "renamed-note.txt",
+		NameQuality: 3,
+	}}
+
+	reviewPath := filepath.Join(cfg.ReviewDir, "note.txt")
+	if err := os.WriteFile(reviewPath, []byte("hello"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Record(state.RecordInput{
+		OriginalPath: reviewPath,
+		FinalPath:    reviewPath,
+		SHA256:       "abc",
+		Category:     "Unknown",
+		Action:       "review",
+		Reason:       "ollama error: context deadline exceeded",
+		OriginalName: "note.txt",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd := &cobra.Command{Use: "review"}
+	cmd.Flags().BoolVar(&reviewRetry, "retry", false, "")
+	cmd.Flags().StringVar(&reviewRename, "rename", "", "")
+	if err := cmd.Flags().Set("retry", "true"); err != nil {
+		t.Fatal(err)
+	}
+	if err := cmd.Flags().Set("rename", "2"); err != nil {
+		t.Fatal(err)
+	}
+
+	var buf bytes.Buffer
+	cmd.SetOut(&buf)
+	if err := reviewRetryItems(cmd); err != nil {
+		t.Fatal(err)
+	}
+
+	if !cfg.Rename {
+		t.Error("expected cfg.Rename to be enabled by --rename")
+	}
+	if cfg.RenameLevel != 2 {
+		t.Errorf("cfg.RenameLevel = %d, want 2", cfg.RenameLevel)
+	}
+	out := buf.String()
+	if !strings.Contains(out, "1 file processed") {
+		t.Errorf("expected retry summary, got %q", out)
 	}
 }

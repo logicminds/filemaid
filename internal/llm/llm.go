@@ -15,7 +15,9 @@ import (
 	"image/jpeg"
 	_ "image/png"
 	"io"
+	"log/slog"
 	"math"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -155,7 +157,15 @@ func (c *Client) SetDirectoryDecisionCache(cache DirectoryDecisionCache) {
 }
 
 // Classify classifies a single file using Ollama.
+//
+// Transient errors such as timeouts, connection failures, or model loading
+// states are retried up to cfg.LLMRetryAttempts times with exponential backoff.
+// Only non-transient errors or exhausted retries fall back to an Unknown/review
+// decision. Model resolution errors are returned immediately because a missing
+// model is not a retryable condition.
 func (c *Client) Classify(ctx context.Context, path string, fileHash string, cfg *config.Config, dirCtx *directory.Context) (Decision, Metrics, error) {
+	start := time.Now()
+
 	cacheKey := fileHash
 	if dirCtx != nil && !dirCtx.None() {
 		cacheKey = contextualCacheKey(fileHash, dirCtx)
@@ -181,24 +191,38 @@ func (c *Client) Classify(ctx context.Context, path string, fileHash string, cfg
 	ollamaURL := strings.TrimRight(cfg.OllamaURL, "/")
 	model := resolvedModel
 
-	tryChat := func(imgs []string) (Decision, chatResponse, error) {
-		resp, err := c.requestChat(ctx, ollamaURL, model, prompt, imgs, categories, time.Duration(cfg.RequestTimeout))
-		if err != nil {
-			return Decision{}, chatResponse{}, err
-		}
-		if resp.Error != "" {
-			return Decision{}, resp, errors.New(resp.Error)
-		}
-		if decision, ok := parseResponse(resp, categories, path); ok {
-			return decision, resp, nil
-		}
-		return Decision{}, resp, errors.New("could not parse model response")
+	attempts := cfg.LLMRetryAttempts
+	if attempts < 0 {
+		attempts = 0
+	}
+	baseDelay := time.Duration(cfg.LLMRetryBaseDelay)
+	if baseDelay <= 0 {
+		baseDelay = 2 * time.Second
 	}
 
-	start := time.Now()
-	decision, resp, err := tryChat(images)
-	if err != nil && len(images) > 0 && isImageRelatedError(err) {
-		decision, resp, err = tryChat(nil)
+	var decision Decision
+	var resp chatResponse
+	transient := false
+
+	for i := 0; i <= attempts; i++ {
+		if i > 0 && transient {
+			delay := baseDelay * time.Duration(1<<(i-1))
+			const maxDelay = 30 * time.Second
+			if delay > maxDelay {
+				delay = maxDelay
+			}
+			slog.Debug("retrying transient LLM error", "attempt", i, "delay", delay, "error", err)
+			time.Sleep(delay)
+		}
+
+		decision, resp, err = c.tryChat(ctx, ollamaURL, model, prompt, images, categories, time.Duration(cfg.RequestTimeout), path)
+		if err == nil {
+			break
+		}
+		transient = isTransientError(err)
+		if !transient {
+			break
+		}
 	}
 
 	metrics := metricsFromChatResponse(resp)
@@ -213,10 +237,123 @@ func (c *Client) Classify(ctx context.Context, path string, fileHash string, cfg
 	}
 
 	d := NewDecision()
-	d.Reason = fmt.Sprintf("ollama error: %s", err.Error())
+	if transient {
+		d.Reason = fmt.Sprintf("ollama error after %d retries: %s", attempts, err.Error())
+	} else {
+		d.Reason = fmt.Sprintf("ollama error: %s", err.Error())
+	}
 	// Do not cache transient errors (timeouts, unreachable Ollama, etc.):
 	// the next run should retry instead of replaying a failed decision forever.
 	return d, metrics, nil
+}
+
+// tryChat performs a single chat classification attempt, including the
+// image-to-text fallback when the attached image causes a vision error.
+func (c *Client) tryChat(ctx context.Context, ollamaURL, model, prompt string, images []string, categories map[string]bool, timeout time.Duration, path string) (Decision, chatResponse, error) {
+	try := func(imgs []string) (Decision, chatResponse, error) {
+		resp, err := c.requestChat(ctx, ollamaURL, model, prompt, imgs, categories, timeout)
+		if err != nil {
+			return Decision{}, chatResponse{}, err
+		}
+		if resp.Error != "" {
+			return Decision{}, resp, errors.New(resp.Error)
+		}
+		if decision, ok := parseResponse(resp, categories, path); ok {
+			return decision, resp, nil
+		}
+		return Decision{}, resp, errors.New("could not parse model response")
+	}
+
+	decision, resp, err := try(images)
+	if err != nil && len(images) > 0 && isImageRelatedError(err) {
+		decision, resp, err = try(nil)
+	}
+	return decision, resp, err
+}
+
+// isTransientError reports whether an error from Ollama is likely temporary
+// and worth retrying. Non-transient errors include malformed responses, model
+// not found, and user cancellation.
+func isTransientError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	// User cancellation should not be retried.
+	if errors.Is(err, context.Canceled) {
+		return false
+	}
+	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+		return true
+	}
+
+	var netErr net.Error
+	if errors.As(err, &netErr) {
+		if netErr.Timeout() || netErr.Temporary() {
+			return true
+		}
+	}
+
+	msg := strings.ToLower(err.Error())
+	transientPhrases := []string{
+		"connection refused",
+		"no connection",
+		"broken pipe",
+		"reset by peer",
+		"dial tcp",
+		"no such host",
+		"model is loading",
+		"loading model",
+		"model loading",
+		"runner process",
+		"server busy",
+		"temporarily unavailable",
+		"context deadline exceeded",
+	}
+	for _, phrase := range transientPhrases {
+		if strings.Contains(msg, phrase) {
+			return true
+		}
+	}
+	return false
+}
+
+// IsTransientReason reports whether a review reason string indicates a
+// transient LLM failure that may succeed if retried. It mirrors the detection
+// used by isTransientError for the error-to-reason conversion.
+func IsTransientReason(reason string) bool {
+	if reason == "" {
+		return false
+	}
+	msg := strings.ToLower(reason)
+	if !strings.Contains(msg, "ollama error") {
+		return false
+	}
+	transientPhrases := []string{
+		"after",
+		"context deadline exceeded",
+		"connection refused",
+		"no connection",
+		"broken pipe",
+		"reset by peer",
+		"dial tcp",
+		"no such host",
+		"model is loading",
+		"loading model",
+		"model loading",
+		"runner process",
+		"server busy",
+		"temporarily unavailable",
+		"eof",
+	}
+	for _, phrase := range transientPhrases {
+		if strings.Contains(msg, phrase) {
+			return true
+		}
+	}
+	return false
 }
 
 // contextualCacheKey returns a deterministic cache key that combines a file's
