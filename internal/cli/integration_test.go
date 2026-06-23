@@ -77,7 +77,7 @@ func TestSmokeProcess(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, err := processPaths(context.Background(), []string{src}, "run-test", io.Discard, ""); err != nil {
+	if _, err := processPaths(context.Background(), inputs(src), "run-test", io.Discard, ""); err != nil {
 		t.Fatalf("processPaths failed: %v", err)
 	}
 
@@ -142,8 +142,8 @@ func TestSmokeScanCommand(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	scanGetCandidates = func(dir string) ([]string, []string, error) {
-		return []string{src}, nil, nil
+	scanGetCandidates = func(dir string, depth int) ([]processInput, []string, error) {
+		return []processInput{{path: src}}, nil, nil
 	}
 	scanDir = filepath.Join(tmp, "Desktop")
 
@@ -168,7 +168,7 @@ func TestSmokeDefaultScanGetCandidates(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	files, dirs, err := defaultScanGetCandidates(tmp)
+	files, dirs, err := defaultScanGetCandidates(tmp, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -199,8 +199,8 @@ func TestSmokeScanRespectsMinAge(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	scanGetCandidates = func(dir string) ([]string, []string, error) {
-		return []string{src}, nil, nil
+	scanGetCandidates = func(dir string, depth int) ([]processInput, []string, error) {
+		return []processInput{{path: src}}, nil, nil
 	}
 
 	if _, err := runScanDir(context.Background(), filepath.Join(tmp, "Desktop"), "run-test", io.Discard, ""); err != nil {
@@ -384,15 +384,15 @@ func TestSmokeEndToEnd(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, err := processPaths(context.Background(), []string{src}, "run-test", io.Discard, ""); err != nil {
+	if _, err := processPaths(context.Background(), inputs(src), "run-test", io.Discard, ""); err != nil {
 		t.Fatalf("process failed: %v", err)
 	}
 
 	// Scan the same directory; nothing should be re-processed because the file
 	// is already gone.
 	nowFunc = func() time.Time { return time.Now().Add(2 * time.Hour) }
-	scanGetCandidates = func(dir string) ([]string, []string, error) {
-		return []string{}, nil, nil
+	scanGetCandidates = func(dir string, depth int) ([]processInput, []string, error) {
+		return nil, nil, nil
 	}
 	if _, err := runScanDir(context.Background(), filepath.Join(tmp, "Desktop"), "run-test", io.Discard, ""); err != nil {
 		t.Fatalf("scan failed: %v", err)
@@ -477,10 +477,10 @@ func TestAcceptanceProcessIncludeDirs(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	processIncludeDirs = true
-	t.Cleanup(func() { processIncludeDirs = false })
+	processIncludeDirs = 1
+	t.Cleanup(func() { processIncludeDirs = 0 })
 
-	results, err := processPaths(context.Background(), []string{dirPath}, "run-test", io.Discard, "")
+	results, err := processPaths(context.Background(), inputs(dirPath), "run-test", io.Discard, "")
 	if err != nil {
 		t.Fatalf("process failed: %v", err)
 	}
@@ -533,8 +533,8 @@ func TestAcceptanceScanIncludeDirs(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	includeDirs = true
-	t.Cleanup(func() { includeDirs = false })
+	includeDirs = 1
+	t.Cleanup(func() { includeDirs = 0 })
 	scanDir = desktop
 	t.Cleanup(func() { scanDir = "" })
 
@@ -580,8 +580,8 @@ func TestAcceptanceScanIncludeDirsRespectsGuardrails(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	includeDirs = true
-	t.Cleanup(func() { includeDirs = false })
+	includeDirs = 1
+	t.Cleanup(func() { includeDirs = 0 })
 	scanDir = desktop
 	t.Cleanup(func() { scanDir = "" })
 
@@ -612,10 +612,10 @@ func TestAcceptanceAppBundleTreatedAsDirectory(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	processIncludeDirs = true
-	t.Cleanup(func() { processIncludeDirs = false })
+	processIncludeDirs = 1
+	t.Cleanup(func() { processIncludeDirs = 0 })
 
-	results, err := processPaths(context.Background(), []string{appBundle}, "run-test", io.Discard, "")
+	results, err := processPaths(context.Background(), inputs(appBundle), "run-test", io.Discard, "")
 	if err != nil {
 		t.Fatalf("process failed: %v", err)
 	}

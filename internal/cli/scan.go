@@ -11,17 +11,19 @@ import (
 	"time"
 
 	"github.com/logicminds/filemaid/internal/actions"
+	"github.com/logicminds/filemaid/internal/directory"
+	"github.com/logicminds/filemaid/internal/llm"
 	"github.com/logicminds/filemaid/internal/log"
-
 	"github.com/spf13/cobra"
 )
 
 var scanDir string
-var includeDirs bool
+var includeDirs int
 var (
-	// scanGetCandidates returns the candidate files and immediate subdirectories
-	// in a scan directory. Tests may replace it to avoid filesystem dependencies.
-	scanGetCandidates func(dir string) ([]string, []string, error) = defaultScanGetCandidates
+	// scanGetCandidates returns the candidate files and directories in a scan
+	// directory up to the requested depth. Tests may replace it to avoid
+	// filesystem dependencies.
+	scanGetCandidates func(dir string, depth int) ([]processInput, []string, error) = defaultScanGetCandidates
 )
 
 func init() {
@@ -33,7 +35,8 @@ func init() {
 	scanCmd.Flags().Lookup("rename").NoOptDefVal = "default"
 	scanCmd.Flags().BoolVar(&processForce, "force", false, "force processing even if the file is a duplicate or similar to existing history")
 	scanCmd.Flags().BoolVar(&processDryRun, "dry-run", false, "preview changes without moving files")
-	scanCmd.Flags().BoolVar(&includeDirs, "include-dirs", false, "include immediate subdirectories as analysis candidates")
+	scanCmd.Flags().IntVar(&includeDirs, "include-dirs", 0, "descend into directories N levels (0 = file-only)")
+	scanCmd.Flags().Lookup("include-dirs").NoOptDefVal = "1"
 	rootCmd.AddCommand(scanCmd)
 }
 
@@ -43,10 +46,16 @@ var scanCmd = &cobra.Command{
 	RunE: func(cmd *cobra.Command, args []string) error {
 		applyRenameFlags(cmd)
 		applyForceFlags(cmd)
+		if includeDirs < 0 {
+			return fmt.Errorf("--include-dirs must be >= 0")
+		}
 		if err := classifier.Validate(cfg); err != nil {
 			return fmt.Errorf("model validation failed: %w", err)
 		}
-
+		if c, ok := classifier.(*llm.Client); ok {
+			c.SetDecisionCache(db)
+			c.SetDirectoryDecisionCache(db)
+		}
 		ctx := context.Background()
 		if cmd != nil {
 			ctx = cmd.Context()
@@ -131,7 +140,7 @@ func runScanDir(ctx context.Context, directory string, runID string, w io.Writer
 		return nil, nil
 	}
 
-	files, dirs, err := scanGetCandidates(root)
+	files, dirs, err := scanGetCandidates(root, includeDirs)
 	if err != nil {
 		if errors.Is(err, os.ErrPermission) {
 			slog.Warn("permission denied", "dir", root)
@@ -141,8 +150,9 @@ func runScanDir(ctx context.Context, directory string, runID string, w io.Writer
 	}
 
 	cutoff := time.Now().Add(-time.Duration(cfg.MinAgeHours) * time.Hour)
-	var toProcess []string
-	for _, path := range files {
+	var toProcess []processInput
+	for _, in := range files {
+		path := in.path
 		info, err := os.Stat(path)
 		if err != nil {
 			slog.Warn("scan file stat failed", "path", path, "error", err)
@@ -156,11 +166,11 @@ func runScanDir(ctx context.Context, directory string, runID string, w io.Writer
 			continue
 		}
 		if info.ModTime().Before(cutoff) {
-			toProcess = append(toProcess, path)
+			toProcess = append(toProcess, in)
 		}
 	}
 
-	if includeDirs {
+	if includeDirs > 0 {
 		for _, path := range dirs {
 			info, err := os.Stat(path)
 			if err != nil {
@@ -175,7 +185,7 @@ func runScanDir(ctx context.Context, directory string, runID string, w io.Writer
 				continue
 			}
 			if info.ModTime().Before(cutoff) {
-				toProcess = append(toProcess, path)
+				toProcess = append(toProcess, processInput{path: path})
 			}
 		}
 	}
@@ -189,18 +199,31 @@ func runScanDir(ctx context.Context, directory string, runID string, w io.Writer
 	return processPaths(ctx, toProcess, runID, w, format)
 }
 
-// defaultScanGetCandidates lists regular files and immediate subdirectories
-// directly inside dir.
-func defaultScanGetCandidates(dir string) ([]string, []string, error) {
+// defaultScanGetCandidates lists candidate files and directories inside dir.
+// When depth <= 0 it preserves the original file-only behavior: only immediate
+// regular files are returned. When depth > 0 it descends up to depth levels,
+// applying allowed_dirs, hidden-directory, and min_age_hours guardrails at each
+// level. Directories containing a project marker from cfg.ProjectMarkers (or
+// .app bundles) are emitted as directory candidates and are not recursed into.
+func defaultScanGetCandidates(dir string, depth int) ([]processInput, []string, error) {
+	if depth <= 0 {
+		return listImmediateFiles(dir)
+	}
+	return scanCandidatesRecursive(dir, depth, 1)
+}
+
+// listImmediateFiles preserves the legacy file-only enumeration behavior.
+func listImmediateFiles(dir string) ([]processInput, []string, error) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return nil, nil, err
 	}
-	files := make([]string, 0, len(entries))
+	files := make([]processInput, 0, len(entries))
 	dirs := make([]string, 0, len(entries))
 	for _, e := range entries {
+		path := filepath.Join(dir, e.Name())
 		if e.IsDir() {
-			dirs = append(dirs, filepath.Join(dir, e.Name()))
+			dirs = append(dirs, path)
 			continue
 		}
 		info, err := e.Info()
@@ -208,8 +231,84 @@ func defaultScanGetCandidates(dir string) ([]string, []string, error) {
 			continue
 		}
 		if info.Mode().IsRegular() {
-			files = append(files, filepath.Join(dir, e.Name()))
+			files = append(files, processInput{path: path})
 		}
 	}
+	return files, dirs, nil
+}
+
+// scanCandidatesRecursive walks dir up to depth levels and returns file and
+// directory candidates that pass configured guardrails. currentDepth is the
+// level of dir relative to the scan root (1 = immediate child of root).
+func scanCandidatesRecursive(dir string, depth int, currentDepth int) ([]processInput, []string, error) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	var dirCtx *directory.Context
+	if currentDepth > 0 {
+		meta, _ := directory.Gather(dir, cfg)
+		marker := ""
+		if meta != nil && len(meta.Markers) > 0 {
+			marker = meta.Markers[0]
+		}
+		dirCtx = &directory.Context{
+			Ancestor: dir,
+			Depth:    currentDepth,
+			Marker:   marker,
+		}
+	}
+
+	var files []processInput
+	var dirs []string
+	cutoff := time.Now().Add(-time.Duration(cfg.MinAgeHours) * time.Hour)
+
+	for _, e := range entries {
+		path := filepath.Join(dir, e.Name())
+
+		if isHidden(path) {
+			continue
+		}
+		if len(cfg.AllowedDirs) > 0 && !actions.WithinAllowed(path, cfg.AllowedDirs) {
+			continue
+		}
+
+		info, err := e.Info()
+		if err != nil {
+			slog.Warn("scan entry info failed", "path", path, "error", err)
+			continue
+		}
+		if info.ModTime().After(cutoff) {
+			continue
+		}
+
+		if e.IsDir() {
+			meta, err := directory.Gather(path, cfg)
+			if err != nil {
+				slog.Warn("directory metadata failed", "path", path, "error", err)
+				continue
+			}
+			dirs = append(dirs, path)
+			if meta.IsAppBundle || len(meta.Markers) > 0 {
+				continue
+			}
+			if depth > 1 {
+				subFiles, subDirs, err := scanCandidatesRecursive(path, depth-1, currentDepth+1)
+				if err != nil {
+					slog.Warn("scan subdirectory failed", "path", path, "error", err)
+					continue
+				}
+				files = append(files, subFiles...)
+				dirs = append(dirs, subDirs...)
+			}
+			continue
+		}
+
+		if info.Mode().IsRegular() {
+			files = append(files, processInput{path: path, dirCtx: dirCtx})
+		}
+	}
+
 	return files, dirs, nil
 }

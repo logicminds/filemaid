@@ -16,8 +16,10 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/logicminds/filemaid/internal/config"
+	"github.com/logicminds/filemaid/internal/directory"
 )
 
 // toChatResponse converts the map[string]any test fixtures used by older tests
@@ -428,7 +430,7 @@ func TestPromptIncludesRenameFields(t *testing.T) {
 	if err := os.WriteFile(path, []byte("x"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	prompt, _, err := buildPrompt(path, cfg)
+	prompt, _, err := buildPrompt(path, cfg, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -453,7 +455,7 @@ func TestBuildPromptIncludesSubcategoryForImages(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	prompt, images, err := buildPrompt(img, cfg)
+	prompt, images, err := buildPrompt(img, cfg, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -475,7 +477,7 @@ func TestBuildPromptOmitsSubcategoryWhenDisabled(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	prompt, _, err := buildPrompt(img, cfg)
+	prompt, _, err := buildPrompt(img, cfg, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -565,6 +567,315 @@ func (f *fakeDecisionCache) RecordDecision(sha256 string, decision Decision) err
 	return nil
 }
 
+// fakeDirectoryDecisionCache is an in-memory DirectoryDecisionCache for tests.
+type fakeDirectoryDecisionCache struct {
+	mu        sync.Mutex
+	decisions map[string]DirectoryDecision
+}
+
+func (f *fakeDirectoryDecisionCache) FindDirectoryDecision(key string) (DirectoryDecision, bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.decisions == nil {
+		return DirectoryDecision{}, false, nil
+	}
+	d, ok := f.decisions[key]
+	return d, ok, nil
+}
+
+func (f *fakeDirectoryDecisionCache) RecordDirectoryDecision(key string, decision DirectoryDecision) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.decisions == nil {
+		f.decisions = make(map[string]DirectoryDecision)
+	}
+	f.decisions[key] = decision
+	return nil
+}
+
+func TestDirectoryDecisionDefaults(t *testing.T) {
+	d := NewDirectoryDecision()
+	if d.Recommendation != "review" {
+		t.Errorf("Recommendation = %q, want review", d.Recommendation)
+	}
+	if d.Reason != "" {
+		t.Errorf("Reason = %q, want empty", d.Reason)
+	}
+	if d.Category != "" {
+		t.Errorf("Category = %q, want empty", d.Category)
+	}
+	if len(d.Tags) != 0 {
+		t.Errorf("Tags = %v, want empty", d.Tags)
+	}
+}
+
+func TestParseDirectoryResponseToolCall(t *testing.T) {
+	resp := chatResponse{
+		Message: chatMessage{
+			Role: "assistant",
+			ToolCalls: []toolCall{
+				{
+					Function: functionCall{
+						Name:      "classify_directory",
+						Arguments: json.RawMessage(`{"recommendation": "archive", "reason": "old project", "category": "Projects", "tags": ["code", "backup"]}`),
+					},
+				},
+			},
+		},
+	}
+	got := parseDirectoryResponse(resp)
+	if got.Recommendation != "archive" {
+		t.Errorf("Recommendation = %q, want archive", got.Recommendation)
+	}
+	if got.Reason != "old project" {
+		t.Errorf("Reason = %q, want old project", got.Reason)
+	}
+	if got.Category != "Projects" {
+		t.Errorf("Category = %q, want Projects", got.Category)
+	}
+	if len(got.Tags) != 2 || got.Tags[0] != "code" || got.Tags[1] != "backup" {
+		t.Errorf("Tags = %v, want [code backup]", got.Tags)
+	}
+}
+
+func TestParseDirectoryResponseGenerateStyle(t *testing.T) {
+	resp := chatResponse{
+		Response: `{"recommendation": "trash", "reason": "node_modules cache", "category": "Cache", "tags": ["npm"]}`,
+	}
+	got := parseDirectoryResponse(resp)
+	if got.Recommendation != "trash" {
+		t.Errorf("Recommendation = %q, want trash", got.Recommendation)
+	}
+	if got.Reason != "node_modules cache" {
+		t.Errorf("Reason = %q, want node_modules cache", got.Reason)
+	}
+	if got.Category != "Cache" {
+		t.Errorf("Category = %q, want Cache", got.Category)
+	}
+	if len(got.Tags) != 1 || got.Tags[0] != "npm" {
+		t.Errorf("Tags = %v, want [npm]", got.Tags)
+	}
+}
+
+func TestParseDirectoryResponseInvalidDefaultsToReview(t *testing.T) {
+	cases := []chatResponse{
+		{Response: "not json"},
+		{Response: `{"recommendation": "delete", "reason": "invalid action"}`},
+		{Response: `{"reason": "missing recommendation"}`},
+	}
+	for i, resp := range cases {
+		got := parseDirectoryResponse(resp)
+		if got.Recommendation != "review" {
+			t.Errorf("case %d: Recommendation = %q, want review", i, got.Recommendation)
+		}
+	}
+}
+
+func TestBuildDirectoryPrompt(t *testing.T) {
+	meta := &directory.Metadata{
+		Path:       "/downloads/project",
+		Base:       "project",
+		Size:       1234,
+		ChildCount: 5,
+		Mtime:      time.Date(2024, 1, 2, 3, 4, 5, 0, time.UTC),
+		Extensions: map[string]int{".go": 2, ".md": 1},
+		Markers:    []string{".git"},
+	}
+	cfg := &config.Config{}
+	prompt := buildDirectoryPrompt(meta, cfg)
+
+	for _, want := range []string{"/downloads/project", "project", "1234", "5", "2024-01-02T03:04:05", ".git", ".go:2", ".md:1"} {
+		if !strings.Contains(prompt, want) {
+			t.Errorf("prompt missing %q", want)
+		}
+	}
+}
+
+func TestDirectoryCacheKeyStability(t *testing.T) {
+	meta := &directory.Metadata{
+		Path:       "/downloads/project",
+		Base:       "project",
+		Size:       100,
+		ChildCount: 2,
+		Mtime:      time.Date(2024, 1, 2, 3, 4, 5, 0, time.UTC),
+		Extensions: map[string]int{".go": 1, ".md": 1},
+	}
+	key1 := directoryCacheKey(meta)
+	key2 := directoryCacheKey(meta)
+	if key1 == "" {
+		t.Fatal("expected non-empty key")
+	}
+	if key1 != key2 {
+		t.Fatalf("keys differ: %q vs %q", key1, key2)
+	}
+
+	meta.Size = 200
+	key3 := directoryCacheKey(meta)
+	if key1 == key3 {
+		t.Error("expected key to change when size changes")
+	}
+}
+
+func TestClassifyDirectoryUsesChatEndpoint(t *testing.T) {
+	cfg := &config.Config{
+		OllamaURL: "http://localhost:11434",
+		Model:     "dummy",
+	}
+	meta := &directory.Metadata{
+		Path:       t.TempDir(),
+		Base:       "testdir",
+		Size:       100,
+		ChildCount: 0,
+	}
+
+	var calledURL string
+	transport := &fakeTransport{
+		handler: func(req *http.Request) (*http.Response, error) {
+			calledURL = req.URL.String()
+			if strings.HasSuffix(calledURL, "/api/tags") {
+				return modelListResponse(cfg.Model), nil
+			}
+			body := readRequestBody(req)
+			if body["model"] != "dummy" {
+				t.Errorf("model = %v, want dummy", body["model"])
+			}
+			tools, ok := body["tools"].([]any)
+			if !ok || len(tools) != 1 {
+				t.Fatalf("expected 1 tool, got %v", body["tools"])
+			}
+			return jsonResponse(map[string]any{
+				"message": map[string]any{
+					"tool_calls": []any{
+						map[string]any{
+							"function": map[string]any{
+								"arguments": map[string]any{
+									"recommendation": "archive",
+									"reason":         "old project",
+									"category":       "Projects",
+									"tags":           []any{"code"},
+								},
+							},
+						},
+					},
+				},
+			}), nil
+		},
+	}
+
+	client := NewClient(transport)
+	decision, _, err := client.ClassifyDirectory(context.Background(), meta, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if decision.Recommendation != "archive" {
+		t.Errorf("Recommendation = %q, want archive", decision.Recommendation)
+	}
+	if !strings.HasSuffix(calledURL, "/api/chat") {
+		t.Errorf("URL = %q, want /api/chat suffix", calledURL)
+	}
+}
+
+func TestClassifyDirectoryCache(t *testing.T) {
+	cfg := &config.Config{
+		OllamaURL: "http://localhost:11434",
+		Model:     "dummy",
+	}
+	meta := &directory.Metadata{
+		Path:       "/downloads/project",
+		Base:       "project",
+		Size:       100,
+		ChildCount: 0,
+	}
+
+	cache := &fakeDirectoryDecisionCache{}
+	key := directoryCacheKey(meta)
+	if err := cache.RecordDirectoryDecision(key, DirectoryDecision{Recommendation: "keep", Reason: "cached"}); err != nil {
+		t.Fatal(err)
+	}
+
+	var chatCalls int
+	transport := &fakeTransport{
+		handler: func(req *http.Request) (*http.Response, error) {
+			if strings.HasSuffix(req.URL.String(), "/api/tags") {
+				return modelListResponse(cfg.Model), nil
+			}
+			chatCalls++
+			t.Errorf("unexpected /api/chat call")
+			return nil, io.EOF
+		},
+	}
+
+	client := NewClient(transport)
+	client.SetDirectoryDecisionCache(cache)
+	decision, _, err := client.ClassifyDirectory(context.Background(), meta, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if decision.Recommendation != "keep" {
+		t.Errorf("Recommendation = %q, want keep", decision.Recommendation)
+	}
+	if chatCalls != 0 {
+		t.Errorf("expected 0 /api/chat calls, got %d", chatCalls)
+	}
+}
+
+func TestClassifyDirectoryRecordsDecisionInCache(t *testing.T) {
+	cfg := &config.Config{
+		OllamaURL: "http://localhost:11434",
+		Model:     "dummy",
+	}
+	meta := &directory.Metadata{
+		Path:       "/downloads/project",
+		Base:       "project",
+		Size:       100,
+		ChildCount: 0,
+	}
+
+	cache := &fakeDirectoryDecisionCache{}
+	transport := &fakeTransport{
+		handler: func(req *http.Request) (*http.Response, error) {
+			if strings.HasSuffix(req.URL.String(), "/api/tags") {
+				return modelListResponse(cfg.Model), nil
+			}
+			return jsonResponse(map[string]any{
+				"message": map[string]any{
+					"tool_calls": []any{
+						map[string]any{
+							"function": map[string]any{
+								"arguments": map[string]any{
+									"recommendation": "trash",
+									"reason":         "temp files",
+								},
+							},
+						},
+					},
+				},
+			}), nil
+		},
+	}
+
+	client := NewClient(transport)
+	client.SetDirectoryDecisionCache(cache)
+	if _, _, err := client.ClassifyDirectory(context.Background(), meta, cfg); err != nil {
+		t.Fatal(err)
+	}
+
+	key := directoryCacheKey(meta)
+	d, ok, err := cache.FindDirectoryDecision(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ok {
+		t.Fatal("expected directory decision to be cached")
+	}
+	if d.Recommendation != "trash" {
+		t.Errorf("cached Recommendation = %q, want trash", d.Recommendation)
+	}
+	if d.Reason != "temp files" {
+		t.Errorf("cached Reason = %q, want temp files", d.Reason)
+	}
+}
+
 func TestClassifyUsesChatEndpoint(t *testing.T) {
 	tmp := t.TempDir()
 	cfg := baseConfig(t, tmp)
@@ -618,7 +929,7 @@ func TestClassifyUsesChatEndpoint(t *testing.T) {
 	}
 
 	client := NewClient(transport)
-	decision, _, err := client.Classify(context.Background(), textFile, "", cfg)
+	decision, _, err := client.Classify(context.Background(), textFile, "", cfg, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -667,7 +978,7 @@ func TestClassifyReturnsMetrics(t *testing.T) {
 	}
 
 	client := NewClient(transport)
-	_, metrics, err := client.Classify(context.Background(), textFile, "", cfg)
+	_, metrics, err := client.Classify(context.Background(), textFile, "", cfg, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -714,7 +1025,7 @@ func TestClassifyDoesNotFallbackToGenerate(t *testing.T) {
 	}
 
 	client := NewClient(transport)
-	decision, _, err := client.Classify(context.Background(), textFile, "", cfg)
+	decision, _, err := client.Classify(context.Background(), textFile, "", cfg, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -748,7 +1059,7 @@ func TestClassifyFallsBackOnError(t *testing.T) {
 	}
 
 	client := NewClient(transport)
-	decision, _, err := client.Classify(context.Background(), textFile, "", cfg)
+	decision, _, err := client.Classify(context.Background(), textFile, "", cfg, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -804,7 +1115,7 @@ func TestClassifyRetriesWithoutImagesOnFailure(t *testing.T) {
 	}
 
 	client := NewClient(transport)
-	decision, _, err := client.Classify(context.Background(), img, "", cfg)
+	decision, _, err := client.Classify(context.Background(), img, "", cfg, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -843,7 +1154,7 @@ func TestClassifyDoesNotRetryWithoutImagesOnGenericError(t *testing.T) {
 	}
 
 	client := NewClient(transport)
-	decision, _, err := client.Classify(context.Background(), img, "", cfg)
+	decision, _, err := client.Classify(context.Background(), img, "", cfg, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -879,7 +1190,7 @@ func TestClassifySkipsHiddenFilesNoSpecialHandling(t *testing.T) {
 	}
 
 	client := NewClient(transport)
-	decision, _, err := client.Classify(context.Background(), textFile, "", cfg)
+	decision, _, err := client.Classify(context.Background(), textFile, "", cfg, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -897,7 +1208,7 @@ func TestBuildPromptIncludesTextSnippet(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	prompt, images, err := buildPrompt(textFile, cfg)
+	prompt, images, err := buildPrompt(textFile, cfg, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -921,7 +1232,7 @@ func TestBuildPromptIncludesImageBase64(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	prompt, images, err := buildPrompt(img, cfg)
+	prompt, images, err := buildPrompt(img, cfg, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -956,7 +1267,7 @@ func TestBuildPromptResizesLargeImage(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	prompt, images, err := buildPrompt(img, cfg)
+	prompt, images, err := buildPrompt(img, cfg, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1000,7 +1311,7 @@ func TestBuildPromptUsesConfiguredMaxImageDimension(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	prompt, images, err := buildPrompt(img, cfg)
+	prompt, images, err := buildPrompt(img, cfg, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1042,7 +1353,7 @@ func TestBuildPromptEnforcesMinImageDimension(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_, images, err := buildPrompt(img, cfg)
+	_, images, err := buildPrompt(img, cfg, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1091,7 +1402,7 @@ func TestBuildPromptDoesNotModifySourceImage(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, _, err := buildPrompt(img, cfg); err != nil {
+	if _, _, err := buildPrompt(img, cfg, nil); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1114,7 +1425,7 @@ func TestBuildPromptImageFallbackOnDecodeFailure(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_, images, err := buildPrompt(img, cfg)
+	_, images, err := buildPrompt(img, cfg, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1140,7 +1451,7 @@ func TestBuildPromptNonImageUnchanged(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	prompt, images, err := buildPrompt(path, cfg)
+	prompt, images, err := buildPrompt(path, cfg, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1173,7 +1484,7 @@ func TestClassifierInterface(t *testing.T) {
 	}
 
 	var classifier Classifier = NewClient(transport)
-	decision, _, err := classifier.Classify(context.Background(), textFile, "", cfg)
+	decision, _, err := classifier.Classify(context.Background(), textFile, "", cfg, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1232,7 +1543,7 @@ func TestCheckModelMissingModel(t *testing.T) {
 
 	client := NewClient(transport)
 	cfg := baseConfig(t, t.TempDir())
-	_, _, err := client.Classify(context.Background(), "", "", cfg)
+	_, _, err := client.Classify(context.Background(), "", "", cfg, nil)
 	if err == nil {
 		t.Fatal("expected error for missing model")
 	}
@@ -1470,10 +1781,10 @@ func TestCheckModelCached(t *testing.T) {
 	}
 
 	client := NewClient(transport)
-	if _, _, err := client.Classify(context.Background(), textFile, "", cfg); err != nil {
+	if _, _, err := client.Classify(context.Background(), textFile, "", cfg, nil); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := client.Classify(context.Background(), textFile, "", cfg); err != nil {
+	if _, _, err := client.Classify(context.Background(), textFile, "", cfg, nil); err != nil {
 		t.Fatal(err)
 	}
 	if tagsCalls != 1 {
@@ -1504,12 +1815,12 @@ func TestCheckModelCacheInvalidatedOnModelChange(t *testing.T) {
 	}
 
 	client := NewClient(transport)
-	if _, _, err := client.Classify(context.Background(), textFile, "", cfg); err != nil {
+	if _, _, err := client.Classify(context.Background(), textFile, "", cfg, nil); err != nil {
 		t.Fatal(err)
 	}
 
 	cfg.Model = "other-model"
-	if _, _, err := client.Classify(context.Background(), textFile, "", cfg); err != nil {
+	if _, _, err := client.Classify(context.Background(), textFile, "", cfg, nil); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1552,7 +1863,7 @@ func TestClassifyHashCache(t *testing.T) {
 	client := NewClient(transport)
 	client.SetDecisionCache(cache)
 
-	decision, _, err := client.Classify(context.Background(), textFile, "hash1", cfg)
+	decision, _, err := client.Classify(context.Background(), textFile, "hash1", cfg, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1604,7 +1915,7 @@ func TestClassifyRecordsDecisionInCache(t *testing.T) {
 	client := NewClient(transport)
 	client.SetDecisionCache(cache)
 
-	if _, _, err := client.Classify(context.Background(), textFile, "hash1", cfg); err != nil {
+	if _, _, err := client.Classify(context.Background(), textFile, "hash1", cfg, nil); err != nil {
 		t.Fatal(err)
 	}
 

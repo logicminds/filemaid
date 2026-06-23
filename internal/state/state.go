@@ -24,6 +24,8 @@ type Repo interface {
 	DistinctTags() ([]string, error)
 	FindDecisionByHash(sha256 string) (llm.Decision, bool, error)
 	RecordDecision(sha256 string, decision llm.Decision) error
+	FindDirectoryDecision(key string) (llm.DirectoryDecision, bool, error)
+	RecordDirectoryDecision(key string, decision llm.DirectoryDecision) error
 	History(limit int, runID string) ([]Record, error)
 	Close() error
 }
@@ -104,6 +106,11 @@ CREATE TABLE IF NOT EXISTS history (
 );
 CREATE TABLE IF NOT EXISTS decisions (
     sha256 TEXT PRIMARY KEY,
+    decision TEXT NOT NULL,
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP
+);
+CREATE TABLE IF NOT EXISTS directory_decisions (
+    key TEXT PRIMARY KEY,
     decision TEXT NOT NULL,
     created_at TEXT DEFAULT CURRENT_TIMESTAMP
 );
@@ -485,6 +492,47 @@ func (s *State) RecordDecision(sha256 string, decision llm.Decision) error {
 	)
 	if err != nil {
 		return fmt.Errorf("record decision: %w", err)
+	}
+	return nil
+}
+
+// FindDirectoryDecision returns a cached directory decision for key, if one exists.
+func (s *State) FindDirectoryDecision(key string) (llm.DirectoryDecision, bool, error) {
+	row := s.db.QueryRow(
+		`SELECT decision FROM directory_decisions WHERE key = ?`,
+		key,
+	)
+
+	var raw string
+	err := row.Scan(&raw)
+	if err == sql.ErrNoRows {
+		return llm.DirectoryDecision{}, false, nil
+	}
+	if err != nil {
+		return llm.DirectoryDecision{}, false, fmt.Errorf("find directory decision: %w", err)
+	}
+
+	var d llm.DirectoryDecision
+	if err := json.Unmarshal([]byte(raw), &d); err != nil {
+		return llm.DirectoryDecision{}, false, fmt.Errorf("parse cached directory decision: %w", err)
+	}
+	return d, true, nil
+}
+
+// RecordDirectoryDecision stores a directory decision keyed by key, replacing any existing
+// entry for the same key.
+func (s *State) RecordDirectoryDecision(key string, decision llm.DirectoryDecision) error {
+	raw, err := json.Marshal(decision)
+	if err != nil {
+		return fmt.Errorf("marshal directory decision: %w", err)
+	}
+	_, err = s.db.Exec(
+		`INSERT INTO directory_decisions (key, decision) VALUES (?, ?)
+		 ON CONFLICT(key) DO UPDATE SET decision = excluded.decision, created_at = CURRENT_TIMESTAMP`,
+		key, string(raw),
+	)
+	if err != nil {
+		return fmt.Errorf("record directory decision: %w", err)
 	}
 	return nil
 }

@@ -114,6 +114,61 @@ func TestDefaultsRenameFields(t *testing.T) {
 		t.Errorf("MaxImageDimension = %d, want 1024", cfg.MaxImageDimension)
 	}
 }
+func TestDefaultsProjectMarkers(t *testing.T) {
+	want := []string{".git", "node_modules", ".venv", "vendor", ".terraform", "build"}
+	if !reflect.DeepEqual(Defaults().ProjectMarkers, want) {
+		t.Errorf("ProjectMarkers = %v, want %v", Defaults().ProjectMarkers, want)
+	}
+}
+
+func TestLoadPathProjectMarkers(t *testing.T) {
+	tests := []struct {
+		name string
+		user string
+		want []string
+	}{
+		{
+			name: "missing uses defaults",
+			user: "",
+			want: []string{".git", "node_modules", ".venv", "vendor", ".terraform", "build"},
+		},
+		{
+			name: "additive merge preserves defaults",
+			user: `{"project_markers": ["Cargo.lock"]}`,
+			want: []string{".git", "node_modules", ".venv", "vendor", ".terraform", "build", "cargo.lock"},
+		},
+		{
+			name: "normalization trims spaces leading dot slash and separators",
+			user: `{"project_markers": ["  Cargo.lock  ", "./cargo.lock", "Cargo.lock/", ".GIT"]}`,
+			want: []string{".git", "node_modules", ".venv", "vendor", ".terraform", "build", "cargo.lock"},
+		},
+		{
+			name: "deduplication keeps first occurrence",
+			user: `{"project_markers": ["node_modules", "vendor", "custom"]}`,
+			want: []string{".git", "node_modules", ".venv", "vendor", ".terraform", "build", "custom"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			path := filepath.Join(dir, "config.json")
+			if tt.user != "" {
+				if err := os.WriteFile(path, []byte(tt.user), 0640); err != nil {
+					t.Fatalf("write user config: %v", err)
+				}
+			}
+
+			cfg, err := LoadPath(path)
+			if err != nil {
+				t.Fatalf("LoadPath: %v", err)
+			}
+			if !reflect.DeepEqual(cfg.ProjectMarkers, tt.want) {
+				t.Errorf("ProjectMarkers = %v, want %v", cfg.ProjectMarkers, tt.want)
+			}
+		})
+	}
+}
 
 func TestLoadPathOverridesProcessWorkersAndMaxImageDimension(t *testing.T) {
 	tmp := t.TempDir()

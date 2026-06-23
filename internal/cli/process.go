@@ -17,6 +17,7 @@ import (
 
 	"github.com/logicminds/filemaid/internal/actions"
 	"github.com/logicminds/filemaid/internal/config"
+	"github.com/logicminds/filemaid/internal/directory"
 	"github.com/logicminds/filemaid/internal/llm"
 	"github.com/logicminds/filemaid/internal/log"
 	"github.com/logicminds/filemaid/internal/state"
@@ -66,6 +67,13 @@ type noopRecordRepo struct {
 func (n *noopRecordRepo) Record(input state.RecordInput) error                      { return nil }
 func (n *noopRecordRepo) RecordDecision(sha256 string, decision llm.Decision) error { return nil }
 
+// processInput carries a candidate path and optional directory context for
+// files discovered while scanning with --include-dirs.
+type processInput struct {
+	path   string
+	dirCtx *directory.Context
+}
+
 // processItem carries the sequential preprocessing state for a single accepted
 // file into the concurrent classify+apply stage.
 type processItem struct {
@@ -78,6 +86,7 @@ type processItem struct {
 	ageDecision llm.Decision
 	ageMatched  bool
 	model       string
+	dirCtx      *directory.Context
 }
 
 // modelForPath returns the configured model to use for the given path.
@@ -122,7 +131,7 @@ var (
 	renameFlag         string
 	processDryRun      bool
 	processForce       bool
-	processIncludeDirs bool
+	processIncludeDirs int
 )
 
 // applierFunc matches the signature of actions.Apply so it can be swapped in tests.
@@ -136,7 +145,8 @@ func init() {
 	processCmd.Flags().Lookup("rename").NoOptDefVal = "default"
 	processCmd.Flags().BoolVar(&processForce, "force", false, "force processing even if the file is a duplicate or similar to existing history")
 	processCmd.Flags().BoolVar(&processDryRun, "dry-run", false, "preview changes without moving files")
-	processCmd.Flags().BoolVar(&processIncludeDirs, "include-dirs", false, "treat directories as analysis candidates")
+	processCmd.Flags().IntVar(&processIncludeDirs, "include-dirs", 0, "descend into directories N levels (0 = file-only)")
+	processCmd.Flags().Lookup("include-dirs").NoOptDefVal = "1"
 	rootCmd.AddCommand(processCmd)
 }
 
@@ -186,15 +196,18 @@ var processCmd = &cobra.Command{
 	Use:   "process <paths...>",
 	Short: "Classify and apply decisions to files",
 	Long:  "Process one or more files: classify them with the configured LLM and apply the resulting move/tag/delete/review decision.",
-	Args:  cobra.MinimumNArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		applyRenameFlags(cmd)
 		applyForceFlags(cmd)
+		if processIncludeDirs < 0 {
+			return fmt.Errorf("--include-dirs must be >= 0")
+		}
 		if err := classifier.Validate(cfg); err != nil {
 			return fmt.Errorf("model validation failed: %w", err)
 		}
 		if c, ok := classifier.(*llm.Client); ok {
 			c.SetDecisionCache(db)
+			c.SetDirectoryDecisionCache(db)
 		}
 
 		ctx := context.Background()
@@ -230,7 +243,11 @@ var processCmd = &cobra.Command{
 		if cmd != nil {
 			out = cmd.OutOrStdout()
 		}
-		results, err := processPaths(ctx, args, runID, out, format)
+		inputs := make([]processInput, len(args))
+		for i, a := range args {
+			inputs[i] = processInput{path: a}
+		}
+		results, err := processPaths(ctx, inputs, runID, out, format)
 		if err != nil {
 			return err
 		}
@@ -265,11 +282,13 @@ type processResult struct {
 	Category         string   `json:"category"`
 	Tags             []string `json:"tags"`
 	Action           string   `json:"action"`
+	Recommendation   string   `json:"recommendation,omitempty"` // for directory rows
 	Result           string   `json:"result"`
 	OriginalName     string   `json:"original_name,omitempty"`
 	NewName          string   `json:"new_name,omitempty"`
 	OK               bool     `json:"ok"`
 	Error            string   `json:"error,omitempty"`
+	Reason           string   `json:"reason,omitempty"`
 	DurationMs       int64    `json:"duration_ms"`
 	PromptTokens     int      `json:"prompt_tokens"`
 	CompletionTokens int      `json:"completion_tokens"`
@@ -321,25 +340,35 @@ func formatNameChange(r processResult) string {
 // formatProcessTable renders process results as a compact ASCII table.
 func formatProcessTable(results []processResult) string {
 	useColor := isTerminal(os.Stdout)
-	headers := []string{"File", "Category", "Tags", "Action", "Name", "Result", "Status"}
+	headers := []string{"Item", "Category", "Tags", "Action", "Name", "Result", "Status"}
 	rows := make([][]string, 0, len(results))
 	for _, r := range results {
 		status := statusSymbol(r.OK, r.Error, useColor)
 		action := r.Action
-		if action == "" {
+		if r.Kind == "directory" {
+			action = r.Recommendation
+		} else if action == "" {
 			action = "-"
 		}
 		category := r.Category
 		if category == "" {
 			category = "-"
 		}
+		itemPath := truncatePath(collapseHome(r.Path), maxFileLen)
+		if r.Kind == "directory" {
+			itemPath = "dir:" + itemPath
+		}
+		resultPath := truncatePath(collapseHome(r.Result), maxResultLen)
+		if (r.Kind == "" || r.Kind == "file") && r.Action == "move" && r.NewName != "" && filepath.Dir(r.Result) == filepath.Dir(r.Path) {
+			resultPath = "in-place: " + resultPath
+		}
 		rows = append(rows, []string{
-			truncatePath(collapseHome(r.Path), maxFileLen),
+			itemPath,
 			truncateTags([]string{category}, maxCatLen),
 			truncateTags(r.Tags, maxTagsLen),
 			truncateTags([]string{action}, maxActionLen),
 			truncateTags([]string{formatNameChange(r)}, maxNameLen),
-			truncatePath(collapseHome(r.Result), maxResultLen),
+			resultPath,
 			status,
 		})
 	}
@@ -356,6 +385,9 @@ func formatHuman(results []processResult) string {
 	var lines []string
 	for _, r := range results {
 		name := filepath.Base(r.Path)
+		if r.Kind == "directory" {
+			name = "[dir] " + name
+		}
 		status := statusSymbol(r.OK, r.Error, useColor)
 		lines = append(lines, fmt.Sprintf("%s  %s", status, colorize(name, colorBold, useColor)))
 		if r.Category != "" {
@@ -364,7 +396,9 @@ func formatHuman(results []processResult) string {
 		if len(r.Tags) > 0 {
 			lines = append(lines, fmt.Sprintf("   Tags:     %s", strings.Join(r.Tags, ", ")))
 		}
-		if r.Action != "" {
+		if r.Kind == "directory" {
+			lines = append(lines, fmt.Sprintf("   Recommendation: %s", r.Recommendation))
+		} else if r.Action != "" {
 			lines = append(lines, fmt.Sprintf("   Action:   %s", r.Action))
 		}
 		nameChange := formatNameChange(r)
@@ -372,7 +406,14 @@ func formatHuman(results []processResult) string {
 			lines = append(lines, fmt.Sprintf("   Name:     %s", nameChange))
 		}
 		if r.Result != "" {
-			lines = append(lines, fmt.Sprintf("   Result:   %s", collapseHome(r.Result)))
+			result := collapseHome(r.Result)
+			if (r.Kind == "" || r.Kind == "file") && r.Action == "move" && r.NewName != "" && filepath.Dir(r.Result) == filepath.Dir(r.Path) {
+				result = "in-place: " + result
+			}
+			lines = append(lines, fmt.Sprintf("   Result:   %s", result))
+		}
+		if r.Reason != "" {
+			lines = append(lines, fmt.Sprintf("   Reason:   %s", r.Reason))
 		}
 		if r.Error != "" {
 			lines = append(lines, colorize(fmt.Sprintf("   Error:    %s", r.Error), colorRed, useColor))
@@ -397,7 +438,13 @@ func statusSymbol(ok bool, err string, useColor bool) string {
 // formatSummary returns a one-line summary of the results.
 func formatSummary(results []processResult, useColor bool) string {
 	var ok, review, skip, failed int
+	var files, dirs int
 	for _, r := range results {
+		if r.Kind == "directory" {
+			dirs++
+		} else {
+			files++
+		}
 		if r.Action == "skip" {
 			skip++
 		} else if r.Error != "" {
@@ -408,7 +455,15 @@ func formatSummary(results []processResult, useColor bool) string {
 			ok++
 		}
 	}
-	parts := []string{fmt.Sprintf("%d file%s processed", len(results), plural(len(results)))}
+	var itemSummary string
+	if dirs == 0 {
+		itemSummary = fmt.Sprintf("%d file%s processed", files, plural(files))
+	} else if files == 0 {
+		itemSummary = fmt.Sprintf("%d director%s processed", dirs, plural(dirs))
+	} else {
+		itemSummary = fmt.Sprintf("%d file%s, %d director%s processed", files, plural(files), dirs, plural(dirs))
+	}
+	parts := []string{itemSummary}
 	if ok > 0 {
 		parts = append(parts, colorize(fmt.Sprintf("%d ok", ok), colorGreen, useColor))
 	}
@@ -463,6 +518,9 @@ func (s *processStreamer) writeResult(r processResult) {
 
 func (s *processStreamer) writeHumanResult(r processResult, useColor bool) {
 	name := filepath.Base(r.Path)
+	if r.Kind == "directory" {
+		name = "[dir] " + name
+	}
 	status := statusSymbol(r.OK, r.Error, useColor)
 	fmt.Fprintf(s.w, "%s  %s\n", status, colorize(name, colorBold, useColor))
 	if r.Category != "" {
@@ -471,7 +529,9 @@ func (s *processStreamer) writeHumanResult(r processResult, useColor bool) {
 	if len(r.Tags) > 0 {
 		fmt.Fprintf(s.w, "   Tags:     %s\n", strings.Join(r.Tags, ", "))
 	}
-	if r.Action != "" {
+	if r.Kind == "directory" {
+		fmt.Fprintf(s.w, "   Recommendation: %s\n", r.Recommendation)
+	} else if r.Action != "" {
 		fmt.Fprintf(s.w, "   Action:   %s\n", r.Action)
 	}
 	nameChange := formatNameChange(r)
@@ -479,7 +539,14 @@ func (s *processStreamer) writeHumanResult(r processResult, useColor bool) {
 		fmt.Fprintf(s.w, "   Name:     %s\n", nameChange)
 	}
 	if r.Result != "" {
-		fmt.Fprintf(s.w, "   Result:   %s\n", collapseHome(r.Result))
+		result := collapseHome(r.Result)
+		if r.Kind == "file" && r.Action == "move" && r.NewName != "" && filepath.Dir(r.Result) == filepath.Dir(r.Path) {
+			result = "in-place: " + result
+		}
+		fmt.Fprintf(s.w, "   Result:   %s\n", result)
+	}
+	if r.Reason != "" {
+		fmt.Fprintf(s.w, "   Reason:   %s\n", r.Reason)
 	}
 	if r.Error != "" {
 		fmt.Fprintf(s.w, "%s\n", colorize(fmt.Sprintf("   Error:    %s", r.Error), colorRed, useColor))
@@ -487,7 +554,7 @@ func (s *processStreamer) writeHumanResult(r processResult, useColor bool) {
 }
 
 func (s *processStreamer) writeTableResult(r processResult, useColor bool) {
-	headers := []string{"File", "Category", "Tags", "Action", "Name", "Result", "Status"}
+	headers := []string{"Item", "Category", "Tags", "Action", "Name", "Result", "Status"}
 	statusWidth := max(len("Status"), max(len(statusSymbol(true, "", useColor)), max(len(statusSymbol(false, "", useColor)), len(statusSymbol(false, "err", useColor)))))
 	widths := []int{maxFileLen, maxCatLen, maxTagsLen, maxActionLen, maxNameLen, maxResultLen, statusWidth}
 
@@ -501,20 +568,30 @@ func (s *processStreamer) writeTableResult(r processResult, useColor bool) {
 
 	status := statusSymbol(r.OK, r.Error, useColor)
 	action := r.Action
-	if action == "" {
+	if r.Kind == "directory" {
+		action = r.Recommendation
+	} else if action == "" {
 		action = "-"
 	}
 	category := r.Category
 	if category == "" {
 		category = "-"
 	}
+	itemPath := truncatePath(collapseHome(r.Path), maxFileLen)
+	if r.Kind == "directory" {
+		itemPath = "dir:" + itemPath
+	}
+	resultPath := truncatePath(collapseHome(r.Result), maxResultLen)
+	if (r.Kind == "" || r.Kind == "file") && r.Action == "move" && r.NewName != "" && filepath.Dir(r.Result) == filepath.Dir(r.Path) {
+		resultPath = "in-place: " + resultPath
+	}
 	row := []string{
-		truncatePath(collapseHome(r.Path), maxFileLen),
+		itemPath,
 		truncateTags([]string{category}, maxCatLen),
 		truncateTags(r.Tags, maxTagsLen),
 		truncateTags([]string{action}, maxActionLen),
 		truncateTags([]string{formatNameChange(r)}, maxNameLen),
-		truncatePath(collapseHome(r.Result), maxResultLen),
+		resultPath,
 		status,
 	}
 	fmt.Fprintln(s.w, "| "+strings.Join(mapSliceIndex(row, widths, func(cell string, w int) string { return padRight(cell, w) }), " | ")+" |")
@@ -554,25 +631,27 @@ func (d *dirLockMap) lock(dir string) func() {
 	return m.Unlock
 }
 
-// processPaths classifies and applies decisions to each path. It mirrors the
+// processPaths classifies and applies decisions to each input. It mirrors the
 // Python process_paths behaviour: skip non-existent, non-file, hidden, and
 // out-of-allowed files; honour age rules; detect duplicates; coerce unsafe
 // deletes to review; log the result; and return a displayable result per file.
-func processPaths(ctx context.Context, paths []string, runID string, w io.Writer, format string) ([]processResult, error) {
+func processPaths(ctx context.Context, inputs []processInput, runID string, w io.Writer, format string) ([]processResult, error) {
 	streamer := newProcessStreamer(w, format)
 
 	// Preprocess in two stages so that skipping and duplicate detection remain
 	// deterministic while file hashing runs concurrently. Skipped paths still
 	// produce a result so the final table is complete.
-	results := make([]processResult, len(paths))
+	results := make([]processResult, len(inputs))
 
 	type candidate struct {
-		pos int
-		src string
+		pos    int
+		src    string
+		dirCtx *directory.Context
 	}
-	candidates := make([]candidate, 0, len(paths))
+	candidates := make([]candidate, 0, len(inputs))
 
-	for i, raw := range paths {
+	for i, in := range inputs {
+		raw := in.path
 		src, err := filepath.Abs(raw)
 		if err != nil {
 			results[i] = skipResult(raw, fmt.Sprintf("path normalization failed: %v", err))
@@ -589,7 +668,7 @@ func processPaths(ctx context.Context, paths []string, runID string, w io.Writer
 			continue
 		}
 		if !info.Mode().IsRegular() {
-			if processIncludeDirs && info.IsDir() {
+			if processIncludeDirs > 0 && info.IsDir() {
 				if isHidden(src) {
 					results[i] = skipResult(src, "hidden directory")
 					streamer.writeResult(results[i])
@@ -602,16 +681,27 @@ func processPaths(ctx context.Context, paths []string, runID string, w io.Writer
 					slog.Warn("skipping directory outside allowed dirs", "path", src)
 					continue
 				}
+				decision, metrics := classifyDirectory(ctx, src, cfg)
 				results[i] = processResult{
-					Path:         src,
-					Kind:         "directory",
-					Action:       "review",
-					Result:       "-",
-					OK:           true,
-					OriginalName: filepath.Base(src),
+					Path:             src,
+					Kind:             "directory",
+					Recommendation:   decision.Recommendation,
+					Category:         decision.Category,
+					Tags:             decision.Tags,
+					Action:           decision.Recommendation,
+					Result:           "-",
+					OriginalName:     filepath.Base(src),
+					OK:               true,
+					Reason:           decision.Reason,
+					DurationMs:       metrics.DurationMs,
+					PromptTokens:     metrics.PromptTokens,
+					CompletionTokens: metrics.CompletionTokens,
+					TotalTokens:      metrics.TotalTokens,
+					TokensPerSec:     metrics.TokensPerSec,
+					ContextSize:      metrics.ContextSize,
 				}
 				streamer.writeResult(results[i])
-				slog.Info("directory candidate", "path", src)
+				slog.Info("directory candidate", "path", src, "recommendation", decision.Recommendation, "reason", decision.Reason)
 				continue
 			}
 			results[i] = skipResult(src, "not a regular file")
@@ -632,13 +722,13 @@ func processPaths(ctx context.Context, paths []string, runID string, w io.Writer
 			continue
 		}
 
-		candidates = append(candidates, candidate{pos: i, src: src})
+		candidates = append(candidates, candidate{pos: i, src: src, dirCtx: in.dirCtx})
 	}
 
 	// Compute hashes concurrently up to ProcessWorkers goroutines while writing
 	// results back by input position so downstream ordering stays deterministic.
-	fileHashes := make([]string, len(paths))
-	hashErrs := make([]error, len(paths))
+	fileHashes := make([]string, len(inputs))
+	hashErrs := make([]error, len(inputs))
 
 	hashWorkers := cfg.ProcessWorkers
 	if hashWorkers < 1 {
@@ -721,6 +811,7 @@ func processPaths(ctx context.Context, paths []string, runID string, w io.Writer
 			ageDecision: ageDecision,
 			ageMatched:  ageMatched,
 			model:       modelForPath(src, cfg),
+			dirCtx:      c.dirCtx,
 		})
 	}
 
@@ -750,7 +841,7 @@ func processPaths(ctx context.Context, paths []string, runID string, w io.Writer
 				metrics := llm.Metrics{}
 				if !item.ageMatched {
 					var err error
-					decision, metrics, err = classifier.Classify(ctx, item.src, item.fileHash, cfg)
+					decision, metrics, err = classifier.Classify(ctx, item.src, item.fileHash, cfg, item.dirCtx)
 					if err != nil {
 						slog.Warn("classification failed", "path", item.src, "error", err)
 						decision = llm.NewDecision()
@@ -851,6 +942,25 @@ func applyFile(src, fileHash string, isDuplicate bool, decision llm.Decision, me
 		TokensPerSec:     metrics.TokensPerSec,
 		ContextSize:      metrics.ContextSize,
 	}
+}
+
+// classifyDirectory returns a read-only DirectoryDecision for a directory
+// candidate. If the classifier does not support directory classification, it
+// falls back to a review recommendation.
+func classifyDirectory(ctx context.Context, src string, cfg *config.Config) (llm.DirectoryDecision, llm.Metrics) {
+	dc, ok := classifier.(llm.DirectoryClassifier)
+	if !ok {
+		return llm.DirectoryDecision{Recommendation: "review", Reason: "directory classifier not available"}, llm.Metrics{}
+	}
+	meta, err := directory.Gather(src, cfg)
+	if err != nil {
+		return llm.DirectoryDecision{Recommendation: "review", Reason: fmt.Sprintf("metadata error: %v", err)}, llm.Metrics{}
+	}
+	decision, metrics, err := dc.ClassifyDirectory(ctx, meta, cfg)
+	if err != nil {
+		return llm.DirectoryDecision{Recommendation: "review", Reason: fmt.Sprintf("classification error: %v", err)}, metrics
+	}
+	return decision, metrics
 }
 
 // newRunID returns a deterministic, unique run identifier.
