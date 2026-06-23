@@ -10,7 +10,7 @@ origin: beads/filemaid-97x
 
 ## Overview
 
-Extend the `--include-dirs` flag added in `filemaid-6ne` from a boolean
+Extend the `--depth` flag added in `filemaid-6ne` from a boolean
 "immediate subdirectories" switch into an optional integer depth flag that
 triggers deep, read-only directory analysis and, for regular files found inside
 scanned directories, in-place renaming. Directories are still never moved,
@@ -26,7 +26,7 @@ section states the contract that downstream work can depend on.
 |-------|--------------|---------------|
 | `filemaid-uf2` | Add `project_markers` config option with additive merge. | `internal/config/config.go`, `config.json` |
 | `filemaid-81r` | Bounded directory metadata gathering helper. | new `internal/directory/metadata.go` |
-| `filemaid-7li` | Convert `--include-dirs` from bool to optional integer depth flag. | `internal/cli/scan.go`, `internal/cli/process.go` |
+| `filemaid-7li` | Convert `--depth` from bool to optional integer depth flag. | `internal/cli/scan.go`, `internal/cli/process.go` |
 | `filemaid-jyi` | Add directory-specific classifier prompt and tool schema. | `internal/llm/llm.go` |
 | `filemaid-xc2` | Add `DirectoryDecision` type and result plumbing. | `internal/llm/llm.go`, `internal/cli/process.go` |
 | `filemaid-8mg` | Recursive directory enumeration with project-marker detection. | `internal/cli/scan.go` |
@@ -85,22 +85,23 @@ Bounds (configurable in `Config` with defaults):
 The helper reports a `.app` bundle as a directory (`IsAppBundle == true`) and
 stops enumerating its contents; it is treated as an opaque directory candidate.
 
-### 3. `--include-dirs` flag
+### 3. `--depth` flag
 
 In both `scan` and `process`:
 
 ```go
-var includeDirs int
-processCmd.Flags().IntVar(&includeDirs, "include-dirs", 0, "descend into directories N levels (0 = file-only)")
-processCmd.Flags().Lookup("include-dirs").NoOptDefVal = "1"
+var scanDepth int
+processCmd.Flags().IntVar(&processDepth, "depth", 0, "descend into directories N levels (0 = file-only)")
+processCmd.Flags().Lookup("depth").NoOptDefVal = "1"
 ```
 
-* `--include-dirs` bare → depth 1
-* `--include-dirs=3` → depth 3
+* `--depth` bare → depth 1
+* `--depth=3` → depth 3
 * depth <= 0 is treated as disabled (current file-only behavior)
 * A negative value supplied on the CLI is rejected
 
-A package-level variable `includeDirs` of type `int` replaces the current `bool`.
+Package-level variables `scanDepth` and `processDepth` of type `int` replace the
+current `bool`.
 
 ### 4. Directory classifier
 
@@ -157,7 +158,7 @@ For depth > 0:
      recommendation and **do not recurse** into it.
    * If depth > 1 and no marker, recurse and collect files + subdirectories.
 4. Return two slices: file candidates and directory candidates. Directory
-   candidates preserve their full paths.
+candidates preserve their full paths.
 
 ### 7. In-place renaming
 
@@ -197,7 +198,7 @@ Files default to `Kind: "file"`. Directory rows use `Recommendation` instead of
 
 ## Acceptance criteria
 
-- [ ] `--include-dirs` bare is depth 1; `--include-dirs=N` descends N levels.
+- [ ] `--depth` bare is depth 1; `--depth=N` descends N levels.
 - [ ] Project markers are additive with defaults and stop recursion.
 - [ ] Directory metadata gathering is bounded and treats `.app` bundles as directories.
 - [ ] Directory classifier returns `keep|review|trash|archive` and is cached.
@@ -205,7 +206,7 @@ Files default to `Kind: "file"`. Directory rows use `Recommendation` instead of
 - [ ] Files inside descended directories can be renamed in place.
 - [ ] Directory context appears in file prompts for descended files.
 - [ ] Output distinguishes directory rows and in-place rename rows in all formats.
-- [ ] Existing file-only behavior is unchanged when `--include-dirs` is absent.
+- [ ] Existing file-only behavior is unchanged when `--depth` is absent.
 - [ ] All new code has unit tests; end-to-end behavior has integration tests.
 
 ## Test plan
@@ -221,7 +222,7 @@ See `filemaid-gma`. Coverage targets:
 * dry-run preview for directory analysis
 * duplicate handling inside same directory
 * name collision counters for in-place rename
-* unchanged behavior without `--include-dirs`
+* unchanged behavior without `--depth`
 
 ## Risks
 

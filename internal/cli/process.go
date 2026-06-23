@@ -68,7 +68,7 @@ func (n *noopRecordRepo) Record(input state.RecordInput) error                  
 func (n *noopRecordRepo) RecordDecision(sha256 string, decision llm.Decision) error { return nil }
 
 // processInput carries a candidate path and optional directory context for
-// files discovered while scanning with --include-dirs.
+// files discovered while scanning with --depth.
 type processInput struct {
 	path   string
 	dirCtx *directory.Context
@@ -125,13 +125,13 @@ func sortedModelNames(groups map[string][]processItem) []string {
 }
 
 var (
-	processFormat      string
-	processJSON        bool
-	processQuiet       bool
-	renameFlag         string
-	processDryRun      bool
-	processForce       bool
-	processIncludeDirs int
+	processFormat string
+	processJSON   bool
+	processQuiet  bool
+	renameFlag    string
+	processDryRun bool
+	processForce  bool
+	processDepth  int
 )
 
 // applierFunc matches the signature of actions.Apply so it can be swapped in tests.
@@ -145,8 +145,8 @@ func init() {
 	processCmd.Flags().Lookup("rename").NoOptDefVal = "default"
 	processCmd.Flags().BoolVar(&processForce, "force", false, "force processing even if the file is a duplicate or similar to existing history")
 	processCmd.Flags().BoolVar(&processDryRun, "dry-run", false, "preview changes without moving files")
-	processCmd.Flags().IntVar(&processIncludeDirs, "include-dirs", 0, "descend into directories N levels (0 = file-only)")
-	processCmd.Flags().Lookup("include-dirs").NoOptDefVal = "1"
+	processCmd.Flags().IntVar(&processDepth, "depth", 0, "descend into directories N levels (0 = file-only)")
+	processCmd.Flags().Lookup("depth").NoOptDefVal = "1"
 	rootCmd.AddCommand(processCmd)
 }
 
@@ -199,8 +199,8 @@ var processCmd = &cobra.Command{
 	RunE: func(cmd *cobra.Command, args []string) error {
 		applyRenameFlags(cmd)
 		applyForceFlags(cmd)
-		if processIncludeDirs < 0 {
-			return fmt.Errorf("--include-dirs must be >= 0")
+		if processDepth < 0 {
+			return fmt.Errorf("--depth must be >= 0")
 		}
 		if err := classifier.Validate(cfg); err != nil {
 			return fmt.Errorf("model validation failed: %w", err)
@@ -668,7 +668,7 @@ func processPaths(ctx context.Context, inputs []processInput, runID string, w io
 			continue
 		}
 		if !info.Mode().IsRegular() {
-			if processIncludeDirs > 0 && info.IsDir() {
+			if processDepth > 0 && info.IsDir() {
 				if isHidden(src) {
 					results[i] = skipResult(src, "hidden directory")
 					streamer.writeResult(results[i])

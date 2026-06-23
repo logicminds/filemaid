@@ -166,8 +166,8 @@ func TestScanDirIncludesDirectoriesWhenFlagSet(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	includeDirs = 1
-	t.Cleanup(func() { includeDirs = 0 })
+	scanDepth = 1
+	t.Cleanup(func() { scanDepth = 0 })
 	scanGetCandidates = func(dir string, depth int) ([]processInput, []string, error) {
 		return nil, []string{dirPath}, nil
 	}
@@ -203,8 +203,8 @@ func TestScanDirSkipsHiddenDirectories(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	includeDirs = 1
-	t.Cleanup(func() { includeDirs = 0 })
+	scanDepth = 1
+	t.Cleanup(func() { scanDepth = 0 })
 	scanGetCandidates = func(dir string, depth int) ([]processInput, []string, error) {
 		return nil, []string{dirPath}, nil
 	}
@@ -230,8 +230,8 @@ func TestScanDirSkipsDirectoriesOutsideAllowedDirs(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	includeDirs = 1
-	t.Cleanup(func() { includeDirs = 0 })
+	scanDepth = 1
+	t.Cleanup(func() { scanDepth = 0 })
 	scanGetCandidates = func(dir string, depth int) ([]processInput, []string, error) {
 		return nil, []string{dirPath}, nil
 	}
@@ -262,8 +262,8 @@ func TestScanDirRespectsMinAgeForDirectories(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	includeDirs = 1
-	t.Cleanup(func() { includeDirs = 0 })
+	scanDepth = 1
+	t.Cleanup(func() { scanDepth = 0 })
 	scanGetCandidates = func(dir string, depth int) ([]processInput, []string, error) {
 		return nil, []string{recentDir}, nil
 	}
@@ -289,7 +289,7 @@ func TestScanDirWithoutFlagSkipsDirectories(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	includeDirs = 0
+	scanDepth = 0
 	scanGetCandidates = func(dir string, depth int) ([]processInput, []string, error) {
 		return nil, []string{dirPath}, nil
 	}
@@ -304,10 +304,10 @@ func TestScanDirWithoutFlagSkipsDirectories(t *testing.T) {
 	}
 }
 
-func TestScanIncludeDirsFlagDefaults(t *testing.T) {
-	flag := scanCmd.Flags().Lookup("include-dirs")
+func TestScanDepthFlagDefaults(t *testing.T) {
+	flag := scanCmd.Flags().Lookup("depth")
 	if flag == nil {
-		t.Fatal("include-dirs flag not registered")
+		t.Fatal("depth flag not registered")
 	}
 	if flag.NoOptDefVal != "1" {
 		t.Errorf("NoOptDefVal = %q, want 1", flag.NoOptDefVal)
@@ -315,26 +315,26 @@ func TestScanIncludeDirsFlagDefaults(t *testing.T) {
 
 	fs := pflag.NewFlagSet("test", pflag.ContinueOnError)
 	var v int
-	fs.IntVar(&v, "include-dirs", 0, "descend into directories N levels (0 = file-only)")
-	fs.Lookup("include-dirs").NoOptDefVal = "1"
+	fs.IntVar(&v, "depth", 0, "descend into directories N levels (0 = file-only)")
+	fs.Lookup("depth").NoOptDefVal = "1"
 
-	if err := fs.Parse([]string{"--include-dirs"}); err != nil {
+	if err := fs.Parse([]string{"--depth"}); err != nil {
 		t.Fatalf("bare flag parse failed: %v", err)
 	}
 	if v != 1 {
-		t.Errorf("bare --include-dirs: got %d, want 1", v)
+		t.Errorf("bare --depth: got %d, want 1", v)
 	}
 
 	v = 0
-	if err := fs.Parse([]string{"--include-dirs=3"}); err != nil {
+	if err := fs.Parse([]string{"--depth=3"}); err != nil {
 		t.Fatalf("valued flag parse failed: %v", err)
 	}
 	if v != 3 {
-		t.Errorf("--include-dirs=3: got %d, want 3", v)
+		t.Errorf("--depth=3: got %d, want 3", v)
 	}
 }
 
-func TestScanIncludeDirsFlagRejectsNegative(t *testing.T) {
+func TestScanDepthFlagRejectsNegative(t *testing.T) {
 	tmp := t.TempDir()
 	cfg = testConfig(tmp)
 	db = state.NewFake()
@@ -346,15 +346,15 @@ func TestScanIncludeDirsFlagRejectsNegative(t *testing.T) {
 		Reason:   "text",
 	}}
 
-	includeDirs = -1
+	scanDepth = -1
 	scanDir = filepath.Join(tmp, "Desktop")
-	t.Cleanup(func() { includeDirs = 0; scanDir = "" })
+	t.Cleanup(func() { scanDepth = 0; scanDir = "" })
 
 	err := scanCmd.RunE(nil, []string{})
 	if err == nil {
-		t.Fatal("expected error for negative --include-dirs")
+		t.Fatal("expected error for negative --depth")
 	}
-	if !strings.Contains(err.Error(), "include-dirs must be >= 0") {
+	if !strings.Contains(err.Error(), "depth must be >= 0") {
 		t.Errorf("unexpected error: %v", err)
 	}
 }

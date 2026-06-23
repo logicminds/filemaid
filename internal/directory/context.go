@@ -1,7 +1,7 @@
 package directory
 
 // Context carries the directory ancestry information for a file that was
-// discovered while scanning with --include-dirs. It is passed to the file
+// discovered while scanning with --depth. It is passed to the file
 // classifier so the prompt can include information about where the file lives.
 type Context struct {
 	// Ancestor is the directory path that contained this file during scanning.

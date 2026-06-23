@@ -18,7 +18,7 @@ import (
 )
 
 var scanDir string
-var includeDirs int
+var scanDepth int
 var (
 	// scanGetCandidates returns the candidate files and directories in a scan
 	// directory up to the requested depth. Tests may replace it to avoid
@@ -35,8 +35,8 @@ func init() {
 	scanCmd.Flags().Lookup("rename").NoOptDefVal = "default"
 	scanCmd.Flags().BoolVar(&processForce, "force", false, "force processing even if the file is a duplicate or similar to existing history")
 	scanCmd.Flags().BoolVar(&processDryRun, "dry-run", false, "preview changes without moving files")
-	scanCmd.Flags().IntVar(&includeDirs, "include-dirs", 0, "descend into directories N levels (0 = file-only)")
-	scanCmd.Flags().Lookup("include-dirs").NoOptDefVal = "1"
+	scanCmd.Flags().IntVar(&scanDepth, "depth", 0, "descend into directories N levels (0 = file-only)")
+	scanCmd.Flags().Lookup("depth").NoOptDefVal = "1"
 	rootCmd.AddCommand(scanCmd)
 }
 
@@ -45,9 +45,8 @@ var scanCmd = &cobra.Command{
 	Short: "Scan watch directories for stale files",
 	RunE: func(cmd *cobra.Command, args []string) error {
 		applyRenameFlags(cmd)
-		applyForceFlags(cmd)
-		if includeDirs < 0 {
-			return fmt.Errorf("--include-dirs must be >= 0")
+		if scanDepth < 0 {
+			return fmt.Errorf("--depth must be >= 0")
 		}
 		if err := classifier.Validate(cfg); err != nil {
 			return fmt.Errorf("model validation failed: %w", err)
@@ -140,7 +139,7 @@ func runScanDir(ctx context.Context, directory string, runID string, w io.Writer
 		return nil, nil
 	}
 
-	files, dirs, err := scanGetCandidates(root, includeDirs)
+	files, dirs, err := scanGetCandidates(root, scanDepth)
 	if err != nil {
 		if errors.Is(err, os.ErrPermission) {
 			slog.Warn("permission denied", "dir", root)
@@ -170,7 +169,7 @@ func runScanDir(ctx context.Context, directory string, runID string, w io.Writer
 		}
 	}
 
-	if includeDirs > 0 {
+	if scanDepth > 0 {
 		for _, path := range dirs {
 			info, err := os.Stat(path)
 			if err != nil {
@@ -195,7 +194,7 @@ func runScanDir(ctx context.Context, directory string, runID string, w io.Writer
 		return nil, nil
 	}
 
-	processIncludeDirs = includeDirs
+	processDepth = scanDepth
 	return processPaths(ctx, toProcess, runID, w, format)
 }
 

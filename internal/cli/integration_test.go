@@ -451,10 +451,10 @@ func TestSmokeSmartFoldersRegeneration(t *testing.T) {
 	}
 }
 
-// TestAcceptanceProcessIncludeDirs verifies that `filemaid process --include-dirs`
+// TestAcceptanceProcessDepth verifies that `filemaid process --depth`
 // accepts a directory argument, treats it as a read-only candidate, and does not
 // move or modify the directory or its contents.
-func TestAcceptanceProcessIncludeDirs(t *testing.T) {
+func TestAcceptanceProcessDepth(t *testing.T) {
 	resetGlobals(t)
 
 	tmp := t.TempDir()
@@ -477,8 +477,8 @@ func TestAcceptanceProcessIncludeDirs(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	processIncludeDirs = 1
-	t.Cleanup(func() { processIncludeDirs = 0 })
+	processDepth = 1
+	t.Cleanup(func() { processDepth = 0 })
 
 	results, err := processPaths(context.Background(), inputs(dirPath), "run-test", io.Discard, "")
 	if err != nil {
@@ -506,10 +506,10 @@ func TestAcceptanceProcessIncludeDirs(t *testing.T) {
 	}
 }
 
-// TestAcceptanceScanIncludeDirs verifies that `filemaid scan --include-dirs`
+// TestAcceptanceScanDepth verifies that `filemaid scan --depth`
 // enumerates immediate subdirectories and surfaces them as directory candidates
 // without modifying their contents.
-func TestAcceptanceScanIncludeDirs(t *testing.T) {
+func TestAcceptanceScanDepth(t *testing.T) {
 	resetGlobals(t)
 
 	tmp := t.TempDir()
@@ -533,8 +533,8 @@ func TestAcceptanceScanIncludeDirs(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	includeDirs = 1
-	t.Cleanup(func() { includeDirs = 0 })
+	scanDepth = 1
+	t.Cleanup(func() { scanDepth = 0 })
 	scanDir = desktop
 	t.Cleanup(func() { scanDir = "" })
 
@@ -556,7 +556,7 @@ func TestAcceptanceScanIncludeDirs(t *testing.T) {
 
 // TestAcceptanceScanIncludeDirsRespectsGuardrails verifies that hidden
 // directories and directories outside allowed_dirs are skipped during scan.
-func TestAcceptanceScanIncludeDirsRespectsGuardrails(t *testing.T) {
+func TestAcceptanceScanDepthRespectsGuardrails(t *testing.T) {
 	resetGlobals(t)
 
 	tmp := t.TempDir()
@@ -580,8 +580,8 @@ func TestAcceptanceScanIncludeDirsRespectsGuardrails(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	includeDirs = 1
-	t.Cleanup(func() { includeDirs = 0 })
+	scanDepth = 1
+	t.Cleanup(func() { scanDepth = 0 })
 	scanDir = desktop
 	t.Cleanup(func() { scanDir = "" })
 
@@ -612,8 +612,8 @@ func TestAcceptanceAppBundleTreatedAsDirectory(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	processIncludeDirs = 1
-	t.Cleanup(func() { processIncludeDirs = 0 })
+	processDepth = 1
+	t.Cleanup(func() { processDepth = 0 })
 
 	results, err := processPaths(context.Background(), inputs(appBundle), "run-test", io.Discard, "")
 	if err != nil {

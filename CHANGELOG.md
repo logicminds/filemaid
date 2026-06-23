@@ -6,7 +6,7 @@ All notable changes to filemaid are documented in this file.
 
 ### Added
 
-- **Directory-aware deep classification and in-place renaming** — `--include-dirs` is now an optional integer depth flag. `scan --include-dirs` and `process --include-dirs` descend up to N levels, detect project markers, classify directories read-only, and include directory context in file prompts.
+- **Directory-aware deep classification and in-place renaming** — `--depth` is now an optional integer depth flag. `scan --depth` and `process --depth` descend up to N levels, detect project markers, classify directories read-only, and include directory context in file prompts.
 - **`project_markers` config option** — built-in markers (`.git`, `node_modules`, `.venv`, `vendor`, `.terraform`, `build`) stop recursion; user-provided markers are merged additively.
 - **Bounded directory metadata gathering** — `internal/directory.Gather` produces a capped snapshot of immediate children, extension counts, and detected markers; `.app` bundles are treated as opaque directories.
 - **Directory-specific LLM classifier** — new `DirectoryDecision` type and `ClassifyDirectory` method return `keep|review|trash|archive` recommendations; cached in a dedicated SQLite table keyed by content digest.
@@ -16,7 +16,7 @@ All notable changes to filemaid are documented in this file.
 
 ### Changed
 
-- `--include-dirs` changed from a boolean flag to an optional integer (`--include-dirs` = depth 1, `--include-dirs=N` = depth N).
+- `--depth` changed from a boolean flag (`--include-dirs`) to an optional integer (`--depth` = depth 1, `--depth=N` = depth N).
 ## [0.5.1]
 
 ### Added

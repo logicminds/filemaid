@@ -1609,8 +1609,8 @@ func TestProcessPathsAcceptsDirectoryWhenFlagSet(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	processIncludeDirs = 1
-	t.Cleanup(func() { processIncludeDirs = 0 })
+	processDepth = 1
+	t.Cleanup(func() { processDepth = 0 })
 
 	results, err := processPaths(context.Background(), inputs(dirPath), "run-test", io.Discard, "")
 	if err != nil {
@@ -1645,7 +1645,7 @@ func TestProcessPathsSkipsDirectoryWhenFlagNotSet(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	processIncludeDirs = 0
+	processDepth = 0
 
 	results, err := processPaths(context.Background(), inputs(dirPath), "run-test", io.Discard, "")
 	if err != nil {
@@ -1676,8 +1676,8 @@ func TestProcessPathsSkipsHiddenDirectory(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	processIncludeDirs = 1
-	t.Cleanup(func() { processIncludeDirs = 0 })
+	processDepth = 1
+	t.Cleanup(func() { processDepth = 0 })
 
 	results, err := processPaths(context.Background(), inputs(dirPath), "run-test", io.Discard, "")
 	if err != nil {
@@ -1705,8 +1705,8 @@ func TestProcessPathsSkipsDirectoryOutsideAllowedDirs(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	processIncludeDirs = 1
-	t.Cleanup(func() { processIncludeDirs = 0 })
+	processDepth = 1
+	t.Cleanup(func() { processDepth = 0 })
 
 	results, err := processPaths(context.Background(), inputs(dirPath), "run-test", io.Discard, "")
 	if err != nil {
@@ -1723,15 +1723,15 @@ func TestProcessPathsSkipsDirectoryOutsideAllowedDirs(t *testing.T) {
 	}
 }
 
-func TestProcessCommandIncludeDirsFlagExists(t *testing.T) {
-	if processCmd.Flags().Lookup("include-dirs") == nil {
-		t.Fatal("expected --include-dirs flag on process command")
+func TestProcessCommandDepthFlagExists(t *testing.T) {
+	if processCmd.Flags().Lookup("depth") == nil {
+		t.Fatal("expected --depth flag on process command")
 	}
 }
 
-func TestScanCommandIncludeDirsFlagExists(t *testing.T) {
-	if scanCmd.Flags().Lookup("include-dirs") == nil {
-		t.Fatal("expected --include-dirs flag on scan command")
+func TestScanCommandDepthFlagExists(t *testing.T) {
+	if scanCmd.Flags().Lookup("depth") == nil {
+		t.Fatal("expected --depth flag on scan command")
 	}
 }
 func TestProcessPathsPassesDirectoryContext(t *testing.T) {
@@ -1800,8 +1800,8 @@ func TestProcessPathsClassifiesDirectory(t *testing.T) {
 
 	dir := filepath.Join(tmp, "Downloads", "project")
 	os.MkdirAll(dir, 0755)
-	processIncludeDirs = 1
-	t.Cleanup(func() { processIncludeDirs = 0 })
+	processDepth = 1
+	t.Cleanup(func() { processDepth = 0 })
 
 	results, err := processPaths(context.Background(), inputs(dir), "run-test", io.Discard, "")
 	if err != nil {
