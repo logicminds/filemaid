@@ -267,12 +267,15 @@ func run(name string, args ...string) error {
 
 // mdimportBatcher collects directories that need a Spotlight re-index and
 // flushes them with a single mdimport invocation per directory.
+// A generation counter prevents a timer callback from processing directories
+// that Flush() has already handled.
 type mdimportBatcher struct {
-	mu    sync.Mutex
-	dirs  map[string]bool
-	timer *time.Timer
-	delay time.Duration
-	run   func(dir string) error
+	mu      sync.Mutex
+	dirs    map[string]bool
+	timer   *time.Timer
+	delay   time.Duration
+	run     func(dir string) error
+	version int
 }
 
 func newMDImportBatcher(run func(dir string) error) *mdimportBatcher {
@@ -289,7 +292,8 @@ func (b *mdimportBatcher) Add(dir string) {
 	defer b.mu.Unlock()
 	b.dirs[dir] = true
 	if b.timer == nil {
-		b.timer = time.AfterFunc(b.delay, b.flush)
+		version := b.version
+		b.timer = time.AfterFunc(b.delay, func() { b.flush(version) })
 	}
 }
 
@@ -305,14 +309,21 @@ func (b *mdimportBatcher) Flush() {
 		dirs = append(dirs, dir)
 	}
 	b.dirs = make(map[string]bool)
+	b.version++
 	b.mu.Unlock()
 	for _, dir := range dirs {
 		_ = b.run(dir)
 	}
 }
 
-func (b *mdimportBatcher) flush() {
+func (b *mdimportBatcher) flush(version int) {
 	b.mu.Lock()
+	// If the timer was stopped by Flush() or a newer generation has already
+	// handled these directories, do nothing.
+	if b.timer == nil || version != b.version {
+		b.mu.Unlock()
+		return
+	}
 	dirs := make([]string, 0, len(b.dirs))
 	for dir := range b.dirs {
 		dirs = append(dirs, dir)
