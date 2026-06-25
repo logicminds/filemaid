@@ -218,6 +218,7 @@ func TestApplySkipDisallowedSource(t *testing.T) {
 func TestApplyForcesReviewOnUnsafeDelete(t *testing.T) {
 	tmp := t.TempDir()
 	cfg := testConfig(t, tmp)
+	cfg.MoveFiles = true
 	db := state.NewFake()
 	fs := NewRecordingFS()
 
@@ -378,6 +379,7 @@ func TestApplyRecordsHistory(t *testing.T) {
 func TestApplyDuplicateCoercesDeleteToReview(t *testing.T) {
 	tmp := t.TempDir()
 	cfg := testConfig(t, tmp)
+	cfg.MoveFiles = true
 	db := state.NewFake()
 	fs := NewRecordingFS()
 
@@ -1857,13 +1859,13 @@ func TestApplyNoMoveRenamesInPlace(t *testing.T) {
 	}
 }
 
-func TestApplyReviewAndDeleteIgnoreMoveFiles(t *testing.T) {
+func TestApplyReviewRespectsMoveFiles(t *testing.T) {
 	tmp := t.TempDir()
 	cfg := testConfig(t, tmp)
 	db := state.NewFake()
 	fs := NewRecordingFS()
 
-	// Review decisions always move to the review queue, even when MoveFiles is false.
+	// Review decisions classify in place when MoveFiles is false.
 	srcReview := filepath.Join(tmp, "Desktop", "review.txt")
 	if err := os.MkdirAll(filepath.Dir(srcReview), 0o755); err != nil {
 		t.Fatal(err)
@@ -1876,18 +1878,35 @@ func TestApplyReviewAndDeleteIgnoreMoveFiles(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.HasPrefix(result, cfg.ReviewDir) {
-		t.Errorf("review result = %q, want prefix %q", result, cfg.ReviewDir)
+	if result != srcReview {
+		t.Errorf("review result = %q, want source path %q", result, srcReview)
 	}
-	if _, err := os.Stat(srcReview); !os.IsNotExist(err) {
-		t.Errorf("review source still exists")
+	if _, err := os.Stat(srcReview); err != nil {
+		t.Errorf("review source was moved: %v", err)
 	}
 	recs := db.Records()
-	if len(recs) != 1 || recs[0].Action != "review" {
-		t.Errorf("review record = %+v, want review action", recs)
+	if len(recs) != 1 || recs[0].Action != "classify" {
+		t.Errorf("review record = %+v, want classify action", recs)
 	}
 
-	// Delete decisions for safe patterns always trash, even when MoveFiles is false.
+	// Review decisions move to the review queue when MoveFiles is true.
+	cfgMove := testConfig(t, tmp)
+	cfgMove.MoveFiles = true
+	dbMove := state.NewFake()
+	fsMove := NewRecordingFS()
+	resultMove, err := Apply(decisionReview, srcReview, mustHash(t, srcReview), cfgMove, dbMove, false, fsMove, "", llm.Metrics{}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(resultMove, cfgMove.ReviewDir) {
+		t.Errorf("review move result = %q, want prefix %q", resultMove, cfgMove.ReviewDir)
+	}
+	recsMove := dbMove.Records()
+	if len(recsMove) != 1 || recsMove[0].Action != "review" {
+		t.Errorf("review move record = %+v, want review action", recsMove)
+	}
+
+	// Delete decisions for safe patterns always trash, regardless of MoveFiles.
 	home := filepath.Join(tmp, "home")
 	if err := os.MkdirAll(filepath.Join(home, "Downloads"), 0o755); err != nil {
 		t.Fatal(err)

@@ -167,8 +167,8 @@ func Apply(decision llm.Decision, src string, fileHash string, cfg *config.Confi
 		}
 	}
 
-	// Moving files is opt-in. When disabled, "move" decisions classify in place.
-	if decision.Action == "move" && !cfg.MoveFiles {
+	// Moving files is opt-in. When disabled, relocation decisions classify in place.
+	if !cfg.MoveFiles && (decision.Action == "move" || decision.Action == "review") {
 		decision.Action = "classify"
 	}
 

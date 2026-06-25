@@ -331,6 +331,7 @@ func captureSlog(t *testing.T) *bytes.Buffer {
 func TestProcessPathsFallsBackToReviewOnClassifyError(t *testing.T) {
 	tmp := t.TempDir()
 	cfg = testConfig(tmp)
+	cfg.MoveFiles = true
 	db = state.NewFake()
 	processFS = actions.NewRecordingFS()
 	classifier = &fakeClassifier{err: errors.New("ollama unreachable")}

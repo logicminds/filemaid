@@ -263,8 +263,9 @@ The LLM's reason for the classification is written to the file's Finder comment 
 
 Set `subcategorize_images` to `false` to disable the extra image detail and only receive the top-level category.
 
-- If the model returns a known category and you passed `--move`, the file is moved to the matching folder under `categories`. Without `--move`, the file stays in place and is classified (and renamed if rename is enabled).
-- If the model is unsure, returns an unknown category, or the response cannot be parsed, the file is sent to `~/.filemaid/review/` instead.
+- If you pass `--move`, the file is relocated: known categories go to their folder under `categories`, and uncertain/review items go to `~/.filemaid/review/`.
+- Without `--move`, files are classified in place. Known categories and uncertain items both stay where they are, with Finder tags and comments applied (and a rename if rename is enabled and the LLM suggests one).
+- If the response cannot be parsed or the model is unreachable, filemaid falls back to a review-style classification.
 - The model is only allowed to choose from categories you define. Adding a new category in `config.json` is enough for the model to classify files into it.
 
 To add a new category, add it to the `categories` map in `~/.config/filemaid/config.json`:
