@@ -160,6 +160,7 @@ func TestUniqueDest(t *testing.T) {
 func TestApplyMovesFileToCategory(t *testing.T) {
 	tmp := t.TempDir()
 	cfg := testConfig(t, tmp)
+	cfg.MoveFiles = true
 	db := state.NewFake()
 	fs := NewRecordingFS()
 
@@ -296,6 +297,7 @@ func TestApplyAllowsDeleteForSafePattern(t *testing.T) {
 func TestApplyRedirectsOutsideAllowedDestination(t *testing.T) {
 	tmp := t.TempDir()
 	cfg := testConfig(t, tmp)
+	cfg.MoveFiles = true
 	db := state.NewFake()
 	fs := NewRecordingFS()
 
@@ -320,6 +322,7 @@ func TestApplyRedirectsOutsideAllowedDestination(t *testing.T) {
 func TestApplyDestinationOutsideAllowedRecordsReason(t *testing.T) {
 	tmp := t.TempDir()
 	cfg := testConfig(t, tmp)
+	cfg.MoveFiles = true
 	db := state.NewFake()
 	fs := NewRecordingFS()
 
@@ -344,6 +347,7 @@ func TestApplyDestinationOutsideAllowedRecordsReason(t *testing.T) {
 func TestApplyRecordsHistory(t *testing.T) {
 	tmp := t.TempDir()
 	cfg := testConfig(t, tmp)
+	cfg.MoveFiles = true
 	db := state.NewFake()
 	fs := NewRecordingFS()
 
@@ -428,8 +432,18 @@ func TestApplySetsTags(t *testing.T) {
 	if len(fs.Tags) != 1 {
 		t.Fatalf("tagged %d times, want 1", len(fs.Tags))
 	}
+	if fs.Tags[0].Path != src {
+		t.Errorf("tag path = %q, want %q", fs.Tags[0].Path, src)
+	}
 	if !stringSliceEqual(fs.Tags[0].Tags, []string{"Images", "image", "desktop"}) {
 		t.Errorf("tags = %v, want [Images image desktop]", fs.Tags[0].Tags)
+	}
+	if _, err := os.Stat(src); err != nil {
+		t.Errorf("source file missing: %v", err)
+	}
+	recs := db.Records()
+	if len(recs) != 1 || recs[0].Action != "classify" {
+		t.Errorf("record = %+v, want classify action", recs)
 	}
 }
 
@@ -455,9 +469,19 @@ func TestApplyAddsSubcategoryAsTag(t *testing.T) {
 	if len(fs.Tags) != 1 {
 		t.Fatalf("tagged %d times, want 1", len(fs.Tags))
 	}
+	if fs.Tags[0].Path != src {
+		t.Errorf("tag path = %q, want %q", fs.Tags[0].Path, src)
+	}
 	want := []string{"Images", "cat", "photo"}
 	if !stringSliceEqual(fs.Tags[0].Tags, want) {
 		t.Errorf("tags = %v, want %v", fs.Tags[0].Tags, want)
+	}
+	if _, err := os.Stat(src); err != nil {
+		t.Errorf("source file missing: %v", err)
+	}
+	recs := db.Records()
+	if len(recs) != 1 || recs[0].Action != "classify" {
+		t.Errorf("record = %+v, want classify action", recs)
 	}
 }
 
@@ -483,9 +507,19 @@ func TestApplyDoesNotDuplicateSubcategoryTag(t *testing.T) {
 	if len(fs.Tags) != 1 {
 		t.Fatalf("tagged %d times, want 1", len(fs.Tags))
 	}
+	if fs.Tags[0].Path != src {
+		t.Errorf("tag path = %q, want %q", fs.Tags[0].Path, src)
+	}
 	want := []string{"Images", "cat", "photo"}
 	if !stringSliceEqual(fs.Tags[0].Tags, want) {
 		t.Errorf("tags = %v, want %v", fs.Tags[0].Tags, want)
+	}
+	if _, err := os.Stat(src); err != nil {
+		t.Errorf("source file missing: %v", err)
+	}
+	recs := db.Records()
+	if len(recs) != 1 || recs[0].Action != "classify" {
+		t.Errorf("record = %+v, want classify action", recs)
 	}
 }
 func TestApplyDoesNotDuplicateCategoryTag(t *testing.T) {
@@ -510,9 +544,19 @@ func TestApplyDoesNotDuplicateCategoryTag(t *testing.T) {
 	if len(fs.Tags) != 1 {
 		t.Fatalf("tagged %d times, want 1", len(fs.Tags))
 	}
+	if fs.Tags[0].Path != src {
+		t.Errorf("tag path = %q, want %q", fs.Tags[0].Path, src)
+	}
 	want := []string{"Images", "photo"}
 	if !stringSliceEqual(fs.Tags[0].Tags, want) {
 		t.Errorf("tags = %v, want %v", fs.Tags[0].Tags, want)
+	}
+	if _, err := os.Stat(src); err != nil {
+		t.Errorf("source file missing: %v", err)
+	}
+	recs := db.Records()
+	if len(recs) != 1 || recs[0].Action != "classify" {
+		t.Errorf("record = %+v, want classify action", recs)
 	}
 }
 
@@ -539,9 +583,19 @@ func TestApplyAddsFilemaidTagWhenSmartFoldersEnabled(t *testing.T) {
 	if len(fs.Tags) != 1 {
 		t.Fatalf("tagged %d times, want 1", len(fs.Tags))
 	}
+	if fs.Tags[0].Path != src {
+		t.Errorf("tag path = %q, want %q", fs.Tags[0].Path, src)
+	}
 	want := []string{"filemaid", "Images", "image", "desktop"}
 	if !stringSliceEqual(fs.Tags[0].Tags, want) {
 		t.Errorf("tags = %v, want %v", fs.Tags[0].Tags, want)
+	}
+	if _, err := os.Stat(src); err != nil {
+		t.Errorf("source file missing: %v", err)
+	}
+	recs := db.Records()
+	if len(recs) != 1 || recs[0].Action != "classify" {
+		t.Errorf("record = %+v, want classify action", recs)
 	}
 }
 
@@ -568,9 +622,19 @@ func TestApplyNoFilemaidTagWhenSmartFoldersDisabled(t *testing.T) {
 	if len(fs.Tags) != 1 {
 		t.Fatalf("tagged %d times, want 1", len(fs.Tags))
 	}
+	if fs.Tags[0].Path != src {
+		t.Errorf("tag path = %q, want %q", fs.Tags[0].Path, src)
+	}
 	want := []string{"Images", "image", "desktop"}
 	if !stringSliceEqual(fs.Tags[0].Tags, want) {
 		t.Errorf("tags = %v, want %v", fs.Tags[0].Tags, want)
+	}
+	if _, err := os.Stat(src); err != nil {
+		t.Errorf("source file missing: %v", err)
+	}
+	recs := db.Records()
+	if len(recs) != 1 || recs[0].Action != "classify" {
+		t.Errorf("record = %+v, want classify action", recs)
 	}
 }
 
@@ -597,9 +661,19 @@ func TestApplyOnlyFilemaidTagWhenTagsDisabledButSmartFoldersEnabled(t *testing.T
 	if len(fs.Tags) != 1 {
 		t.Fatalf("tagged %d times, want 1", len(fs.Tags))
 	}
+	if fs.Tags[0].Path != src {
+		t.Errorf("tag path = %q, want %q", fs.Tags[0].Path, src)
+	}
 	want := []string{"filemaid"}
 	if !stringSliceEqual(fs.Tags[0].Tags, want) {
 		t.Errorf("tags = %v, want %v", fs.Tags[0].Tags, want)
+	}
+	if _, err := os.Stat(src); err != nil {
+		t.Errorf("source file missing: %v", err)
+	}
+	recs := db.Records()
+	if len(recs) != 1 || recs[0].Action != "classify" {
+		t.Errorf("record = %+v, want classify action", recs)
 	}
 }
 
@@ -626,9 +700,19 @@ func TestApplyNilTagsDoesNotPanicWithSmartFolders(t *testing.T) {
 	if len(fs.Tags) != 1 {
 		t.Fatalf("tagged %d times, want 1", len(fs.Tags))
 	}
+	if fs.Tags[0].Path != src {
+		t.Errorf("tag path = %q, want %q", fs.Tags[0].Path, src)
+	}
 	want := []string{"filemaid"}
 	if !stringSliceEqual(fs.Tags[0].Tags, want) {
 		t.Errorf("tags = %v, want %v", fs.Tags[0].Tags, want)
+	}
+	if _, err := os.Stat(src); err != nil {
+		t.Errorf("source file missing: %v", err)
+	}
+	recs := db.Records()
+	if len(recs) != 1 || recs[0].Action != "classify" {
+		t.Errorf("record = %+v, want classify action", recs)
 	}
 }
 
@@ -654,8 +738,18 @@ func TestApplySetsFinderComment(t *testing.T) {
 	if len(fs.Comments) != 1 {
 		t.Fatalf("commented %d times, want 1", len(fs.Comments))
 	}
+	if fs.Comments[0].Path != src {
+		t.Errorf("comment path = %q, want %q", fs.Comments[0].Path, src)
+	}
 	if fs.Comments[0].Comment != "simple text file" {
 		t.Errorf("comment = %q, want %q", fs.Comments[0].Comment, "simple text file")
+	}
+	if _, err := os.Stat(src); err != nil {
+		t.Errorf("source file missing: %v", err)
+	}
+	recs := db.Records()
+	if len(recs) != 1 || recs[0].Action != "classify" {
+		t.Errorf("record = %+v, want classify action", recs)
 	}
 }
 
@@ -681,6 +775,13 @@ func TestApplySkipsCommentWhenDisabled(t *testing.T) {
 	if len(fs.Comments) != 0 {
 		t.Errorf("commented %d times, want 0", len(fs.Comments))
 	}
+	if _, err := os.Stat(src); err != nil {
+		t.Errorf("source file missing: %v", err)
+	}
+	recs := db.Records()
+	if len(recs) != 1 || recs[0].Action != "classify" {
+		t.Errorf("record = %+v, want classify action", recs)
+	}
 }
 
 func TestApplySkipsEmptyComment(t *testing.T) {
@@ -704,6 +805,13 @@ func TestApplySkipsEmptyComment(t *testing.T) {
 	}
 	if len(fs.Comments) != 0 {
 		t.Errorf("commented %d times, want 0 for empty reason", len(fs.Comments))
+	}
+	if _, err := os.Stat(src); err != nil {
+		t.Errorf("source file missing: %v", err)
+	}
+	recs := db.Records()
+	if len(recs) != 1 || recs[0].Action != "classify" {
+		t.Errorf("record = %+v, want classify action", recs)
 	}
 }
 
@@ -754,6 +862,7 @@ func TestApplyTrashFailureForcesReview(t *testing.T) {
 func TestApplyMoveFailureReturnsError(t *testing.T) {
 	tmp := t.TempDir()
 	cfg := testConfig(t, tmp)
+	cfg.MoveFiles = true
 	db := state.NewFake()
 	fs := &failingFS{FS: NewRecordingFS(), failMove: true}
 
@@ -783,6 +892,7 @@ func TestApplyMoveFailureReturnsError(t *testing.T) {
 func TestApplySkipsGracefullyWhenFileDisappears(t *testing.T) {
 	tmp := t.TempDir()
 	cfg := testConfig(t, tmp)
+	cfg.MoveFiles = true
 	db := state.NewFake()
 	fs := NewRecordingFS()
 
@@ -1064,6 +1174,7 @@ func (e *exdevFS) Move(src, dest string) error {
 func TestApplyUniqueDestCollision(t *testing.T) {
 	tmp := t.TempDir()
 	cfg := testConfig(t, tmp)
+	cfg.MoveFiles = true
 	db := state.NewFake()
 	fs := NewRecordingFS()
 
@@ -1099,6 +1210,7 @@ func TestApplyUniqueDestCollision(t *testing.T) {
 func TestApplyUnknownCategoryGoesToReview(t *testing.T) {
 	tmp := t.TempDir()
 	cfg := testConfig(t, tmp)
+	cfg.MoveFiles = true
 	db := state.NewFake()
 	fs := NewRecordingFS()
 
@@ -1123,6 +1235,7 @@ func TestApplyUnknownCategoryGoesToReview(t *testing.T) {
 func TestApplyRenameAtLevelGate(t *testing.T) {
 	tmp := t.TempDir()
 	cfg := testConfig(t, tmp)
+	cfg.MoveFiles = true
 	cfg.Rename = true
 	cfg.RenameLevel = 3
 	cfg.RenameMinLength = 5
@@ -1161,6 +1274,7 @@ func TestApplyRenameAtLevelGate(t *testing.T) {
 func TestApplyRenameBelowLevelKeepsOriginal(t *testing.T) {
 	tmp := t.TempDir()
 	cfg := testConfig(t, tmp)
+	cfg.MoveFiles = true
 	cfg.Rename = true
 	cfg.RenameLevel = 4
 	db := state.NewFake()
@@ -1193,6 +1307,7 @@ func TestApplyRenameBelowLevelKeepsOriginal(t *testing.T) {
 func TestApplyRenameCollisionUsesCounterSuffix(t *testing.T) {
 	tmp := t.TempDir()
 	cfg := testConfig(t, tmp)
+	cfg.MoveFiles = true
 	cfg.Rename = true
 	cfg.RenameLevel = 1
 	cfg.RenameMinLength = 1
@@ -1233,6 +1348,7 @@ func TestApplyRenameCollisionUsesCounterSuffix(t *testing.T) {
 func TestApplyRenameInvalidNameKeepsOriginal(t *testing.T) {
 	tmp := t.TempDir()
 	cfg := testConfig(t, tmp)
+	cfg.MoveFiles = true
 	cfg.Rename = true
 	cfg.RenameLevel = 1
 	cfg.RenameInvalidChars = "<>:\"/\\\\|?*"
@@ -1266,6 +1382,7 @@ func TestApplyRenameInvalidNameKeepsOriginal(t *testing.T) {
 func TestApplyDuplicateContentRoutesToReview(t *testing.T) {
 	tmp := t.TempDir()
 	cfg := testConfig(t, tmp)
+	cfg.MoveFiles = true
 	cfg.Rename = true
 	cfg.RenameLevel = 1
 	db := state.NewFake()
@@ -1311,6 +1428,7 @@ func TestApplyDuplicateContentRoutesToReview(t *testing.T) {
 func TestApplySimilarContentRoutesToReview(t *testing.T) {
 	tmp := t.TempDir()
 	cfg := testConfig(t, tmp)
+	cfg.MoveFiles = true
 	cfg.Rename = true
 	cfg.RenameLevel = 1
 	db := state.NewFake()
@@ -1356,6 +1474,7 @@ func TestApplySimilarContentRoutesToReview(t *testing.T) {
 func TestApplyRenameRecordsNamesInHistory(t *testing.T) {
 	tmp := t.TempDir()
 	cfg := testConfig(t, tmp)
+	cfg.MoveFiles = true
 	cfg.Rename = true
 	cfg.RenameLevel = 1
 	cfg.RenameMinLength = 1
@@ -1401,6 +1520,7 @@ func TestApplyRenameRecordsNamesInHistory(t *testing.T) {
 func TestApplyRenameEnforcesMinMaxLength(t *testing.T) {
 	tmp := t.TempDir()
 	cfg := testConfig(t, tmp)
+	cfg.MoveFiles = true
 	cfg.Rename = true
 	cfg.RenameLevel = 1
 	cfg.RenameMinLength = 10
@@ -1482,7 +1602,7 @@ func TestApplyInPlaceRename(t *testing.T) {
 			},
 			wantBase:     "Meeting Notes.txt",
 			wantInSource: true,
-			wantAction:   "move",
+			wantAction:   "classify",
 			wantNewName:  "Meeting Notes.txt",
 		},
 		{
@@ -1499,7 +1619,7 @@ func TestApplyInPlaceRename(t *testing.T) {
 			},
 			wantBase:     "Report 1.txt",
 			wantInSource: true,
-			wantAction:   "move",
+			wantAction:   "classify",
 			wantNewName:  "Report 1.txt",
 		},
 		{
@@ -1515,11 +1635,11 @@ func TestApplyInPlaceRename(t *testing.T) {
 			},
 			wantBase:     "doc.txt",
 			wantInSource: true,
-			wantAction:   "move",
+			wantAction:   "classify",
 			wantNewName:  "doc.txt",
 		},
 		{
-			name:        "normal move unchanged",
+			name:        "rename in place for known category",
 			category:    "Documents",
 			newName:     "Renamed Document.txt",
 			nameQuality: 3,
@@ -1530,12 +1650,12 @@ func TestApplyInPlaceRename(t *testing.T) {
 				return src
 			},
 			wantBase:     "Renamed Document.txt",
-			wantInSource: false,
-			wantAction:   "move",
+			wantInSource: true,
+			wantAction:   "classify",
 			wantNewName:  "Renamed Document.txt",
 		},
 		{
-			name:        "review fallback quality too low",
+			name:        "quality too low keeps original name",
 			category:    "Notes",
 			newName:     "Better Name.txt",
 			nameQuality: 1,
@@ -1546,8 +1666,8 @@ func TestApplyInPlaceRename(t *testing.T) {
 				return src
 			},
 			wantBase:     "doc.txt",
-			wantInSource: false,
-			wantAction:   "review",
+			wantInSource: true,
+			wantAction:   "classify",
 			wantNewName:  "",
 		},
 	}
@@ -1615,6 +1735,195 @@ func TestApplyInPlaceRename(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestApplyDefaultNoMoveClassifiesInPlace(t *testing.T) {
+	tmp := t.TempDir()
+	cfg := testConfig(t, tmp)
+	db := state.NewFake()
+	fs := NewRecordingFS()
+
+	src := filepath.Join(tmp, "Desktop", "img.png")
+	if err := os.MkdirAll(filepath.Dir(src), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(src, []byte("image"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	decision := llm.Decision{Category: "Images", Action: "move", Reason: "png"}
+	result, err := Apply(decision, src, mustHash(t, src), cfg, db, false, fs, "", llm.Metrics{}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result != src {
+		t.Errorf("result = %q, want source %q", result, src)
+	}
+	if _, err := os.Stat(src); err != nil {
+		t.Errorf("source file missing: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(tmp, "Images", "img.png")); err == nil {
+		t.Errorf("file should not have been moved to Images")
+	}
+	recs := db.Records()
+	if len(recs) != 1 || recs[0].Action != "classify" {
+		t.Errorf("record = %+v, want classify action", recs)
+	}
+}
+
+func TestApplyMoveFlagMovesToCategory(t *testing.T) {
+	tmp := t.TempDir()
+	cfg := testConfig(t, tmp)
+	cfg.MoveFiles = true
+	db := state.NewFake()
+	fs := NewRecordingFS()
+
+	src := filepath.Join(tmp, "Desktop", "img.png")
+	if err := os.MkdirAll(filepath.Dir(src), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(src, []byte("image"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	decision := llm.Decision{Category: "Images", Action: "move", Reason: "png"}
+	result, err := Apply(decision, src, mustHash(t, src), cfg, db, false, fs, "", llm.Metrics{}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := filepath.Join(tmp, "Images", "img.png")
+	if result != want {
+		t.Errorf("result = %q, want %q", result, want)
+	}
+	if _, err := os.Stat(want); err != nil {
+		t.Errorf("dest missing: %v", err)
+	}
+	if _, err := os.Stat(src); !os.IsNotExist(err) {
+		t.Errorf("src still exists")
+	}
+	recs := db.Records()
+	if len(recs) != 1 || recs[0].Action != "move" {
+		t.Errorf("record = %+v, want move action", recs)
+	}
+}
+
+func TestApplyNoMoveRenamesInPlace(t *testing.T) {
+	tmp := t.TempDir()
+	cfg := testConfig(t, tmp)
+	cfg.Rename = true
+	cfg.RenameLevel = 1
+	cfg.RenameMinLength = 1
+	cfg.RenameMaxLength = 120
+	cfg.RenameInvalidChars = "<>:\"/\\\\|?*"
+	db := state.NewFake()
+	fs := NewRecordingFS()
+
+	src := filepath.Join(tmp, "Desktop", "doc.txt")
+	if err := os.MkdirAll(filepath.Dir(src), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(src, []byte("doc"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	decision := llm.Decision{
+		Category:    "Documents",
+		Action:      "move",
+		Reason:      "txt",
+		NewName:     "Renamed Document.txt",
+		NameQuality: 1,
+	}
+	result, err := Apply(decision, src, mustHash(t, src), cfg, db, false, fs, "", llm.Metrics{}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := filepath.Join(tmp, "Desktop", "Renamed Document.txt")
+	if result != want {
+		t.Errorf("result = %q, want %q", result, want)
+	}
+	if _, err := os.Stat(want); err != nil {
+		t.Errorf("renamed file missing: %v", err)
+	}
+	if _, err := os.Stat(src); err == nil {
+		t.Errorf("original file still exists")
+	}
+	recs := db.Records()
+	if len(recs) != 1 || recs[0].Action != "classify" {
+		t.Errorf("record = %+v, want classify action", recs)
+	}
+	if recs[0].NewName != "Renamed Document.txt" {
+		t.Errorf("new_name = %q, want %q", recs[0].NewName, "Renamed Document.txt")
+	}
+}
+
+func TestApplyReviewAndDeleteIgnoreMoveFiles(t *testing.T) {
+	tmp := t.TempDir()
+	cfg := testConfig(t, tmp)
+	db := state.NewFake()
+	fs := NewRecordingFS()
+
+	// Review decisions always move to the review queue, even when MoveFiles is false.
+	srcReview := filepath.Join(tmp, "Desktop", "review.txt")
+	if err := os.MkdirAll(filepath.Dir(srcReview), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(srcReview, []byte("review"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	decisionReview := llm.Decision{Category: "Images", Action: "review", Reason: "unsure"}
+	result, err := Apply(decisionReview, srcReview, mustHash(t, srcReview), cfg, db, false, fs, "", llm.Metrics{}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(result, cfg.ReviewDir) {
+		t.Errorf("review result = %q, want prefix %q", result, cfg.ReviewDir)
+	}
+	if _, err := os.Stat(srcReview); !os.IsNotExist(err) {
+		t.Errorf("review source still exists")
+	}
+	recs := db.Records()
+	if len(recs) != 1 || recs[0].Action != "review" {
+		t.Errorf("review record = %+v, want review action", recs)
+	}
+
+	// Delete decisions for safe patterns always trash, even when MoveFiles is false.
+	home := filepath.Join(tmp, "home")
+	if err := os.MkdirAll(filepath.Join(home, "Downloads"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", home)
+	reviewDir := filepath.Join(tmp, "review")
+	if err := os.MkdirAll(reviewDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfgDelete := &config.Config{
+		AllowedDirs:        []string{filepath.Join(home, "Downloads"), reviewDir},
+		ReviewDir:          reviewDir,
+		Categories:         map[string]string{"Unknown": reviewDir},
+		Tags:               false,
+		SafeDeletePatterns: []string{"~/Downloads/*.tmp"},
+	}
+	dbDelete := state.NewFake()
+	fsDelete := NewRecordingFS()
+	srcDelete := filepath.Join(home, "Downloads", "junk.tmp")
+	if err := os.WriteFile(srcDelete, []byte("junk"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	decisionDelete := llm.Decision{Category: "Unknown", Action: "delete", Reason: "temp file"}
+	resultDelete, err := Apply(decisionDelete, srcDelete, mustHash(t, srcDelete), cfgDelete, dbDelete, false, fsDelete, "", llm.Metrics{}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resultDelete != "trash" {
+		t.Errorf("delete result = %q, want trash", resultDelete)
+	}
+	if len(fsDelete.Trashed) != 1 {
+		t.Errorf("trashed %d items, want 1", len(fsDelete.Trashed))
+	}
+	recsDelete := dbDelete.Records()
+	if len(recsDelete) != 1 || recsDelete[0].Action != "delete" {
+		t.Errorf("delete record = %+v, want delete action", recsDelete)
 	}
 }
 

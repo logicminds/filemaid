@@ -157,6 +157,7 @@ func TestProcessPathsSkipsOutsideAllowed(t *testing.T) {
 func TestProcessPathsClassifiesAndApplies(t *testing.T) {
 	tmp := t.TempDir()
 	cfg = testConfig(tmp)
+	cfg.MoveFiles = true
 	db = state.NewFake()
 	processFS = actions.NewRecordingFS()
 	classifier = &fakeClassifier{decision: llm.Decision{
@@ -188,6 +189,7 @@ func TestProcessPathsClassifiesAndApplies(t *testing.T) {
 func TestProcessPathsDuplicateForcesReview(t *testing.T) {
 	tmp := t.TempDir()
 	cfg = testConfig(tmp)
+	cfg.MoveFiles = true
 	db = state.NewFake()
 	processFS = actions.NewRecordingFS()
 	classifier = &fakeClassifier{decision: llm.Decision{
@@ -1072,6 +1074,7 @@ func TestProcessPathsFallsBackToModel(t *testing.T) {
 func TestProcessPathsUsesCachedDecisionWithoutClassifying(t *testing.T) {
 	tmp := t.TempDir()
 	cfg = testConfig(tmp)
+	cfg.MoveFiles = true
 	db = state.NewFake()
 	processFS = actions.NewRecordingFS()
 	fc := &fakeClassifier{decision: llm.Decision{
@@ -1118,6 +1121,7 @@ func TestProcessPathsUsesCachedDecisionWithoutClassifying(t *testing.T) {
 func TestProcessPathsDuplicateSkipsClassification(t *testing.T) {
 	tmp := t.TempDir()
 	cfg = testConfig(tmp)
+	cfg.MoveFiles = true
 	db = state.NewFake()
 	processFS = actions.NewRecordingFS()
 	fc := &fakeClassifier{decision: llm.Decision{
@@ -1167,6 +1171,7 @@ func TestProcessPathsDuplicateWithSafeDeleteStillClassifies(t *testing.T) {
 	tmp := t.TempDir()
 	t.Setenv("HOME", tmp)
 	cfg = testConfig(tmp)
+	cfg.MoveFiles = true
 	cfg.SafeDeletePatterns = []string{"~/Downloads/*.tmp"}
 	db = state.NewFake()
 	processFS = actions.NewRecordingFS()
@@ -1217,6 +1222,7 @@ func TestProcessPathsDuplicateWithSafeDeleteStillClassifies(t *testing.T) {
 func TestProcessPathsCachedDecisionCoercedForDuplicate(t *testing.T) {
 	tmp := t.TempDir()
 	cfg = testConfig(tmp)
+	cfg.MoveFiles = true
 	db = state.NewFake()
 	processFS = actions.NewRecordingFS()
 	fc := &fakeClassifier{decision: llm.Decision{
@@ -1379,6 +1385,54 @@ func TestScanCmdHasRenameFlags(t *testing.T) {
 	}
 }
 
+func TestApplyMoveFlagsOverridesConfig(t *testing.T) {
+	tmp := t.TempDir()
+	cfg = testConfig(tmp)
+	cfg.MoveFiles = false
+
+	cmd := &cobra.Command{Use: "test"}
+	cmd.Flags().BoolVar(&processMove, "move", false, "")
+	processMove = false
+
+	if err := cmd.Flags().Set("move", "true"); err != nil {
+		t.Fatalf("set move flag: %v", err)
+	}
+
+	applyMoveFlags(cmd)
+
+	if !cfg.MoveFiles {
+		t.Errorf("cfg.MoveFiles = %v, want true", cfg.MoveFiles)
+	}
+}
+
+func TestApplyMoveFlagsLeavesDefaultsWhenUnset(t *testing.T) {
+	tmp := t.TempDir()
+	cfg = testConfig(tmp)
+	cfg.MoveFiles = true
+
+	cmd := &cobra.Command{Use: "test"}
+	cmd.Flags().BoolVar(&processMove, "move", false, "")
+	processMove = false
+
+	applyMoveFlags(cmd)
+
+	if !cfg.MoveFiles {
+		t.Errorf("cfg.MoveFiles = %v, want true (config value preserved)", cfg.MoveFiles)
+	}
+}
+
+func TestProcessCmdHasMoveFlag(t *testing.T) {
+	if f := processCmd.Flags().Lookup("move"); f == nil {
+		t.Error("process command missing --move flag")
+	}
+}
+
+func TestScanCmdHasMoveFlag(t *testing.T) {
+	if f := scanCmd.Flags().Lookup("move"); f == nil {
+		t.Error("scan command missing --move flag")
+	}
+}
+
 // blockingHash blocks hash calls until release() is invoked so tests can
 // observe concurrent hashing.
 type blockingHash struct {
@@ -1497,6 +1551,7 @@ func TestScanCmdHasDryRunFlag(t *testing.T) {
 func TestProcessCommandDryRunPreventsMove(t *testing.T) {
 	tmp := t.TempDir()
 	cfg = testConfig(tmp)
+	cfg.MoveFiles = true
 	cfg.Rename = false
 	fakeDB := state.NewFake()
 	db = fakeDB
@@ -1534,6 +1589,7 @@ func TestProcessCommandDryRunPreventsMove(t *testing.T) {
 func TestProcessCommandShowsRename(t *testing.T) {
 	tmp := t.TempDir()
 	cfg = testConfig(tmp)
+	cfg.MoveFiles = true
 	cfg.Rename = true
 	cfg.RenameLevel = 0
 	db = state.NewFake()
@@ -1564,6 +1620,7 @@ func TestProcessCommandShowsRename(t *testing.T) {
 func TestProcessCommandDryRunShowsRename(t *testing.T) {
 	tmp := t.TempDir()
 	cfg = testConfig(tmp)
+	cfg.MoveFiles = true
 	cfg.Rename = true
 	cfg.RenameLevel = 0
 	db = state.NewFake()
@@ -1892,6 +1949,7 @@ func TestProcessCmdHasMoveProjectsFlag(t *testing.T) {
 func TestProcessPathsMoveProjectsWithMarkers(t *testing.T) {
 	tmp := t.TempDir()
 	cfg = testConfig(tmp)
+	cfg.MoveFiles = true
 	cfg.ProjectMarkers = []string{".git"}
 	db = state.NewFake()
 	processFS = actions.NewRecordingFS()
@@ -1941,6 +1999,7 @@ func TestProcessPathsMoveProjectsWithMarkers(t *testing.T) {
 func TestProcessPathsMoveProjectsClassified(t *testing.T) {
 	tmp := t.TempDir()
 	cfg = testConfig(tmp)
+	cfg.MoveFiles = true
 	db = state.NewFake()
 	processFS = actions.NewRecordingFS()
 

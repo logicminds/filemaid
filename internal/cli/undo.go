@@ -100,7 +100,7 @@ func resolveUndoRecords(args []string) ([]state.Record, error) {
 // restoreRecord moves a single history row back to its original path unless
 // safety checks fail or dry-run mode is active.
 func restoreRecord(r state.Record) error {
-	if r.FinalPath == "trash" || r.Action == "undo" {
+	if r.FinalPath == "trash" || r.Action == "undo" || r.Action == "classify" || r.FinalPath == r.OriginalPath {
 		fmt.Fprintf(os.Stderr, "skip %s: %s\n", r.FinalPath, reasonSkip(r))
 		return nil
 	}
@@ -149,6 +149,9 @@ func restoreRecord(r state.Record) error {
 func reasonSkip(r state.Record) string {
 	if r.FinalPath == "trash" {
 		return "trashed items cannot be restored"
+	}
+	if r.Action == "classify" || r.FinalPath == r.OriginalPath {
+		return "file was not moved"
 	}
 	return "already an undo record"
 }

@@ -167,6 +167,11 @@ func Apply(decision llm.Decision, src string, fileHash string, cfg *config.Confi
 		}
 	}
 
+	// Moving files is opt-in. When disabled, "move" decisions classify in place.
+	if decision.Action == "move" && !cfg.MoveFiles {
+		decision.Action = "classify"
+	}
+
 	if decision.Action == "delete" {
 		if err := fs.Trash(src); err != nil {
 			decision.Action = "review"
@@ -199,9 +204,12 @@ func Apply(decision llm.Decision, src string, fileHash string, cfg *config.Confi
 
 	var destDir string
 	var destFileName string
-	inPlace := false
+	noCategory := false
 	if decision.Action == "review" {
 		destDir = filepath.Dir(reviewBase)
+		destFileName = originalName
+	} else if decision.Action == "classify" {
+		destDir = filepath.Dir(src)
 		destFileName = originalName
 	} else if decision.Destination != "" {
 		dest := expandTilde(decision.Destination)
@@ -210,13 +218,10 @@ func Apply(decision llm.Decision, src string, fileHash string, cfg *config.Confi
 	} else if catDir, ok := cfg.Categories[decision.Category]; ok {
 		destDir = expandTilde(catDir)
 		destFileName = originalName
-	} else if decision.Action == "move" {
-		destDir = filepath.Dir(src)
-		destFileName = originalName
-		inPlace = true
 	} else {
 		destDir = filepath.Dir(reviewBase)
 		destFileName = originalName
+		noCategory = true
 	}
 
 	renamedTo := ""
@@ -227,21 +232,21 @@ func Apply(decision llm.Decision, src string, fileHash string, cfg *config.Confi
 		}
 	}
 
-	// In-place rename requires a successful rename; otherwise fall back to review.
-	if inPlace && renamedTo == "" {
+	// A "move" decision with no known category and no valid rename is ambiguous;
+	// fall back to review rather than leaving the file untouched.
+	if decision.Action == "move" && renamedTo == "" && noCategory {
 		destDir = filepath.Dir(reviewBase)
 		destFileName = originalName
 		decision.Action = "review"
-		decision.Reason += "; in-place rename requires a valid new name"
+		decision.Reason += "; no category or valid rename"
 	}
 
 	dest := filepath.Join(destDir, destFileName)
 	if cfg.Rename && renamedTo != "" {
 		// Renamed destinations already resolved collisions with a counter suffix.
-	} else {
+	} else if dest != src {
 		dest = UniqueDest(dest, fs)
 	}
-
 	if len(cfg.AllowedDirs) > 0 && !WithinAllowed(dest, cfg.AllowedDirs) {
 		dest = datedReviewPath(cfg.ReviewDir, originalName)
 		dest = UniqueDest(dest, fs)
@@ -252,11 +257,13 @@ func Apply(decision llm.Decision, src string, fileHash string, cfg *config.Confi
 	if err := fs.MkdirAll(filepath.Dir(dest)); err != nil {
 		return "", fmt.Errorf("mkdir failed: %w", err)
 	}
-	if err := fs.Move(src, dest); err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return fmt.Sprintf("skipped (%s no longer exists)", originalName), nil
+	if dest != src {
+		if err := fs.Move(src, dest); err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				return fmt.Sprintf("skipped (%s no longer exists)", originalName), nil
+			}
+			return "", fmt.Errorf("move failed: %s -> %s: %w", src, dest, err)
 		}
-		return "", fmt.Errorf("move failed: %s -> %s: %w", src, dest, err)
 	}
 
 	var tags []string
@@ -408,12 +415,12 @@ func DestinationDir(decision llm.Decision, src string, cfg *config.Config) strin
 	var destDir string
 	if decision.Action == "review" {
 		destDir = filepath.Dir(reviewBase)
+	} else if decision.Action == "classify" {
+		destDir = filepath.Dir(src)
 	} else if decision.Destination != "" {
 		destDir = filepath.Dir(expandTilde(decision.Destination))
 	} else if catDir, ok := cfg.Categories[decision.Category]; ok {
 		destDir = expandTilde(catDir)
-	} else if decision.Action == "move" {
-		destDir = filepath.Dir(src)
 	} else {
 		destDir = filepath.Dir(reviewBase)
 	}

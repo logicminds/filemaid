@@ -49,6 +49,7 @@ func resetGlobals(t *testing.T) {
 	oldRegistry := cleanerRegistry
 	oldNow := nowFunc
 	oldMoveProjects := moveProjects
+	oldProcessMove := processMove
 
 	t.Cleanup(func() {
 		classifier = oldClassifier
@@ -60,18 +61,19 @@ func resetGlobals(t *testing.T) {
 		cleanerRegistry = oldRegistry
 		nowFunc = oldNow
 		moveProjects = oldMoveProjects
+		processMove = oldProcessMove
 		undoLast = false
 		undoRun = ""
 		undoForce = false
 		undoDryRun = false
 	})
 }
-
 func TestSmokeProcess(t *testing.T) {
 	resetGlobals(t)
 
 	tmp := t.TempDir()
 	cfg = testConfig(tmp)
+	cfg.MoveFiles = true
 	db = state.NewFake()
 	processFS = actions.NewRecordingFS()
 	applyDecision = actions.Apply
@@ -646,6 +648,7 @@ func TestIntegrationProjectDirectoryMoveAndUndo(t *testing.T) {
 
 	tmp := t.TempDir()
 	cfg = testConfig(tmp)
+	cfg.MoveFiles = true
 	db = state.NewFake()
 	processFS = actions.NewRecordingFS()
 	applyDecision = actions.Apply
@@ -787,6 +790,7 @@ func TestIntegrationUndoDryRun(t *testing.T) {
 
 	tmp := t.TempDir()
 	cfg = testConfig(tmp)
+	cfg.MoveFiles = true
 	db = state.NewFake()
 	processFS = actions.NewRecordingFS()
 	applyDirectoryFunc = actions.ApplyDirectory
@@ -846,6 +850,7 @@ func TestIntegrationNonProjectDirectoryProcessesFiles(t *testing.T) {
 	tmp := t.TempDir()
 	cfg = testConfig(tmp)
 	cfg.MinAgeHours = 0
+	cfg.MoveFiles = true
 	db = state.NewFake()
 	processFS = actions.NewRecordingFS()
 	applyDecision = actions.Apply

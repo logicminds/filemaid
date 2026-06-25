@@ -109,6 +109,7 @@ func TestRegenerateSmartFolders_BuildsSavedSearches(t *testing.T) {
 func TestProcessCommand_RegeneratesSmartFoldersAndWarnsOnFailure(t *testing.T) {
 	tmp := t.TempDir()
 	cfg = testConfig(tmp)
+	cfg.MoveFiles = true
 	cfg.SmartFolders = true
 	cfg.SmartFoldersDir = "/dev/null/invalid-smart-folders"
 	db = state.NewFake()
@@ -141,6 +142,7 @@ func TestProcessCommand_RegeneratesSmartFoldersAndWarnsOnFailure(t *testing.T) {
 func TestScanCommand_RegeneratesSmartFoldersAndWarnsOnFailure(t *testing.T) {
 	tmp := t.TempDir()
 	cfg = testConfig(tmp)
+	cfg.MoveFiles = true
 	cfg.SmartFolders = true
 	cfg.SmartFoldersDir = "/dev/null/invalid-smart-folders"
 	db = state.NewFake()

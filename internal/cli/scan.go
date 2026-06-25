@@ -36,6 +36,7 @@ func init() {
 	scanCmd.Flags().Lookup("rename").NoOptDefVal = "default"
 	scanCmd.Flags().BoolVar(&processForce, "force", false, "force processing even if the file is a duplicate or similar to existing history")
 	scanCmd.Flags().BoolVar(&processDryRun, "dry-run", false, "preview changes without moving files")
+	scanCmd.Flags().BoolVar(&processMove, "move", false, "move files to their classified destination")
 	scanCmd.Flags().IntVar(&scanDepth, "depth", 0, "descend into directories N levels (0 = file-only)")
 	scanCmd.Flags().Lookup("depth").NoOptDefVal = "1"
 	scanCmd.Flags().BoolVar(&moveProjects, "move-projects", false, "move recognized project directories as atomic units")
@@ -47,6 +48,7 @@ var scanCmd = &cobra.Command{
 	Short: "Scan watch directories for stale files",
 	RunE: func(cmd *cobra.Command, args []string) error {
 		applyRenameFlags(cmd)
+		applyMoveFlags(cmd)
 		if scanDepth < 0 {
 			return fmt.Errorf("--depth must be >= 0")
 		}
