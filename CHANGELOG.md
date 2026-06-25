@@ -21,7 +21,7 @@ All notable changes to filemaid are documented in this file.
 ### Changed
 
 - `--depth` changed from a boolean flag (`--include-dirs`) to an optional integer (`--depth` = depth 1, `--depth=N` = depth N).
-- **More aggressive rename suggestions** — the classification prompt and tool schema now explicitly tell the model to suggest descriptive `new_name` values for generic, templated, camera-generated, timestamp-only, or non-descriptive filenames (e.g., `IMG_1234.jpg`, `Screenshot 2024-01-01.png`, `Document.pdf`, `scan.pdf`). The model should only keep the current name when it is already specific and search-friendly.
+- **More aggressive rename suggestions** — the classifier now sends its system prompt and tool schema directly in each Ollama `/api/chat` request, so the running binary always controls the instructions instead of relying on the Modelfile created at setup time. The prompt tells the model it MUST provide `new_name`/`name_quality`, includes explicit examples of generic/templated/camera/AI-generated names that must be renamed (e.g., `IMG_1234.jpg`, `Screenshot 2024-01-01.png`, `Document.pdf`, `Gemini_Generated_Image_*.png`), and appends a targeted rename note when the filename matches one of those patterns. If a model provides `new_name` but omits `name_quality`, it now defaults to 1 so `--rename=1` can still accept the suggestion.
 - **Default behavior no longer moves files** — pass `--move` or set `move_files: true` to relocate organized files or send review items to the review queue.
 ### Fixed
 

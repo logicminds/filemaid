@@ -21,6 +21,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"sync"
@@ -52,8 +53,51 @@ type Metrics struct {
 	ContextSize      int     `json:"context_size"`
 }
 
+
+var (
+	imgPattern      = regexp.MustCompile(`^img_\d+`)
+	dscPattern      = regexp.MustCompile(`^dsc_\d+`)
+	pxlPattern      = regexp.MustCompile(`^pxl_\d+`)
+	datePattern     = regexp.MustCompile(`^\d{4}-\d{2}-\d{2}$`)
+	timestampPattern = regexp.MustCompile(`^\d{8}_\d{6}$`)
+)
 // DefaultContextSize is the num_ctx option sent to Ollama for classification.
 const DefaultContextSize = 4096
+// systemPrompt is sent as the system message on every /api/chat request so the
+// classifier instructions always match the running code, regardless of what
+// system prompt was baked into the Ollama Modelfile at setup time.
+const systemPrompt = `You are a macOS file classifier for the filemaid organizer. Your job is to classify files into exactly one category from the user's configured categories, which are provided in each user message along with the file metadata.
+
+Analyze the filename, extension, path, any provided text snippet, and any attached image. Be conservative:
+- Use action "move" when the category is clearly a good fit.
+- Use action "delete" only for obvious trash, installers, or duplicates.
+- Use action "review" when the file is ambiguous, sensitive, personal, or cannot be classified.
+
+When a rename is requested, you MUST always provide new_name and name_quality. If the current filename is already specific, content-descriptive, and search-friendly (e.g., "Q1 Sales Report.pdf", "Invoice - Acme - 2024-03.pdf", "Birthday Party Photo - Sarah.jpg"), set new_name to the current filename and name_quality to 5.
+For generic, templated, camera-generated, timestamp-only, AI-generated, or non-descriptive filenames, suggest a specific, descriptive new_name. Examples of names that MUST be renamed:
+- IMG_1234.jpg, DSC_0001.png, PXL_20240101_000000000.jpg
+- Screenshot 2024-01-01.png, Screen Shot 2024-01-01 at 12.00.00 AM.png
+- Document.pdf, scan.pdf, image.png, file.jpg, download.pdf, Download (1).zip
+- 2024-01-01.pdf, 20240101_120000.png, Untitled.png
+- Gemini_Generated_Image_s5a4vcs5a4vcs5a4.png, DALL-EGeneratedImage.png, Midjourney image.png
+
+The new filename must preserve the original extension.
+
+Output a single valid JSON object and nothing else. Do not use markdown code fences, explanations, or extra text.
+
+Required JSON schema:
+{
+  "category": "...",
+  "subcategory": "...",
+  "tags": ["..."],
+  "action": "move|delete|review",
+  "destination": "",
+  "reason": "...",
+  "new_name": "...",
+  "name_quality": 3
+}
+
+Leave destination empty. Provide 1-3 concise Finder tags. Keep the reason brief.`
 
 // NewDecision returns a Decision with the required default values.
 func NewDecision() Decision {
@@ -635,8 +679,8 @@ File:
 Return a single compact JSON object and nothing else. Leave destination empty.
 
 Rename guidance:
-- If the current filename is generic, templated, camera-generated, timestamp-only, or does not describe the content, ALWAYS suggest a specific, descriptive new_name (preserve the original extension). Examples of names that MUST be renamed: "IMG_1234.jpg", "Screenshot 2024-01-01.png", "Document.pdf", "scan.pdf", "image.png", "file.jpg", "Download (1).zip", "2024-01-01.pdf", "Untitled.png".
-- Only omit new_name when the current filename is already specific, content-descriptive, and search-friendly (e.g., "Q1 Sales Report.pdf", "Birthday Party Photo - Sarah.jpg", "Invoice - Acme - 2024-03.pdf").
+- You MUST always provide new_name and name_quality. If the current filename is already specific, content-descriptive, and search-friendly (e.g., "Q1 Sales Report.pdf", "Invoice - Acme - 2024-03.pdf", "Birthday Party Photo - Sarah.jpg"), set new_name to the current filename and name_quality to 5.
+- For generic, templated, camera-generated, timestamp-only, AI-generated, or non-descriptive filenames, suggest a specific, descriptive new_name (preserve the original extension). Examples of names that MUST be renamed: "IMG_1234.jpg", "DSC_0001.png", "PXL_20240101_000000000.jpg", "Screenshot 2024-01-01.png", "Screen Shot 2024-01-01 at 12.00.00 AM.png", "Document.pdf", "scan.pdf", "image.png", "file.jpg", "download.pdf", "Download (1).zip", "2024-01-01.pdf", "20240101_120000.png", "Untitled.png", "Gemini_Generated_Image_s5a4vcs5a4vcs5a4.png", "DALL-EGeneratedImage.png", "Midjourney image.png".
 - Rate name_quality 1-5 based on how clearly better the suggested name is than the current name.
 
 {"category": "...", "subcategory": "...", "tags": ["..."], "action": "...", "destination": "", "reason": "...", "new_name": "...", "name_quality": 3}`
@@ -821,6 +865,10 @@ func buildPrompt(path string, cfg *config.Config, dirCtx *directory.Context) (st
 	} else if textExts[ext] {
 		snippet := readTextSnippet(path, 2048)
 		extras = append(extras, fmt.Sprintf("First 2048 bytes:\n%s", snippet))
+	}
+
+	if note := renameNote(filepath.Base(path)); note != "" {
+		extras = append(extras, note)
 	}
 
 	prompt := fmt.Sprintf(
@@ -1120,10 +1168,9 @@ func (c *Client) requestGenerate(ctx context.Context, ollamaURL, model, prompt s
 
 func (c *Client) requestChat(ctx context.Context, ollamaURL, model, prompt string, images []string, categories map[string]bool, timeout time.Duration) (chatResponse, error) {
 	var resp chatResponse
-	// requestChat intentionally sends only a user message. The model's
-	// Modelfile supplies the full classifier SYSTEM prompt, and a request-level
-	// system message would override it. The user message carries dynamic data:
-	// the configured category list, per-file metadata, and optional snippet/image.
+	// systemPrompt is sent as a request-level system message so classification
+	// instructions always match the running code, overriding any system prompt
+	// baked into the Ollama Modelfile at setup time.
 	catList := make([]string, 0, len(categories))
 	for k := range categories {
 		catList = append(catList, k)
@@ -1132,6 +1179,10 @@ func (c *Client) requestChat(ctx context.Context, ollamaURL, model, prompt strin
 	body := map[string]any{
 		"model": model,
 		"messages": []map[string]any{
+			{
+				"role":    "system",
+				"content": systemPrompt,
+			},
 			{
 				"role":    "user",
 				"content": prompt,
@@ -1189,7 +1240,7 @@ func toolSchema(categories []string) map[string]any {
 						"description": "Quality rating of the suggested new_name from 1 (poor suggestion) to 5 (excellent suggestion); higher values mean the suggested name is more clearly better than the current name",
 					},
 				},
-				"required": []string{"category", "tags", "action", "reason"},
+				"required": []string{"category", "tags", "action", "reason", "new_name", "name_quality"},
 			},
 		},
 	}
@@ -1265,6 +1316,7 @@ func parseResponse(resp chatResponse, categories map[string]bool, path string) (
 			return buildDecision(args, categories, "", path), true
 		}
 	}
+
 
 	// Some models return raw JSON in the assistant message content
 	// instead of using tool_calls. Try to extract JSON from there as a
@@ -1410,10 +1462,16 @@ func buildDecision(m map[string]any, categories map[string]bool, destination, pa
 			q = 5
 		}
 		d.NameQuality = q
+	} else if d.NewName != "" {
+		// Models sometimes omit name_quality even when they provide a new_name.
+		// Default to the minimum accepted quality so the rename threshold can
+		// still apply.
+		d.NameQuality = 1
 	}
 
 	return d
 }
+
 
 // validateNewName ensures the suggested filename preserves the original file
 // extension. If the LLM changes the extension or omits it, the original
@@ -1434,6 +1492,47 @@ func validateNewName(path, name string) string {
 	return name
 }
 
+// renameNote returns a strong instruction to rename when filename matches
+// common generic/templated/AI-generated patterns. It is appended to the user
+// prompt as an extra nudge for models that otherwise keep these names.
+func renameNote(name string) string {
+	base := strings.TrimSpace(name)
+	ext := filepath.Ext(base)
+	stem := strings.TrimSuffix(base, ext)
+	lower := strings.ToLower(base)
+	lowerStem := strings.ToLower(stem)
+
+	generic := false
+	switch {
+	case imgPattern.MatchString(lower):
+		generic = true
+	case dscPattern.MatchString(lower):
+		generic = true
+	case pxlPattern.MatchString(lower):
+		generic = true
+	case strings.HasPrefix(lower, "screenshot "):
+		generic = true
+	case strings.HasPrefix(lower, "screen shot "):
+		generic = true
+	case lower == "document"+ext, lower == "scan"+ext, lower == "image"+ext, lower == "file"+ext, lower == "download"+ext, lower == "untitled"+ext:
+		generic = true
+	case strings.HasPrefix(lower, "download ("):
+		generic = true
+	case datePattern.MatchString(lowerStem), timestampPattern.MatchString(lowerStem):
+		generic = true
+	case strings.HasPrefix(lower, "gemini_generated_image_"):
+		generic = true
+	case strings.HasPrefix(lower, "dall-e"):
+		generic = true
+	case strings.HasPrefix(lower, "midjourney"):
+		generic = true
+	}
+
+	if !generic {
+		return ""
+	}
+	return fmt.Sprintf("NOTE: The filename %q is generic/templated/AI-generated. You MUST suggest a descriptive new_name (keep extension %s) instead of keeping this name.", base, ext)
+}
 func stringField(m map[string]any, key string) (string, bool) {
 	v, ok := m[key]
 	if !ok {

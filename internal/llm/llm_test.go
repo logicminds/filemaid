@@ -443,8 +443,67 @@ func TestPromptIncludesRenameFields(t *testing.T) {
 	if !strings.Contains(prompt, "name_quality") {
 		t.Error("prompt missing name_quality")
 	}
-	if !strings.Contains(prompt, "preserve the original extension") {
+	if !strings.Contains(prompt, "must preserve the original extension") && !strings.Contains(prompt, "preserve the original extension") {
 		t.Error("prompt missing extension preservation instruction")
+	}
+}
+
+func TestRenameNoteDetectsGenericFilenames(t *testing.T) {
+	cases := []struct {
+		name     string
+		generic  bool
+		contains string
+	}{
+		{"IMG_1234.png", true, "IMG_1234.png"},
+		{"DSC_0001.png", true, "DSC_0001.png"},
+		{"PXL_20240101_000000000.jpg", true, "PXL_20240101_000000000.jpg"},
+		{"Screenshot 2024-01-01.png", true, "Screenshot 2024-01-01.png"},
+		{"Document.pdf", true, "Document.pdf"},
+		{"scan.pdf", true, "scan.pdf"},
+		{"Download (1).zip", true, "Download (1).zip"},
+		{"2024-01-01.pdf", true, "2024-01-01.pdf"},
+		{"20240101_120000.png", true, "20240101_120000.png"},
+		{"Untitled.png", true, "Untitled.png"},
+		{"Gemini_Generated_Image_s5a4vcs5a4vcs5a4.png", true, "Gemini_Generated_Image_s5a4vcs5a4vcs5a4.png"},
+		{"DALL-EGeneratedImage.png", true, "DALL-EGeneratedImage.png"},
+		{"Midjourney image.png", true, "Midjourney image.png"},
+		{"Q1 Sales Report.pdf", false, ""},
+		{"Invoice - Acme - 2024-03.pdf", false, ""},
+		{"Birthday Party Photo - Sarah.jpg", false, ""},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := renameNote(tc.name)
+			if tc.generic && got == "" {
+				t.Errorf("expected generic note for %q, got empty", tc.name)
+			}
+			if !tc.generic && got != "" {
+				t.Errorf("expected no note for %q, got %q", tc.name, got)
+			}
+			if tc.contains != "" && !strings.Contains(got, tc.contains) {
+				t.Errorf("note %q missing expected substring %q", got, tc.contains)
+			}
+		})
+	}
+}
+
+func TestBuildPromptIncludesRenameNoteForGenericNames(t *testing.T) {
+	tmp := t.TempDir()
+	cfg := baseConfig(t, tmp)
+	path := filepath.Join(tmp, "IMG_1234.jpg")
+	if err := os.WriteFile(path, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	prompt, _, err := buildPrompt(path, cfg, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(prompt, "is generic/templated/AI-generated") {
+		t.Error("prompt missing generic filename rename note")
+	}
+	if !strings.Contains(prompt, "You MUST suggest a descriptive new_name") {
+		t.Error("prompt missing mandatory rename instruction")
 	}
 }
 
@@ -1030,6 +1089,67 @@ func TestClassifyUsesChatEndpoint(t *testing.T) {
 	}
 	if !strings.HasSuffix(calledURL, "/api/chat") {
 		t.Errorf("URL = %q, want /api/chat suffix", calledURL)
+	}
+}
+
+func TestClassifySendsSystemPrompt(t *testing.T) {
+	tmp := t.TempDir()
+	cfg := baseConfig(t, tmp)
+	textFile := filepath.Join(tmp, "doc.txt")
+	if err := os.WriteFile(textFile, []byte("hello"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var body map[string]any
+	transport := &fakeTransport{
+		handler: func(req *http.Request) (*http.Response, error) {
+			if strings.HasSuffix(req.URL.String(), "/api/tags") {
+				return modelListResponse(cfg.Model), nil
+			}
+			if err := json.NewDecoder(req.Body).Decode(&body); err != nil {
+				t.Errorf("decode request body: %v", err)
+			}
+			return jsonResponse(map[string]any{
+				"message": map[string]any{
+					"tool_calls": []any{
+						map[string]any{
+							"function": map[string]any{
+								"arguments": map[string]any{
+									"category": "Documents",
+									"tags":     []any{"doc"},
+									"action":   "move",
+									"reason":   "text document",
+								},
+							},
+						},
+					},
+				},
+			}), nil
+		},
+	}
+
+	client := NewClient(transport)
+	if _, _, err := client.Classify(context.Background(), textFile, "", cfg, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	msgs, ok := body["messages"].([]any)
+	if !ok || len(msgs) == 0 {
+		t.Fatalf("messages missing or empty: %v", body["messages"])
+	}
+	sys, ok := msgs[0].(map[string]any)
+	if !ok {
+		t.Fatalf("first message is not an object: %T", msgs[0])
+	}
+	if sys["role"] != "system" {
+		t.Errorf("first message role = %q, want system", sys["role"])
+	}
+	content, _ := sys["content"].(string)
+	if !strings.Contains(content, "MUST always provide new_name") {
+		t.Error("system prompt missing rename guidance")
+	}
+	if !strings.Contains(content, "Gemini_Generated_Image") {
+		t.Error("system prompt missing AI-generated filename examples")
 	}
 }
 
