@@ -21,6 +21,7 @@ All notable changes to filemaid are documented in this file.
 ### Changed
 
 - `--depth` changed from a boolean flag (`--include-dirs`) to an optional integer (`--depth` = depth 1, `--depth=N` = depth N).
+- **More aggressive rename suggestions** — the classification prompt and tool schema now explicitly tell the model to suggest descriptive `new_name` values for generic, templated, camera-generated, timestamp-only, or non-descriptive filenames (e.g., `IMG_1234.jpg`, `Screenshot 2024-01-01.png`, `Document.pdf`, `scan.pdf`). The model should only keep the current name when it is already specific and search-friendly.
 - **Default behavior no longer moves files** — pass `--move` or set `move_files: true` to relocate organized files or send review items to the review queue.
 ### Fixed
 

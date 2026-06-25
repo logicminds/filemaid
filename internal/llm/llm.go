@@ -632,7 +632,13 @@ File:
 - modified: %s
 %s
 
-Return a single compact JSON object and nothing else. Leave destination empty. If the current filename is poor or misleading, suggest a better one in "new_name" (preserve the original extension) and rate the quality of that suggestion in "name_quality" (integer 1-5, where 5 is excellent). Omit new_name when the current name is already good.
+Return a single compact JSON object and nothing else. Leave destination empty.
+
+Rename guidance:
+- If the current filename is generic, templated, camera-generated, timestamp-only, or does not describe the content, ALWAYS suggest a specific, descriptive new_name (preserve the original extension). Examples of names that MUST be renamed: "IMG_1234.jpg", "Screenshot 2024-01-01.png", "Document.pdf", "scan.pdf", "image.png", "file.jpg", "Download (1).zip", "2024-01-01.pdf", "Untitled.png".
+- Only omit new_name when the current filename is already specific, content-descriptive, and search-friendly (e.g., "Q1 Sales Report.pdf", "Birthday Party Photo - Sarah.jpg", "Invoice - Acme - 2024-03.pdf").
+- Rate name_quality 1-5 based on how clearly better the suggested name is than the current name.
+
 {"category": "...", "subcategory": "...", "tags": ["..."], "action": "...", "destination": "", "reason": "...", "new_name": "...", "name_quality": 3}`
 
 const subcategoryInstructions = `For image files, also provide a concise subcategory describing the main subject or scene (e.g., cat, dog, baby, kid, woman, wedding, car, nature, food, selfie, document-photo). For screenshots, describe the app or context (e.g., Safari, Terminal, Slack, VS Code: browser, lock-screen, menu-bar). The subcategory will be added as a Finder tag.`
@@ -1172,15 +1178,9 @@ func toolSchema(categories []string) map[string]any {
 						"type":  "array",
 						"items": map[string]any{"type": "string"},
 					},
-					"action": map[string]any{
-						"type":        "string",
-						"enum":        []string{"move", "delete", "review"},
-						"description": "move = clearly classifiable, delete = obvious trash/duplicate, review = ambiguous/sensitive/unknown",
-					},
-					"reason": map[string]any{"type": "string"},
 					"new_name": map[string]any{
 						"type":        "string",
-						"description": "Suggested new filename; must preserve the original file extension",
+						"description": "Suggested new filename; must preserve the original file extension. Provide a specific, descriptive name for generic, templated, camera-generated, timestamp-only, or non-descriptive filenames (e.g., IMG_1234.jpg, Screenshot 2024-01-01.png, Document.pdf, scan.pdf, Download (1).zip). Only omit new_name when the current filename is already specific, content-descriptive, and search-friendly.",
 					},
 					"name_quality": map[string]any{
 						"type":        "integer",

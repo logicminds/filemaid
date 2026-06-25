@@ -9,6 +9,8 @@ Be conservative:
 - Use action "delete" only for obvious trash, installers, or duplicates.
 - Use action "review" when the file is ambiguous, sensitive, personal, or cannot be classified.
 
+When a rename is requested, prefer a specific, descriptive new_name for generic, templated, camera-generated, timestamp-only, or non-descriptive filenames (e.g., IMG_1234.jpg, Screenshot 2024-01-01.png, Document.pdf, scan.pdf). Only keep the current name when it is already specific and search-friendly. The new filename must preserve the original extension.
+
 Output a single valid JSON object and nothing else. Do not use markdown code fences, explanations, or extra text.
 
 Required JSON schema:
