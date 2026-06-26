@@ -53,16 +53,17 @@ type Metrics struct {
 	ContextSize      int     `json:"context_size"`
 }
 
-
 var (
-	imgPattern      = regexp.MustCompile(`^img_\d+`)
-	dscPattern      = regexp.MustCompile(`^dsc_\d+`)
-	pxlPattern      = regexp.MustCompile(`^pxl_\d+`)
-	datePattern     = regexp.MustCompile(`^\d{4}-\d{2}-\d{2}$`)
+	imgPattern       = regexp.MustCompile(`^img_\d+`)
+	dscPattern       = regexp.MustCompile(`^dsc_\d+`)
+	pxlPattern       = regexp.MustCompile(`^pxl_\d+`)
+	datePattern      = regexp.MustCompile(`^\d{4}-\d{2}-\d{2}$`)
 	timestampPattern = regexp.MustCompile(`^\d{8}_\d{6}$`)
 )
+
 // DefaultContextSize is the num_ctx option sent to Ollama for classification.
 const DefaultContextSize = 4096
+
 // systemPrompt is sent as the system message on every /api/chat request so the
 // classifier instructions always match the running code, regardless of what
 // system prompt was baked into the Ollama Modelfile at setup time.
@@ -1317,7 +1318,6 @@ func parseResponse(resp chatResponse, categories map[string]bool, path string) (
 		}
 	}
 
-
 	// Some models return raw JSON in the assistant message content
 	// instead of using tool_calls. Try to extract JSON from there as a
 	// fallback before falling back to the legacy /api/generate response.
@@ -1471,7 +1471,6 @@ func buildDecision(m map[string]any, categories map[string]bool, destination, pa
 
 	return d
 }
-
 
 // validateNewName ensures the suggested filename preserves the original file
 // extension. If the LLM changes the extension or omits it, the original
