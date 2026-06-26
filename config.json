@@ -41,7 +41,7 @@
   "smart_folders": true,
   "smart_folders_dir": "~/Documents/Filemaid",
   "min_age_hours": 0,
-  "request_timeout": "120s",
+  "request_timeout": "5m",
   "llm_retry_attempts": 2,
   "llm_retry_base_delay": "2s",
   "categories": {
@@ -107,6 +107,6 @@
   "external_tools": {
     "ffmpeg": "ffmpeg"
   },
-  "process_workers": 4,
+  "process_workers": 1,
   "max_image_dimension": 1024
 }
