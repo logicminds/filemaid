@@ -21,6 +21,7 @@ import (
 func TestScanDirProcessesFiles(t *testing.T) {
 	tmp := t.TempDir()
 	cfg = testConfig(tmp)
+	cfg.MoveFiles = true
 	db = state.NewFake()
 	processFS = actions.NewRecordingFS()
 	classifier = &fakeClassifier{decision: llm.Decision{
@@ -119,6 +120,7 @@ func TestScanCommandFailsValidationBeforeScanning(t *testing.T) {
 func TestScanCommandSucceedsWhenValidationPasses(t *testing.T) {
 	tmp := t.TempDir()
 	cfg = testConfig(tmp)
+	cfg.MoveFiles = true
 	db = state.NewFake()
 	processFS = actions.NewRecordingFS()
 
@@ -577,6 +579,11 @@ func TestScanCmdHasMoveProjectsFlag(t *testing.T) {
 		t.Fatal("expected --move-projects flag on scan command")
 	}
 }
+func TestScanCmdMoveFlagExists(t *testing.T) {
+	if scanCmd.Flags().Lookup("move") == nil {
+		t.Fatal("expected --move flag on scan command")
+	}
+}
 
 func TestScanMoveProjectsStopsAtProjectMarkerDir(t *testing.T) {
 	tmp := t.TempDir()
@@ -733,6 +740,7 @@ func TestScanWithoutMoveProjectsRecursesIntoNonMarkerDir(t *testing.T) {
 func TestScanMoveProjectsMovesProjectDirWhole(t *testing.T) {
 	tmp := t.TempDir()
 	cfg = testConfig(tmp)
+	cfg.MoveFiles = true
 	cfg.ProjectMarkers = []string{".git"}
 	db = state.NewFake()
 	processFS = actions.NewRecordingFS()

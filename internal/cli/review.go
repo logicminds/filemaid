@@ -178,7 +178,9 @@ func reviewApprovePath(reviewDir, rel string) error {
 		NewName:     rec.NewName,
 		NameQuality: nameQuality,
 	}
-	_, err = actions.Apply(decision, rec.FinalPath, rec.SHA256, cfg, db, false, reviewFS, "", llm.Metrics{}, false)
+	approveCfg := *cfg
+	approveCfg.MoveFiles = true
+	_, err = actions.Apply(decision, rec.FinalPath, rec.SHA256, &approveCfg, db, false, reviewFS, "", llm.Metrics{}, false)
 	if err != nil {
 		return fmt.Errorf("approve failed: %w", err)
 	}
@@ -241,9 +243,14 @@ func applyReviewRenameFlags(cmd *cobra.Command) {
 
 // reviewRetryItems re-processes review-queue items whose stored reason
 // indicates a transient LLM failure. Items that still fail or land in review
-// for a non-transient reason remain in the review queue.
 func reviewRetryItems(cmd *cobra.Command) error {
 	applyReviewRenameFlags(cmd)
+
+	// Retry is an explicit re-evaluation of review items; allow moves so
+	// successful retries leave the review queue.
+	oldMoveFiles := cfg.MoveFiles
+	cfg.MoveFiles = true
+	defer func() { cfg.MoveFiles = oldMoveFiles }()
 
 	if err := classifier.Validate(cfg); err != nil {
 		return fmt.Errorf("model validation failed: %w", err)

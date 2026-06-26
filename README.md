@@ -138,7 +138,11 @@ For instant per-file processing without background agents, use the Shortcuts fol
 
 ```zsh
 # Process files manually (human-readable list output is default)
+# Without --move, files are classified/renamed in place; pass --move to relocate them.
 filemaid process ~/Desktop/Screenshot*.png ~/Downloads/receipt.pdf
+
+# Process files and move them to classified archive folders
+filemaid process --move ~/Desktop/Screenshot*.png ~/Downloads/receipt.pdf
 
 # Process files as a table
 filemaid process --format table ~/Desktop/Screenshot*.png
@@ -152,6 +156,9 @@ filemaid process --quiet ~/Desktop/Screenshot*.png ~/Downloads/receipt.pdf
 # Scan watch directories
 filemaid scan
 
+# Scan and move files to their archive categories
+filemaid scan --move
+
 # Scan a single directory
 filemaid scan --dir ~/Downloads
 
@@ -164,12 +171,12 @@ filemaid process --rename=3 ~/Desktop/*.pdf
 # Force processing even if a file looks like a duplicate or similar to history
 filemaid process --force ~/Desktop/*.png
 
-# Preview renames without moving files
+# Preview renames and destinations without moving files
 filemaid process --dry-run ~/Desktop/*.png
 
-# Scan with rename preview
-filemaid scan --dry-run
-
+# Scan with move preview
+filemaid scan --move --dry-run
+```
 # Run cleaners in dry-run mode
 filemaid cleanup --dry-run
 
@@ -256,8 +263,9 @@ The LLM's reason for the classification is written to the file's Finder comment 
 
 Set `subcategorize_images` to `false` to disable the extra image detail and only receive the top-level category.
 
-- If the model returns a known category, the file is moved to the matching folder under `categories`.
-- If the model is unsure, returns an unknown category, or the response cannot be parsed, the file is sent to `~/.filemaid/review/` instead.
+- If you pass `--move`, the file is relocated: known categories go to their folder under `categories`, and uncertain/review items go to `~/.filemaid/review/`.
+- Without `--move`, files are classified in place. Known categories and uncertain items both stay where they are, with Finder tags and comments applied (and a rename if rename is enabled and the LLM suggests one).
+- If the response cannot be parsed or the model is unreachable, filemaid falls back to a review-style classification.
 - The model is only allowed to choose from categories you define. Adding a new category in `config.json` is enough for the model to classify files into it.
 
 To add a new category, add it to the `categories` map in `~/.config/filemaid/config.json`:
@@ -360,6 +368,7 @@ The generated configuration is written to `~/.config/filemaid/config.json` and c
   "rename_av_similarity_threshold": 0.90,
   "_ffmpeg_note": "rename_use_ffmpeg enables audio/video fingerprinting via ffmpeg. This improves duplicate/near-duplicate detection but can be slow for large media libraries.",
   "rename_use_ffmpeg": false,
+  "move_files": false,
   "external_tools": {
     "ffmpeg": "ffmpeg"
   },
@@ -390,6 +399,7 @@ The generated configuration is written to `~/.config/filemaid/config.json` and c
 | `min_age_hours` | Minimum file age before processing (0 = process immediately). |
 | `request_timeout` | Per-request timeout for Ollama calls (e.g. `120s`, `2m`). |
 | `categories` | Destination folders for each classification. The model may only return categories defined here. |
+| `move_files` | When `true`, `process`/`scan` move files to their classified category. Defaults to `false`; use `--move` to enable per-run. |
 | `safe_delete_patterns` | Glob patterns for files allowed to be deleted without review. |
 | `age_rules` | Patterns + age that force a specific action, e.g. old `.dmg` installers become `review`. |
 | `dev_cleanup` | Per-cleaner enable/disable and mode (`safe` is the only mode currently). |

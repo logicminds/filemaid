@@ -155,6 +155,7 @@ func TestReviewApproveMovesFile(t *testing.T) {
 		ReviewDir:   reviewDir,
 		AllowedDirs: []string{tmp},
 		Categories:  map[string]string{"Images": archiveDir},
+		MoveFiles:   true,
 	}
 	reviewFS = actions.NewRecordingFS()
 
@@ -200,6 +201,7 @@ func TestReviewRejectTrashesFile(t *testing.T) {
 func TestReviewRetryReprocessesTransientFailures(t *testing.T) {
 	tmp := t.TempDir()
 	cfg = testConfig(tmp)
+	cfg.MoveFiles = true
 	db = state.NewFake()
 	processFS = actions.NewRecordingFS()
 	classifier = &fakeClassifier{decision: llm.Decision{

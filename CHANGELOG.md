@@ -15,12 +15,14 @@ All notable changes to filemaid are documented in this file.
 - **Bounded directory metadata gathering** — `internal/directory.Gather` produces a capped snapshot of immediate children, extension counts, and detected markers; `.app` bundles are treated as opaque directories.
 - **Directory-specific LLM classifier** — new `DirectoryDecision` type and `ClassifyDirectory` method return `keep|review|trash|archive` recommendations; cached in a dedicated SQLite table keyed by content digest.
 - **Directory context in file prompts** — files discovered inside descended directories include ancestor path, depth, and detected project marker in the classification prompt; cache keys incorporate context.
-- **In-place file renaming** — files inside project-marker directories can be renamed within their source directory when the LLM suggests a better name and rename is enabled.
 - **Updated output formatters** — table/human/JSON output distinguishes directory rows with `dir:`/`[dir]` markers and recommendations, and in-place renames are labeled with the new absolute path; summary counts split files and directories.
+- **`--move` flag for `process` and `scan`** — moving files to their classified archive folder or review queue is now opt-in. Without `--move`, filemaid classifies, tags, and (optionally) renames files in place, including items the model marks for review. Use `--move` per run or set `move_files: true` in `config.json` to restore the previous relocate-by-default behavior.
+
 ### Changed
 
 - `--depth` changed from a boolean flag (`--include-dirs`) to an optional integer (`--depth` = depth 1, `--depth=N` = depth N).
-
+- **More aggressive rename suggestions** — the classifier now sends its system prompt and tool schema directly in each Ollama `/api/chat` request, so the running binary always controls the instructions instead of relying on the Modelfile created at setup time. The prompt tells the model it MUST provide `new_name`/`name_quality`, includes explicit examples of generic/templated/camera/AI-generated names that must be renamed (e.g., `IMG_1234.jpg`, `Screenshot 2024-01-01.png`, `Document.pdf`, `Gemini_Generated_Image_*.png`), and appends a targeted rename note when the filename matches one of those patterns. If a model provides `new_name` but omits `name_quality`, it now defaults to 1 so `--rename=1` can still accept the suggestion.
+- **Default behavior no longer moves files** — pass `--move` or set `move_files: true` to relocate organized files or send review items to the review queue.
 ### Fixed
 
 - **Transient LLM errors are no longer cached.** A timeout or unreachable Ollama previously wrote an "ollama error: ..." decision to the per-file cache, causing the same file to land in review forever on retry. Error decisions are now skipped so the next run can retry classification.

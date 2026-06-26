@@ -40,6 +40,7 @@ func TestHistoryCommandReturnsRows(t *testing.T) {
 
 	tmp := t.TempDir()
 	cfg = testConfig(tmp)
+	cfg.MoveFiles = true
 	db = state.NewFake()
 	processFS = actions.NewRecordingFS()
 	classifier = &fakeClassifier{decision: llm.Decision{
@@ -68,6 +69,7 @@ func TestHistoryCommandLastFilter(t *testing.T) {
 
 	tmp := t.TempDir()
 	cfg = testConfig(tmp)
+	cfg.MoveFiles = true
 	db = state.NewFake()
 	processFS = actions.NewRecordingFS()
 	classifier = &fakeClassifier{decision: llm.Decision{
@@ -100,6 +102,7 @@ func TestHistoryCommandJSON(t *testing.T) {
 
 	tmp := t.TempDir()
 	cfg = testConfig(tmp)
+	cfg.MoveFiles = true
 	db = state.NewFake()
 	processFS = actions.NewRecordingFS()
 	classifier = &fakeClassifier{decision: llm.Decision{

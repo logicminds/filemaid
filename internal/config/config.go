@@ -76,6 +76,7 @@ type Config struct {
 	RenameImageSimilarityThreshold float64                  `json:"rename_image_similarity_threshold"`
 	RenameAVSimilarityThreshold    float64                  `json:"rename_av_similarity_threshold"`
 	RenameUseFFmpeg                bool                     `json:"rename_use_ffmpeg"`
+	MoveFiles                      bool                     `json:"move_files"`
 	Force                          bool                     `json:"force"`
 	ProcessWorkers                 int                      `json:"process_workers"`
 	MaxImageDimension              int                      `json:"max_image_dimension"`
@@ -163,6 +164,7 @@ func Defaults() *Config {
 		RenameImageSimilarityThreshold: 0.95,
 		RenameAVSimilarityThreshold:    0.90,
 		RenameUseFFmpeg:                false,
+		MoveFiles:                      false,
 		Force:                          false,
 		ProcessWorkers:                 1,
 		MaxImageDimension:              1024,

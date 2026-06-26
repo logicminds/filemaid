@@ -140,6 +140,7 @@ var (
 	renameFlag    string
 	processDryRun bool
 	processForce  bool
+	processMove   bool
 	processDepth  int
 )
 
@@ -154,10 +155,23 @@ func init() {
 	processCmd.Flags().Lookup("rename").NoOptDefVal = "default"
 	processCmd.Flags().BoolVar(&processForce, "force", false, "force processing even if the file is a duplicate or similar to existing history")
 	processCmd.Flags().BoolVar(&processDryRun, "dry-run", false, "preview changes without moving files")
+	processCmd.Flags().BoolVar(&processMove, "move", false, "move files to their classified destination")
 	processCmd.Flags().IntVar(&processDepth, "depth", 0, "descend into directories N levels (0 = file-only)")
 	processCmd.Flags().Lookup("depth").NoOptDefVal = "1"
 	processCmd.Flags().BoolVar(&moveProjects, "move-projects", false, "move recognized project directories as atomic units")
 	rootCmd.AddCommand(processCmd)
+}
+
+// applyMoveFlags copies CLI flag overrides for move settings into cfg when
+// the user explicitly provided them. It keeps config-file defaults intact for
+// flags that were not set.
+func applyMoveFlags(cmd *cobra.Command) {
+	if cmd == nil {
+		return
+	}
+	if cmd.Flags().Changed("move") {
+		cfg.MoveFiles = processMove
+	}
 }
 
 // applyForceFlags copies CLI flag overrides for force settings into cfg when
@@ -208,7 +222,9 @@ var processCmd = &cobra.Command{
 	Long:  "Process one or more files: classify them with the configured LLM and apply the resulting move/tag/delete/review decision.",
 	RunE: func(cmd *cobra.Command, args []string) error {
 		applyRenameFlags(cmd)
+		applyMoveFlags(cmd)
 		applyForceFlags(cmd)
+
 		if processDepth < 0 {
 			return fmt.Errorf("--depth must be >= 0")
 		}
@@ -367,7 +383,7 @@ func formatProcessTable(results []processResult) string {
 			itemPath = "dir:" + itemPath
 		}
 		resultPath := truncatePath(collapseHome(r.Result), maxResultLen)
-		if (r.Kind == "" || r.Kind == "file") && r.Action == "move" && r.NewName != "" && filepath.Dir(r.Result) == filepath.Dir(r.Path) {
+		if (r.Kind == "" || r.Kind == "file") && (r.Action == "move" || r.Action == "classify") && r.NewName != "" && filepath.Dir(r.Result) == filepath.Dir(r.Path) {
 			resultPath = "in-place: " + resultPath
 		}
 		rows = append(rows, []string{
@@ -418,7 +434,7 @@ func formatHuman(results []processResult) string {
 		}
 		if r.Result != "" {
 			result := collapseHome(r.Result)
-			if (r.Kind == "" || r.Kind == "file") && r.Action == "move" && r.NewName != "" && filepath.Dir(r.Result) == filepath.Dir(r.Path) {
+			if (r.Kind == "" || r.Kind == "file") && (r.Action == "move" || r.Action == "classify") && r.NewName != "" && filepath.Dir(r.Result) == filepath.Dir(r.Path) {
 				result = "in-place: " + result
 			}
 			lines = append(lines, fmt.Sprintf("   Result:   %s", result))
@@ -551,13 +567,10 @@ func (s *processStreamer) writeHumanResult(r processResult, useColor bool) {
 	}
 	if r.Result != "" {
 		result := collapseHome(r.Result)
-		if r.Kind == "file" && r.Action == "move" && r.NewName != "" && filepath.Dir(r.Result) == filepath.Dir(r.Path) {
+		if r.Kind == "file" && (r.Action == "move" || r.Action == "classify") && r.NewName != "" && filepath.Dir(r.Result) == filepath.Dir(r.Path) {
 			result = "in-place: " + result
 		}
 		fmt.Fprintf(s.w, "   Result:   %s\n", result)
-	}
-	if r.Reason != "" {
-		fmt.Fprintf(s.w, "   Reason:   %s\n", r.Reason)
 	}
 	if r.Error != "" {
 		fmt.Fprintf(s.w, "%s\n", colorize(fmt.Sprintf("   Error:    %s", r.Error), colorRed, useColor))
@@ -593,7 +606,7 @@ func (s *processStreamer) writeTableResult(r processResult, useColor bool) {
 		itemPath = "dir:" + itemPath
 	}
 	resultPath := truncatePath(collapseHome(r.Result), maxResultLen)
-	if (r.Kind == "" || r.Kind == "file") && r.Action == "move" && r.NewName != "" && filepath.Dir(r.Result) == filepath.Dir(r.Path) {
+	if (r.Kind == "" || r.Kind == "file") && (r.Action == "move" || r.Action == "classify") && r.NewName != "" && filepath.Dir(r.Result) == filepath.Dir(r.Path) {
 		resultPath = "in-place: " + resultPath
 	}
 	row := []string{
@@ -694,7 +707,7 @@ func processPaths(ctx context.Context, inputs []processInput, runID string, w io
 					continue
 				}
 				decision, metrics := directoryDecisionForPath(ctx, src, in)
-				if moveProjects && decision.Action == "move" {
+				if cfg.MoveFiles && moveProjects && decision.Action == "move" {
 					results[i] = applyDirectory(src, decision, metrics, runID, dirLocks)
 					slog.Info("moved directory", "path", src, "destination", results[i].Result, "reason", decision.Reason)
 				} else {
