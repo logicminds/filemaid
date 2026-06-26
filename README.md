@@ -14,10 +14,12 @@ A local, AI-powered file organizer for macOS. It watches your `Desktop` and `Dow
 
 ## Features
 
-- **Automatic classification** — files are classified by a local LLM using filename, extension, content snippets, and image analysis.
-- **Move + tag + comment** — files are moved into `~/Documents/Archive/<category>/`, tagged with Finder tags, and the classification reason is stored in the Finder comment.
-- **Review-before-delete** — anything uncertain goes to `~/.filemaid/review/`; deletions only happen for explicitly safe patterns or duplicates.
-- **Dev cache cleanup** — scheduled cleanup for Docker, npm, cargo, pip, Homebrew, and Xcode.
+- **Automatic classification** — files are classified by a local LLM using filename, extension, content snippets, image analysis, and directory context when `--depth` is used.
+- **Tag + comment in place, move when you say so** — by default files are classified, tagged, and commented in place. Pass `--move` (or set `move_files: true`) to relocate them into categorized archive folders or send review items to `~/.filemaid/review/`.
+- **Review-before-delete** — uncertain files are flagged for review; with `--move` they go to `~/.filemaid/review/`. Deletions only happen for explicitly safe patterns or duplicates.
+- **Directory-aware deep classification** — `--depth` descends into directories, detects project markers, and classifies directories read-only with `keep|review|trash|archive` recommendations.
+- **LLM retry and review retry** — transient Ollama failures are retried automatically, and `filemaid review --retry` re-processes review-queue items that failed due to transient errors.
+- **History and undo** — `filemaid history` shows recent runs; `filemaid undo` rolls back the most recent run.
 - **Smart rename** — optionally renames files based on LLM-suggested names when the suggested name quality meets your threshold, with duplicate and near-duplicate detection.
 - **Smart Folders + Finder hub** — automatically builds a `~/Documents/Filemaid` hub with per-category Smart Folders, Archive/Review aliases, and a Finder sidebar pin.
 - **Private & offline** — no cloud services; everything runs locally via Ollama.
@@ -176,7 +178,23 @@ filemaid process --dry-run ~/Desktop/*.png
 
 # Scan with move preview
 filemaid scan --move --dry-run
+# Scan directories up to depth 2 (read-only directory recommendations)
+filemaid scan --depth=2
+
+# Process a directory tree with directory context
+filemaid process --depth=1 ~/Downloads/project-folder
+
+# Retry transient LLM failures from the review queue
+filemaid review --retry
+
+# Show the last run summary
+filemaid history --last
+
+# Undo the most recent run
+filemaid undo
+
 ```
+```zsh
 # Run cleaners in dry-run mode
 filemaid cleanup --dry-run
 
@@ -255,7 +273,7 @@ Shortcuts runs in your user session and does not require Full Disk Access.
 
 ## How Classification Works
 
-When a file is processed, filemaid sends its name, extension, size, modification time, and (for supported images and text files) a content snippet to the local Ollama model. The model returns one of the categories listed in `config.json`, along with a concise subcategory for images, suggested Finder tags, and an action (`move`, `delete`, or `review`).
+When a file is processed, filemaid sends its name, extension, size, modification time, and (for supported images and text files) a content snippet to the local Ollama model. With `--depth`, files inside descended directories also include ancestor path, depth, and detected project-marker context. The model returns one of the categories listed in `config.json`, along with a concise subcategory for images, suggested Finder tags, and an action (`move`, `delete`, or `review`).
 
 For photos, the subcategory describes the main subject or scene (for example `cat`, `dog`, `baby`, `wedding`, or `car`). For screenshots, it describes the app or context (for example `Safari`, `Terminal`, `Slack`, `browser`, or `lock-screen`). The subcategory is added as a Finder tag when `tags` is enabled.
 
@@ -320,6 +338,7 @@ The generated configuration is written to `~/.config/filemaid/config.json` and c
   "watch_dirs": ["~/Desktop", "~/Downloads"],
   "allowed_dirs": ["~/Desktop", "~/Downloads", "~/Documents/Archive", "~/.filemaid/review"],
   "allowed_cleaners": ["docker", "npm", "cargo", "pip", "brew", "xcode", "review"],
+  "project_markers": [".git", "node_modules", ".venv", "vendor", ".terraform", "build"],
   "review_dir": "~/.filemaid/review",
   "log_path": "~/.local/share/filemaid/filemaid.log",
   "db_path": "~/.local/share/filemaid/filemaid.db",
@@ -329,7 +348,9 @@ The generated configuration is written to `~/.config/filemaid/config.json` and c
   "smart_folders": true,
   "smart_folders_dir": "~/Documents/Filemaid",
   "min_age_hours": 0,
-  "request_timeout": "120s",
+  "request_timeout": "5m",
+  "llm_retry_attempts": 2,
+  "llm_retry_base_delay": "2s",
   "categories": {
     "Screenshots": "~/Documents/Archive/Screenshots",
     "Documents": "~/Documents/Archive/Documents",
@@ -372,7 +393,7 @@ The generated configuration is written to `~/.config/filemaid/config.json` and c
   "external_tools": {
     "ffmpeg": "ffmpeg"
   },
-  "process_workers": 4,
+  "process_workers": 1,
   "max_image_dimension": 1024
 }
 ```
@@ -398,6 +419,9 @@ The generated configuration is written to `~/.config/filemaid/config.json` and c
 | `smart_folders_dir` | Directory for the Filemaid hub. |
 | `min_age_hours` | Minimum file age before processing (0 = process immediately). |
 | `request_timeout` | Per-request timeout for Ollama calls (e.g. `120s`, `2m`). |
+| `llm_retry_attempts` | How many times to retry transient Ollama failures before giving up. |
+| `llm_retry_base_delay` | Base delay between retries; backoff doubles each attempt (e.g. `2s`). |
+| `project_markers` | Directory names that identify a project root when scanning with `--depth`. User values are added to the built-in defaults. |
 | `categories` | Destination folders for each classification. The model may only return categories defined here. |
 | `move_files` | When `true`, `process`/`scan` move files to their classified category. Defaults to `false`; use `--move` to enable per-run. |
 | `safe_delete_patterns` | Glob patterns for files allowed to be deleted without review. |
@@ -412,6 +436,8 @@ The generated configuration is written to `~/.config/filemaid/config.json` and c
 | `rename_image_similarity_threshold` | Perceptual-hash similarity (0-1) above which images are sent to review. |
 | `rename_av_similarity_threshold` | Audio/video similarity (0-1) above which files are sent to review. |
 | `rename_use_ffmpeg` | Enable ffmpeg-based audio/video fingerprinting. Slow for large libraries; requires ffmpeg on PATH. |
+| `max_dir_sample_entries` | Maximum child entries sampled when gathering directory metadata for `--depth` classification. |
+| `max_dir_sample_bytes` | Maximum bytes read from sampled directory children for `--depth` classification. |
 | `external_tools` | Paths to optional tools (`ffmpeg`). |
 | `process_workers` | Concurrency for classification/hashing/apply (minimum 1). |
 | `max_image_dimension` | Largest dimension for image payloads sent to the vision model (minimum 64). |
@@ -489,12 +515,18 @@ filemaid process <paths>
        -> internal/hub.Build()     → Smart Folders, aliases, sidebar pin
 ```
 
-- `internal/cli/` — Cobra root command and subcommands (`process`, `scan`, `cleanup`, `review`, `history`, `logs`, `config`, `setup`, `smart-folders`, `uninstall`).
+With `--depth`, directories are summarized and classified read-only via
+`internal/directory.Gather` and `internal/llm.ClassifyDirectory` → `DirectoryDecision`.
+`filemaid undo` rolls back the most recent run using `internal/state` history records.
+
+- `internal/cli/` — Cobra root command and subcommands (`process`, `scan`, `cleanup`, `review`, `history`, `undo`, `logs`, `config`, `setup`, `smart-folders`, `uninstall`).
 - `internal/llm/` — Ollama classifier and `Decision` value object.
-- `internal/actions/` — Applies decisions: whitelist, moves, tags, trash, review.
+- `internal/actions/` — Applies decisions: whitelist, duplicates, rename, moves, tags, trash, review.
 - `internal/state/` — SQLite history, duplicate detection, and cached decisions.
 - `internal/config/` — Config loading with defaults and `~` expansion.
 - `internal/smartfolder/` — macOS `.savedSearch` (Smart Folder) generation.
+- `internal/directory/` — Bounded directory metadata gathering and project-marker detection for `--depth`.
+- `internal/fingerprint/` — Perceptual-image and audio/video fingerprinting for duplicate detection.
 - `internal/hub/` — Builds the Filemaid hub: Smart Folders, archive/review aliases, and Finder sidebar pin.
 - `internal/cleaners/` — Plugin registry for dev-artifact cleanup.
 - `internal/setup/` — Installation and uninstallation of binary, config, and launchd agents.
@@ -617,7 +649,7 @@ make coverage # go test -coverprofile=coverage.out ./...
 
 CI enforces:
 
-- `go test ./...` passes on Go 1.23 and 1.24.
+- `go test ./...` passes on Go 1.25 and 1.26.4.
 - Overall test coverage stays above 80%.
 - `go vet ./...` and `gofmt -l .` are clean.
 - JSON configs and generated launchd plists are valid.

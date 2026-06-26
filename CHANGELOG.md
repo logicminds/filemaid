@@ -4,6 +4,8 @@ All notable changes to filemaid are documented in this file.
 
 ## Unreleased
 
+## [0.6.0]
+
 ### Added
 
 - **LLM retry with exponential backoff** — transient Ollama errors (`context deadline exceeded`, connection failures, model loading, EOF) are now retried up to `llm_retry_attempts` times with `llm_retry_base_delay` exponential backoff. Configurable in `~/.config/filemaid/config.json`.
@@ -113,8 +115,9 @@ All notable changes to filemaid are documented in this file.
 
 - Initial Go rewrite of filemaid.
 - Local Ollama classification, file moves, Finder tags, review queue, and dev-cache cleaners.
-[0.5.0]: https://github.com/logicminds/filemaid/releases/tag/v0.5.0
+[0.6.0]: https://github.com/logicminds/filemaid/releases/tag/v0.6.0
 [0.5.1]: https://github.com/logicminds/filemaid/releases/tag/v0.5.1
+[0.5.0]: https://github.com/logicminds/filemaid/releases/tag/v0.5.0
 [0.4.0]: https://github.com/logicminds/filemaid/releases/tag/v0.4.0
 [0.3.0]: https://github.com/logicminds/filemaid/releases/tag/v0.3.0
 [0.2.0]: https://github.com/logicminds/filemaid/releases/tag/v0.2.0
